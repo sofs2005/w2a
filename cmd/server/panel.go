@@ -73,6 +73,7 @@ func trimSlash(next http.Handler) http.Handler {
 // 面板的 "/" 兜底，上游 handler.go 一行都不用改）：
 //
 //	/v1/       → 网关（OpenAI 兼容）
+//	/admin/    → 网关（运维端点：账号停用/恢复/复活）
 //	/status    → 网关（账号池状态）
 //	/healthz   → 网关（探活）
 //	/          → 面板（/api/* REST + /assets/* 静态 + SPA 回落）
@@ -98,6 +99,14 @@ func newRootHandler(cfg *Config, cfgPath string, gwHandler http.Handler) (http.H
 
 	root := http.NewServeMux()
 	root.Handle("/v1/", gwHandler)
+	// /admin/ 必须显式路由给网关。漏掉它时请求会落到下面的面板 "/" 兜底，而面板的
+	// SPA 回落把未知路径一律返回 200 + index.html —— 于是运维端点表现为「返回一坨
+	// HTML 且状态码 200」，cmd/acct 与面板的停用/恢复按钮全部静默失效（曾实测：
+	// POST /admin/accounts/<uid>/disable 得到的是控制台首页 HTML）。
+	// 网关侧按 cfg.AdminEnabled 条件注册，未开启时自身回 404——这里的转发是无条件的，
+	// 门禁留在网关，避免两处开关判断漂移。面板不使用 /admin 命名空间（已核对），
+	// 故不存在抢路由。
+	root.Handle("/admin/", gwHandler)
 	root.Handle("/status", gwHandler)
 	root.Handle("/status/", trimSlash(gwHandler))
 	root.Handle("/healthz", gwHandler)
