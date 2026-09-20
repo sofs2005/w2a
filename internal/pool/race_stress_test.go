@@ -30,9 +30,11 @@ func TestCooldownAccountingConcurrent(t *testing.T) {
 		p.SetCredits(uid, 1000)
 	}
 	reset := func(v time.Duration) {
-		old := flushInterval
-		flushInterval = v
-		t.Cleanup(func() { flushInterval = old })
+		// 必须走 SetFlushInterval：本测试在 New 之后才设周期，而 flusher 的 ticker
+		// 已在 New 期按当时的周期创建——直接改包级 flushInterval 对已启动的 ticker
+		// 无效，测试会静默退化成「无并发 flusher」（本意是让 flusher 与记账交错）。
+		p.SetFlushInterval(v)
+		t.Cleanup(func() { p.SetFlushInterval(flushInterval) })
 	}
 	reset(time.Millisecond) // 高频 tick：让 flusher 与记账充分交错
 

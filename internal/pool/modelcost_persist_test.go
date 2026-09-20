@@ -224,9 +224,11 @@ func TestModelCostConcurrentWriteAndFlush(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		p.Add(&auth.Auth{UID: "u" + string(rune('0'+i))})
 	}
-	old := flushInterval
-	flushInterval = time.Millisecond
-	t.Cleanup(func() { flushInterval = old })
+	// 必须走 SetFlushInterval：本测试在 New 之后才设周期，而 flusher 的 ticker 已在
+	// New 期按当时的周期创建——直接改包级 flushInterval 对已启动的 ticker 无效，
+	// 测试会静默退化成「无并发 flusher」（本意是让 flusher 与写入口交错）。
+	p.SetFlushInterval(time.Millisecond)
+	t.Cleanup(func() { p.SetFlushInterval(flushInterval) })
 
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {

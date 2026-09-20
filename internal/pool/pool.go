@@ -70,6 +70,12 @@ type Pool struct {
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
+	// flushInterval 本池的落盘周期（New 取包级默认，SetFlushInterval 可覆盖）。
+	// <= 0 = 关闭后台落盘（仅靠退出时 Flush / 显式 Flush）。读取恒在 p.mu 下。
+	flushInterval time.Duration
+	// flushTicker 后台 flusher 的 ticker 引用，供 SetFlushInterval 用 Reset 即时生效。
+	// nil = 未启动 flusher（stateFp 为空）。由 startFlusher 在 New 期同步赋值。
+	flushTicker *time.Ticker
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
@@ -88,7 +94,10 @@ func New(stateFp string) *Pool {
 		// 探索缺省 30m：tier 0 垄断下的 tier 1 探索窗口（issue #136）。用户经
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
-		exploreLast:         map[string]time.Time{},
+		// 落盘周期取包级默认（30m）；main 经 SetFlushInterval 注入 config 值。
+		// 测试直接改包级 flushInterval（须在 New 之前，见 startFlusher 注释）。
+		flushInterval: flushInterval,
+		exploreLast:   map[string]time.Time{},
 	}
 	if stateFp != "" {
 		p.load()
@@ -133,6 +142,30 @@ func (p *Pool) SetCostExploreInterval(d time.Duration) {
 		return // 负值非法，保留现值
 	}
 	p.costExploreInterval = d
+}
+
+// SetFlushInterval 注入后台落盘周期（main 从 config 解析后调用）。
+//
+// 语义与 SetCostExploreInterval 对齐：0 是**合法值**（关闭后台落盘，仅靠退出时
+// Flush），负值非法保留现值。ticker 已启动时经 Reset 即时生效（Go 1.15+ 并发安全）。
+//
+// 为什么需要「0 = 关闭」：把落盘完全交给显式 Flush（退出路径 + 结构性变更），
+// 适合只读/调试部署；否则 0 会被 Ticker.Reset(0) 解释成「持续触发」，与语义相反。
+func (p *Pool) SetFlushInterval(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d < 0 {
+		return // 负值非法，保留现值
+	}
+	p.flushInterval = d
+	if p.flushTicker == nil {
+		return // 未启动 flusher（stateFp 为空）：字段已存，供后续启动时取值
+	}
+	if d == 0 {
+		p.flushTicker.Stop() // 关闭后台落盘：停 ticker，Close/Flush 仍可用
+		return
+	}
+	p.flushTicker.Reset(d)
 }
 
 // CostExploreStatus 透出探索台账（/status 用）：累计探索事件数 + 各 (域, 模型)

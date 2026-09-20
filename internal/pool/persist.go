@@ -14,11 +14,19 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-var flushInterval = 5 * time.Second
+// flushInterval 落盘周期的**包级默认值**（30 分钟）。生产经 SetFlushInterval 注入
+// config 的 pool.state_flush；本 var 保留供测试在 New 之前覆盖（TestAutoFlush 等）。
+//
+// 为什么是 30m 而非 5s：state.json 里绝大多数字段是高频运行态（余额扣减估算、成功/
+// 错误计数、冷却截止），秒级落盘对运维无增量价值，却让磁盘每 5 秒被整份重写一次。
+// 结构性变更（手动停用）不经本周期、直接落盘（见 setManualDisabledLocked），
+// 崩溃窗口的代价已在 config 注释里向用户说明。
+var flushInterval = 30 * time.Minute
 
-// persistLogEvery 连续落盘失败每 N 次打一条提醒（flusher 5s 一把 ≈ 1 分钟一次），
-// 避免磁盘持续满/权限丢失时日志刷屏。
-const persistLogEvery = 100
+// persistLogEvery 连续落盘失败每 N 次打一条提醒，避免磁盘持续满/权限丢失时刷屏。
+// 按默认周期 30m 计 ≈ 每 5 小时复报一次（原 5s 周期下是 ≈1 分钟）。
+// 用 flusher 周期校准：周期越短，复报越密，节流意图（"别刷屏"）不变。
+const persistLogEvery = 10
 
 // snapshot 池状态快照（Redis 镜像用）。与本地 state.json 同源（stateFile），
 // 额外带 savedAt 时间戳供"择新恢复"（比较本地与 Redis 快照的新旧）。
@@ -87,11 +95,21 @@ func (p *Pool) RestoreFromSnapshot() {
 // startFlusher 启动后台周期落盘 goroutine（每 flushInterval 检查 dirty 标志）。
 // goroutine 在 p.Close 关闭 stopCh 时退出；此前若无人 Close，goroutine 会持续运行
 // （issue:goroutine 泄漏——New 每调一次泄漏一个，且无停止机制）。
+//
+// 周期取自 p.flushInterval（New 时由包级 flushInterval 初始化）——测试若要在 New 之后
+// 改变周期，请用 SetFlushInterval（经 ticker Reset 即时生效）；直接改包级 var 对**已
+// 启动**的 flusher 无效（值在 New 期已捕获）。
+//
+// ticker 在**本函数内同步创建**并回填 p.flushTicker，不放进 goroutine：否则 New 返回
+// 与 goroutine 首次调度之间存在窗口，SetFlushInterval 在那窗口内会因 flushTicker==nil
+// 而静默跳过 Reset，配置的非默认周期失效（表现为「改了 state_flush 但仍按 30m 落盘」）。
 func (p *Pool) startFlusher() {
-	interval := flushInterval // 在启动 goroutine 前同步读取，避免与测试对 flushInterval 的恢复写竞争
 	p.stopCh = make(chan struct{})
+	p.mu.Lock()
+	t := time.NewTicker(p.flushInterval)
+	p.flushTicker = t
+	p.mu.Unlock()
 	go func() {
-		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
@@ -336,7 +354,8 @@ func persistFailDiag(stateFp string) string {
 
 // cooledReasonLocked 对非 disabled 账号，若 until 已过期/零值，清空 coolKind/reason
 // （惰性清理僵尸 reason）。disabled 账号的 reason 是禁用原因，照常保留。落盘（stateOverviewLocked）
-// 与 status（statusOf）共用本判断，避免两条路径口径不一致导致 reason 残留（最多 5s 落盘窗口）。
+// 与 status（statusOf）共用本判断，避免两条路径口径不一致导致 reason 残留（最多一个
+// 落盘周期，默认 30m）。
 func cooledReasonLocked(e *entry, now time.Time) (coolKind CoolKind, reason string) {
 	if e.disabled || (!e.until.IsZero() && now.Before(e.until)) {
 		return e.coolKind, e.reason

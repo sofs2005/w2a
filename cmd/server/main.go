@@ -85,6 +85,7 @@ func main() {
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	p.SetFlushInterval(cfg.StateFlushDur)                // 池状态落盘周期（pool.state_flush，默认 30m；0 = 关闭后台落盘）
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -223,6 +224,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+
+	// 启动余额刷新：让 state.json 的 credits 从进程第一秒就是权威值，而非上次签到
+	// 的陈旧快照（面板不点「积分」时读的就是它）。异步独立 goroutine：上游慢/不可达
+	// 绝不能阻塞网关对外服务。用同一个 ctx，SIGTERM 时放弃剩余账号。
+	//
+	// 末尾显式 Flush 是必需的：SetCreditsDetailed 只置 dirty，而落盘周期现在是
+	// 30 分钟（pool.state_flush）——不显式落盘就等于本功能没有生效。
+	go func() {
+		sch.RefreshCreditsOnce(ctx)
+		p.Flush()
+	}()
 
 	// 账号目录热加载：替代「重启网关容器」加载新账号（见 reload.go）。
 	// 面板扫码落盘后数秒自动进池，无需重启、零停机，也不必挂 docker.sock。

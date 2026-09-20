@@ -88,5 +88,11 @@ func (p *Pool) setManualDisabledLocked(e *entry, disabled bool, reason string) {
 	} else {
 		e.manualReason = ""
 	}
-	p.dirty.Store(true)
+	// 立即落盘而非置 dirty：手动停用是**运维意图**，而本功能的全部意义就是
+	// 「重启保留运维意图」（issue #138/#118）——置 dirty 会让「停用后未及落盘
+	// 即重启/强杀」丢失意图，账号自己回到选号池。低频运维操作，同步写盘的开销
+	// 可忽略；与 SyncToDir 剔除账号的直接落盘（pool.go 的 if changed）同口径。
+	// 其余置 dirty 点（余额扣减/计数/冷却）仍在请求热路径上走周期落盘：它们丢失
+	// 的代价是自愈的（签到覆盖 / 重撞一次限流 / 重学一次退避）。
+	p.saveLocked()
 }

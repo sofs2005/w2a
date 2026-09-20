@@ -700,3 +700,82 @@ func (s *Scheduler) RunKeepaliveNow() {
 		}
 	}
 }
+
+// creditsRefreshDelay 启动余额刷新的账号间限速：避免对上游造成瞬时压力
+// （与 checkinAccountDelay 同口径；54 个账号约 11 秒）。测试可置 0。
+var creditsRefreshDelay = 200 * time.Millisecond
+
+// RefreshCreditsOnce 启动时刷新一遍全量账号余额（**只查余额，不签到**）。
+//
+// 为什么需要：池的 credits 只在签到时刷新（默认 9/21 点），网关启动时不查余额，
+// 于是重启后面板回落到 /status 的 credits 时，看到的是「上次签到值 − 之后的消耗
+// 估算」——一个不知道多久以前的数字（credits 字段没有时间戳）。本方法在启动时补
+// 一次权威查询，配合调用方的显式落盘，让 state.json 里的 credits 从进程第一秒
+// 就是新鲜的。
+//
+// 与 CheckinAll 的差异：
+//   - **不调 DailyCheckin**：那是签到动作，有上游副作用，重启不该触发；本方法只做
+//     「按需刷新 token → 查余额」这一读路径。这是本方法不能复用 CheckinAll 的原因。
+//   - **不跳过 global 账号**：global 域不参与签到体系（CheckinAll 的 D4 门控），
+//     其 credits 否则终身冻结在 state.json 里。余额查询是只读 billing 调用，
+//     面板手动查积分时已在对 global 做同样的事；仓库内也有同样的取舍先例——
+//     runActivity 有意包含 global 账号（其注释记录了 PR #45 的实测依据）。
+//     realm 路由由 upstream 的 billingMeterPaths 按账号自动切分，此处无需分支。
+//
+// 门控（照 CheckinAll）：禁用账号跳过、无凭证跳过、token 真过期（刷新失败且
+// NeedsRefresh(0)）跳过。单账号失败只记日志，不中断遍历；ctx 取消立即放弃剩余账号。
+//
+// 与签到互斥（checkinMu）：若进程恰在整点签到时刻前启动，两轮会同时对同一批账号
+// 打上游（双倍调用）。这里用 **Lock 而非 TryLock**——本方法跑在启动期的后台
+// goroutine 里，等待没有代价（不阻塞网关对外服务），而 TryLock 撞车时会整轮跳过，
+// 让**只有本方法覆盖的 global 账号**错过刷新（CheckinAll 跳过 global），
+// 恰好退回本方法要修的那个问题。等待期间 ctx 取消由 Lock 后的 sleepCtx 承接。
+func (s *Scheduler) RefreshCreditsOnce(ctx context.Context) {
+	s.checkinMu.Lock()
+	defer s.checkinMu.Unlock()
+	statuses := s.cfg.Pool.List()
+	var okN, failN, skipN int
+	for i, st := range statuses {
+		if i > 0 && !sleepCtx(ctx, creditsRefreshDelay) {
+			log.Printf("启动余额刷新被取消（已完成 %d/%d）", i, len(statuses))
+			return
+		}
+		if st.Disabled {
+			skipN++
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshTokenValue() == "" {
+			skipN++
+			continue
+		}
+		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则查余额
+		// 必然 401 白跑。刷新失败不致命：token 若仍有效，继续照常查询。
+		if a.NeedsRefresh(checkinRefreshSkew) {
+			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+				log.Printf("startup credits %s refresh: %v", logfmt.Label(st.UID, st.Nickname), err)
+				if a.NeedsRefresh(0) {
+					failN++
+					continue
+				}
+			} else {
+				a.BackfillRealm() // 老 auth 空 realm → 落盘前补标识（幂等：已有不动）
+				if err := a.SaveAtomic(); err != nil {
+					// 刷新成功但落盘失败：重启会用旧 token，必须暴露。
+					log.Printf("startup credits %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
+				}
+			}
+		}
+		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
+		if err != nil {
+			log.Printf("startup credits %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			failN++
+			continue
+		}
+		// 与签到同口径：SetCreditsDetailed 一并更新快过架子集（选号权重因子）。
+		// creditsExpiring 会被钳到 [0, credits]，上游分桶异常不污染权重。
+		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		okN++
+	}
+	log.Printf("启动余额刷新完成：成功 %d，失败 %d，跳过 %d", okN, failN, skipN)
+}

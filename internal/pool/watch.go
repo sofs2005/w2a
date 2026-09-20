@@ -25,8 +25,12 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// watchInterval 目录轮询周期。5s 与池状态落盘周期（flushInterval）同量级：
-// 加账号是低频人工操作，5s 内生效足够；更短只是徒增 IO。
+// watchInterval 目录轮询周期。5s 是「加账号多久生效」的延迟：加账号是低频人工操作，
+// 5s 内生效足够；更短只是徒增 IO。
+//
+// 与池状态落盘周期（flushInterval，默认 30m）**不再同量级**——二者本就不必对齐：
+// 本周期只影响新凭证入池的快慢（纯目录 stat 开销），落盘周期只影响 state.json 的
+// 写盘频率。此前注释把两者绑在一起，落盘降频后该关联已不成立。
 var watchInterval = 5 * time.Second
 
 // StartAuthDirWatch 启动 auths 目录监听，返回停止函数（幂等，可重复调用）。

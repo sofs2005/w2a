@@ -139,6 +139,17 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// StateFlush 池状态（state.json）后台落盘周期，如 "30m"。
+		//
+		// 余额扣减估算/成功错误计数/冷却截止这类**高频运行态**攒到周期末统一落盘；
+		// **结构性变更**（手动停用、账号剔除）绕过本周期立即落盘——运维意图不等
+		// 落盘窗口。默认 "30m"；空值回落默认；"0" = 关闭后台落盘（仅靠退出时 Flush，
+		// 适合只读/调试部署）；负值钳 0。
+		//
+		// ⚠️ 本周期即「进程被强杀（SIGKILL / Windows taskkill /F / 容器 OOM）时的
+		// 状态丢失窗口」。Docker 下 docker stop 走 SIGTERM 优雅停机，不受影响；
+		// Windows 原生部署的 stop-workbuddy2api.cmd 用 taskkill /F，不触发信号处理。
+		StateFlush string `json:"state_flush"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -159,6 +170,8 @@ type Config struct {
 	ExpiringSoonDur     time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// StateFlushDur 解析后的池状态落盘周期（pool.state_flush）；0 = 关闭后台落盘。
+	StateFlushDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -207,6 +220,8 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 池状态落盘周期默认 30m：高频运行态攒批落盘，结构性变更绕过本周期立即落盘。
+	c.Pool.StateFlush = "30m"
 	return c
 }
 
@@ -300,6 +315,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_STATE_FLUSH"); v != "" {
+		c.Pool.StateFlush = v
+	}
 	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Admin.Enabled = b
@@ -381,6 +399,17 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 池状态落盘周期：空值回落默认 30m（Default 已置；此兜底覆盖显式 ""）；
+	// "0" 是合法值（关闭后台落盘，仅靠退出时 Flush），不回落；负值钳 0 同关闭。
+	if c.Pool.StateFlush == "" {
+		c.Pool.StateFlush = "30m"
+	}
+	if c.StateFlushDur, err = time.ParseDuration(c.Pool.StateFlush); err != nil {
+		return fmt.Errorf("pool.state_flush: %w", err)
+	}
+	if c.StateFlushDur < 0 {
+		c.StateFlushDur = 0
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120

@@ -172,7 +172,7 @@ func TestManualDisabledPreservesCoolingDimensions(t *testing.T) {
 }
 
 // TestManualDisabledPersists 手动停用落盘持久化——重启保留运维意图
-// （这正是该功能要解决的痛点：旧权宜做法改 state.json 会被 5s flush 覆盖）。
+// （这正是该功能要解决的痛点：旧权宜做法直接改 state.json 会被后台落盘覆盖）。
 func TestManualDisabledPersists(t *testing.T) {
 	dir := t.TempDir()
 	state := dir + "/state.json"

@@ -349,8 +349,10 @@ type stateAccount struct {
 	Disabled     bool      `json:"disabled"`
 	Reason       string    `json:"reason,omitempty"`
 	// ManualDisabled 运维手动停用（issue #138/#118）。持久化——重启保留运维意图，
-	// 这也正是该功能要解决的痛点之一（旧权宜做法改 state.json 会被 5s flush 覆盖，
-	// 入口化后无需再碰文件）。零值也显式写出（运维口径，同 err_total 注释）。
+	// 这也正是该功能要解决的痛点之一（旧权宜做法直接改 state.json 会被后台落盘覆盖，
+	// 入口化后无需再碰文件）。**本字段不走落盘周期，置位即落盘**（见
+	// setManualDisabledLocked）——否则「停用后未及落盘即重启」会丢失运维意图。
+	// 零值也显式写出（运维口径，同 err_total 注释）。
 	ManualDisabled bool   `json:"manual_disabled"`
 	ManualReason   string `json:"manual_reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
