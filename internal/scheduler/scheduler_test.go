@@ -750,3 +750,76 @@ func TestCheckinPathIncludesManualDisabled(t *testing.T) {
 		t.Fatalf("签到后应保留手动位且回填余额: %+v", st)
 	}
 }
+
+// TestCheckinLogsSkipBreakdown 签到汇总行须给出跳过原因构成。
+//
+// 背景：原汇总只有 skipped=N，无法区分「禁用 / 无凭证 / global 门控」。
+// 生产上 6 号（4 cn + 2 global）打出 skipped=2 时，排查者只能靠「恰好 2 个
+// global」反推——正是「签到好像没在运行」卡住的观测盲区。
+func TestCheckinLogsSkipBreakdown(t *testing.T) {
+	stub := &checkinStub{checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	// 各一类跳过：禁用 / 无凭证 / global（domain 落在 workbuddy.ai 家族）。
+	p.Add(&auth.Auth{UID: "dis", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Add(&auth.Auth{UID: "notoken", ExpiresAt: 9999999999})
+	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
+		ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"})
+	p.Add(&auth.Auth{UID: "ok", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	p.Disable("dis", "test")
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL,
+		GlobalEnabled: true}
+	s := New(Config{Pool: p, Upstream: up})
+
+	logs := captureLog(t)
+	if _, err := s.CheckinAll(); err != nil {
+		t.Fatalf("CheckinAll: %v", err)
+	}
+	out := logs()
+
+	if !strings.Contains(out, "checkin skipped breakdown:") {
+		t.Errorf("有跳过时应打原因构成，实际日志:\n%s", out)
+	}
+	for _, want := range []string{"disabled=1", "no_credentials=1", "global=1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("构成应含 %s，实际日志:\n%s", want, out)
+		}
+	}
+	// 逐账号的 global 跳过也要留痕（原为静默）。
+	if !strings.Contains(out, "skip (global realm)") {
+		t.Errorf("global 账号逐条跳过应留日志，实际日志:\n%s", out)
+	}
+}
+
+// TestCheckinNoBreakdownWhenNothingSkipped 无跳过时不打构成行（避免噪音）。
+func TestCheckinNoBreakdownWhenNothingSkipped(t *testing.T) {
+	s, _ := newCheckinS(t, &checkinStub{
+		checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100})
+
+	logs := captureLog(t)
+	if _, err := s.CheckinAll(); err != nil {
+		t.Fatalf("CheckinAll: %v", err)
+	}
+	if out := logs(); strings.Contains(out, "checkin skipped breakdown:") {
+		t.Errorf("无跳过时不应打构成行，实际日志:\n%s", out)
+	}
+}
+
+// TestCheckinSummaryLinePrefixStable 汇总行前缀保持逐字不变。
+//
+// 运维已按 "checkin done: total=" 建立日志检索习惯（生产 grep 实证），
+// 追加构成只能另起一行，不得改动既有前缀。
+func TestCheckinSummaryLinePrefixStable(t *testing.T) {
+	s, _ := newCheckinS(t, &checkinStub{
+		checkinBody: `{"code":0,"msg":"ok","data":{}}`, resourceRemain: 100})
+
+	logs := captureLog(t)
+	if _, err := s.CheckinAll(); err != nil {
+		t.Fatalf("CheckinAll: %v", err)
+	}
+	out := logs()
+	if !strings.Contains(out, "checkin done: total=1 ok=1 already=0 fail=0 skipped=0") {
+		t.Errorf("汇总行前缀/字段序应保持不变，实际日志:\n%s", out)
+	}
+}

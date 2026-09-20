@@ -1,12 +1,15 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -490,5 +493,113 @@ func TestTravelDayAlignsCST(t *testing.T) {
 		if got := travelDay(c.in); got != c.want {
 			t.Errorf("%s: travelDay=%s want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// captureLog 捕获测试期间的标准日志输出，返回读取函数。
+// 用于断言「可观测性」行为：跳过原因必须真的落到日志里，否则测试无法
+// 证明排查者能在日志中区分「没跑」与「跑了但全跳过」。
+func captureLog(t *testing.T) func() string {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&lockedWriter{mu: &mu, w: &buf})
+	t.Cleanup(func() { log.SetOutput(old) })
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+}
+
+// lockedWriter 串行化并发 goroutine 对 buffer 的写入（-race 下需要）。
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// TestRunTravelLogsSummaryPerRun 每趟旅行收尾必须打一行汇总。
+//
+// 背景：此方法原只有逐账号日志、没有整体收尾，于是「一趟跑完但每号都 skip」
+// 与「这趟根本没跑」在日志里同样表现为「没有 depart ok」——正是
+// 「旅行好像没在运行」的观测盲区。汇总行 accounts=N 是「跑过」的铁证。
+func TestRunTravelLogsSummaryPerRun(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: `{"id":7,"name":"档案喵"}`,
+		state: `{"state":"traveling","record_id":123}`}
+	srv := stub.server()
+	defer srv.Close()
+
+	logs := captureLog(t)
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+
+	out := logs()
+	if !strings.Contains(out, "travel done:") {
+		t.Errorf("每趟旅行应打汇总行，实际日志:\n%s", out)
+	}
+	// 在途账号：跑了但无动作 → 汇总必须体现为 skip=1，而非「没有日志」。
+	if !strings.Contains(out, "depart=0") || !strings.Contains(out, "skip=1") {
+		t.Errorf("汇总行应体现 skip=1 depart=0，实际日志:\n%s", out)
+	}
+}
+
+// TestRunTravelLogsGlobalSkip global 账号的 D4 门控跳过必须留痕。
+// 此前完全静默，导致「2 个 global 被跳过」只能靠账号数反推。
+func TestRunTravelLogsGlobalSkip(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	// global 账号：domain 落在 workbuddy.ai 家族 → Realm()=global → D4 门控跳过。
+	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt",
+		ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL,
+		GlobalEnabled: true}
+	s := New(Config{Pool: p, Upstream: up, TravelHours: []int{9, 21}})
+
+	logs := captureLog(t)
+	s.RunTravelNow()
+
+	if n := stub.infoCalls.Load(); n != 0 {
+		t.Errorf("global 账号 buddy/info calls=%d want 0（D4 门控不发起上游调用）", n)
+	}
+	out := logs()
+	if !strings.Contains(out, "skip (global realm)") {
+		t.Errorf("global 跳过应留日志（原为完全静默），实际日志:\n%s", out)
+	}
+	// global 账号不参与旅行，seen=0 时无需汇总行。
+	if strings.Contains(out, "travel done:") {
+		t.Errorf("无参与账号时不应打汇总行，实际日志:\n%s", out)
+	}
+}
+
+// TestRunTravelActCounters 汇总行须区分 depart/claim/adopt 三种动作。
+// 领养成功（+300）此前会被笼统计入 skip，掩盖真实动作。
+func TestRunTravelActCounters(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null"}
+	srv := stub.server()
+	defer srv.Close()
+
+	logs := captureLog(t)
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+
+	out := logs()
+	if !strings.Contains(out, "adopt=1") {
+		t.Errorf("无猫账号领养成功应计入 adopt=1，实际日志:\n%s", out)
+	}
+	if !strings.Contains(out, "skip=0") {
+		t.Errorf("领养成功不应计为 skip，实际日志:\n%s", out)
 	}
 }

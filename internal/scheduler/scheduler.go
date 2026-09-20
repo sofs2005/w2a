@@ -310,11 +310,16 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failN, skipN int
+	// 跳过原因分项计数：汇总行同时给出构成，避免 skipped=N 时无法判断
+	// 「是禁用/无凭证」还是「global 门控」——后者是 D4 的正常语义，前者才要处理。
+	var skipDisabledN, skipNoCredN, skipGlobalN int
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
 			oc.Status, oc.Detail = CheckinSkipped, "disabled"
 			skipN++
+			skipDisabledN++
+			log.Printf("checkin %s: skip (disabled)", logfmt.Label(st.UID, st.Nickname))
 			out = append(out, oc)
 			continue
 		}
@@ -322,6 +327,8 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		if a == nil || a.RefreshTokenValue() == "" {
 			oc.Status, oc.Detail = CheckinSkipped, "no credentials"
 			skipN++
+			skipNoCredN++
+			log.Printf("checkin %s: skip (no credentials)", logfmt.Label(st.UID, st.Nickname))
 			out = append(out, oc)
 			continue
 		}
@@ -331,6 +338,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		if a.IsGlobal() {
 			oc.Status, oc.Detail = CheckinSkipped, "global"
 			skipN++
+			skipGlobalN++
+			// 逐账号打点：汇总行的 skipped=N 只报数量，无法区分「禁用/无凭证/global 门控」，
+			// 排查「签到是不是没跑」时只能靠账号数反推（travel.go 同口径补日志）。
+			log.Printf("checkin %s: skip (global realm)", logfmt.Label(st.UID, st.Nickname))
 			out = append(out, oc)
 			continue
 		}
@@ -398,8 +409,14 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		}
 		out = append(out, oc)
 	}
+	// 汇总行保持原有前缀逐字不变（既有 grep / 日志检索习惯不受影响），
+	// 仅在其后追加跳过原因构成：skipped=2 时能立刻看出是 global 门控还是别的。
 	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
 		len(statuses), okN, alreadyN, failN, skipN)
+	if skipN > 0 {
+		log.Printf("checkin skipped breakdown: disabled=%d no_credentials=%d global=%d",
+			skipDisabledN, skipNoCredN, skipGlobalN)
+	}
 	return out, nil
 }
 
