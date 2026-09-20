@@ -13,13 +13,28 @@ import (
 // expiring_test.go:TestSetCreditsLeavesExpiringUnchanged 锚定。
 // DeptestOnly: 全库仅测试引用（pool 的 cost/expiring/inflight_global/race_stress/
 // bench 与 server 的 handler_test 等）；生产写余额全走 SetCreditsDetailed
-// （scheduler.go 签到时调用），本入口无生产调用方。保留是因为它是「总量更新」
-// 与「总量+分桶更新」的语义对照锚点（删掉则 expiring 的向后兼容行为失去断言）。
+// （scheduler.go 签到与启动刷新时调用），本入口无生产调用方。保留是因为它是
+// 「总量更新」与「总量+分桶更新」的语义对照锚点（删掉则 expiring 的向后兼容
+// 行为失去断言）。
+//
+// 但**钳制不能省**：creditsExpiring 被钳到 [0, credits]。这不是「分桶更新」，
+// 而是维护「expiring 是 credits 的子集」这条不变量——它有三处守卫
+// （applyAccountsLocked 加载、SetCreditsDetailed 写入、本入口），缺一处就会漏。
+// 漏掉的后果是真实的：weightOf 里 expiring/credits 是无保护的比值项
+// （pick.go），比值 >1 会把 ×expiringWeight 的加成放大到远超设计上限，
+// 让该账号被异常频繁地选中。场景：签到留下 expiring>0 后，权威余额因上游侧
+// 消耗而降到 expiring 之下，此时经本入口回写一个更小的总量即触发。
 func (p *Pool) SetCredits(uid string, credits int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		if credits < 0 {
+			credits = 0 // 负余额无意义（与 SetCreditsDetailed/加载侧同口径）
+		}
 		e.credits = credits
+		if e.creditsExpiring > credits {
+			e.creditsExpiring = credits
+		}
 		p.dirty.Store(true)
 	}
 }

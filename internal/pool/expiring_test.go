@@ -69,3 +69,40 @@ func TestSetCreditsLeavesExpiringUnchanged(t *testing.T) {
 	}
 	p.mu.RUnlock()
 }
+
+// TestSetCreditsClampsExpiring 权威余额低于 expiring 时须钳到 [0, credits]：
+// 维护「expiring 是 credits 子集」的不变量（applyAccountsLocked / SetCreditsDetailed
+// / SetCredits 三处守卫齐全），否则 weightOf 的 expiring/credits 比值项会 >1，
+// 把 ×expiringWeight 加成放大到远超设计上限。
+func TestSetCreditsClampsExpiring(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCreditsDetailed("u1", 1000, 900) // 快过期占比 90%
+	p.SetCredits("u1", 100)               // 权威余额降到 expiring 之下
+
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	if e.credits != 100 {
+		t.Errorf("credits=%d want 100", e.credits)
+	}
+	if e.creditsExpiring != 100 {
+		t.Errorf("creditsExpiring=%d want 100 (应被钳到 credits)", e.creditsExpiring)
+	}
+	// 不变量：expiring <= credits，比值项 <= 1。
+	if e.creditsExpiring > e.credits {
+		t.Fatalf("不变量破坏：expiring=%d > credits=%d", e.creditsExpiring, e.credits)
+	}
+	w := p.weightOf(e, 1000, time.Now())
+	if w > 1+10+expiringWeight+defaultIdleWeightMax+1 {
+		t.Errorf("weight=%.3f 超出设计上限（expiring 比值应 <= 1）", w)
+	}
+	p.mu.RUnlock()
+
+	// 负余额钳 0。
+	p.SetCredits("u1", -5)
+	p.mu.RLock()
+	if e := p.byUID["u1"]; e.credits != 0 || e.creditsExpiring != 0 {
+		t.Errorf("负值应钳 0：credits=%d expiring=%d", e.credits, e.creditsExpiring)
+	}
+	p.mu.RUnlock()
+}
