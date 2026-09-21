@@ -16,6 +16,9 @@ on:
     types: [opened]
 
 permissions:
+  # claude-identity 换票：用 runner OIDC 向 Anthropic 换 Claude GitHub App 的 installation token，
+  # 让治理的评论/关闭/建 issue 全部以 claude[bot] 署名（见 steps.claude-identity）。
+  id-token: write
   contents: read
   issues: write
   # PR 治理：改写标题 / 追加正文关联块需要 pull-requests: write。
@@ -30,10 +33,42 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # claude[bot] 身份：runner OIDC → Anthropic 换票端点 → installation token。
+      # 端点逆向自 anthropics/claude-code-action src/github/token.ts（MIT）。
+      # 注意：换票要求 workflow 定义在默认分支上（PR 上改 workflow 会拒），且 repo 已安装 Claude Code App。
+      - name: Exchange OIDC for Claude App token
+        id: claude-identity
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=claude-code-github-action" | jq -r .value)
+          if [ -z "$OIDC" ] || [ "$OIDC" = "null" ]; then
+            echo "::warning::OIDC token unavailable — governance falls back to github-actions[bot]"
+            echo "token=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          APP_TOKEN=$(curl -sf -X POST \
+            -H "Authorization: Bearer $OIDC" \
+            -H "Content-Type: application/json" \
+            -d '{"permissions":{"contents":"write","pull_requests":"write","issues":"write"}}' \
+            https://api.anthropic.com/api/github/github-app-token-exchange \
+            | jq -r '.token // .app_token // empty')
+          echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
+          if [ -n "$APP_TOKEN" ]; then
+            echo "Claude App token obtained — governance will act as claude[bot]"
+          else
+            echo "::warning::token exchange returned no token — falling back to github-actions[bot]"
+          fi
+
       - name: AI governance
         uses: ./.github/actions/ai-governance
         with:
           github-token: ${{ github.token }}
+          # 治理身份令牌：claude-identity 步骤用 runner OIDC 从 Anthropic 换来的
+          # Claude GitHub App installation token —— 治理的评论/关闭/建 issue/打标签
+          # 全部以 claude[bot] 署名。换票失败时回落 github-actions[bot]（action 内部
+          # governanceOctokit || octokit 的空值回落，行为不变）。
+          governance-token: ${{ steps.claude-identity.outputs.token }}
           # AI 缺省走 GitHub Models（免费，靠 models:read）。
           # 若要切换自建/第三方 OpenAI 兼容端点，在仓库 Secrets 里配置以下三项即可，无需改本文件：
           #   AI_BASE_URL / AI_API_KEY / AI_MODEL
@@ -51,5 +86,16 @@ jobs:
           maintainer-exempt: 'true'
           # PR 治理：垃圾检测 + 要点提炼 + canonical 关联（永不关闭合法 PR）
           enable-pr-governance: 'true'
+          # PR 历史语境评审：AI 对照相关历史 issue 的关闭结论评审新 PR，
+          # 证据确凿 → 中文评审评论 + 关闭；证据不足 → 回落 canonical 关联链路（宁可漏判、不可误关）
+          # 2026-09-21 P0+F1-F4 全量合并后启用（PR #189）
+          pr-review-close: 'true'
+          # 两段式 AI 流水线：粗筛（紧凑索引选关联项）→ 确定性闸门 → 精处理（仅筛出条目的完整语境）。
+          # 关闭时行为与旧链路逐字节一致（有回归测试锚定），2026-09-21 启用（PR #189）
+          enable-two-stage: 'true'
+          max-related-issues: '3'
+          related-comments-per-issue: '10'
+          related-body-truncate: '1500'
           max-canonical-index: '50'
-          analyze-file-changes: 'false'
+          # R12：diff 是垃圾/质量检测与历史语境评审的核心证据，统一开启（成本可接受，2026-09 决策）
+          analyze-file-changes: 'true'
