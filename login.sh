@@ -30,9 +30,15 @@ if ! [[ -w "$AUTH_DIR" ]]; then
     exit 1
 fi
 
-# login 工具：不存在才编译（源码改动后手动 go build -o login ./cmd/login）
+# login 工具：缺失或构建输入（*.go 与 go.mod/go.sum）比它新时重编——realm 路由
+# 逻辑在 login 二进制里，过期的二进制会把 global 凭证打向 CN 端点，症状与
+# 「token 过期」无法区分。
 LOGIN_BIN="./login"
-if [[ ! -x "$LOGIN_BIN" ]]; then
+if [[ ! -x "$LOGIN_BIN" ]] || find . \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$LOGIN_BIN" -print -quit | grep -q .; then
+    if ! command -v go >/dev/null 2>&1; then
+        echo "需要 go 构建 login（或镜像内置 /app/login）" >&2
+        exit 1
+    fi
     go build -o "$LOGIN_BIN" ./cmd/login
 fi
 

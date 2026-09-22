@@ -23,6 +23,9 @@
 
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
 
+### 交流群组
+- [@checkinHome](https://t.me/checkinHome)
+
 ### 本项目做什么
 
 - 通过 **OAuth 设备授权**（`login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
@@ -558,6 +561,9 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
     <td><code>bc1q9w7h4j9msyd9q6lhl0398n4s3g8h4vchpqvc2k</code></td>
   </tr>
 </table>
+
+## 特别感谢
+- [@YuJunZhiXue](https://github.com/YuJunZhiXue)
 
 ## License
 

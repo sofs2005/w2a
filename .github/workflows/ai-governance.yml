@@ -10,6 +10,7 @@ name: AI Governance
 on:
   issues:
     types: [opened]
+  workflow_dispatch: {}
   # pull_request_target 让 action（含写操作）以目标仓库而不是 fork 身份运行 ——
   # 这是 PR 治理改标题/正文/建 canonical 所必需的写权限来源（详见 DESIGN.md §12）。
   pull_request_target:
@@ -40,24 +41,26 @@ jobs:
         id: claude-identity
         run: |
           set -euo pipefail
-          OIDC=$(curl -sf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=claude-code-github-action" | jq -r .value)
-          if [ -z "$OIDC" ] || [ "$OIDC" = "null" ]; then
-            echo "::warning::OIDC token unavailable — governance falls back to github-actions[bot]"
+          OIDC_HTTP=$(curl -sS -o /tmp/oidc.json -w '%{http_code}' \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=claude-code-github-action") || OIDC_HTTP=000
+          OIDC=$(jq -r '.value // empty' /tmp/oidc.json 2>/dev/null || true)
+          if [ -z "$OIDC" ]; then
+            echo "::warning::OIDC token unavailable (http $OIDC_HTTP): $(head -c 200 /tmp/oidc.json 2>/dev/null) — governance falls back to github-actions[bot]"
             echo "token=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          APP_TOKEN=$(curl -sf -X POST \
+          EXC_HTTP=$(curl -sS -o /tmp/exc.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $OIDC" \
             -H "Content-Type: application/json" \
             -d '{"permissions":{"contents":"write","pull_requests":"write","issues":"write"}}' \
-            https://api.anthropic.com/api/github/github-app-token-exchange \
-            | jq -r '.token // .app_token // empty')
+            https://api.anthropic.com/api/github/github-app-token-exchange) || EXC_HTTP=000
+          APP_TOKEN=$(jq -r '.token // .app_token // empty' /tmp/exc.json 2>/dev/null || true)
           echo "token=$APP_TOKEN" >> "$GITHUB_OUTPUT"
           if [ -n "$APP_TOKEN" ]; then
             echo "Claude App token obtained — governance will act as claude[bot]"
           else
-            echo "::warning::token exchange returned no token — falling back to github-actions[bot]"
+            echo "::warning::token exchange failed (http $EXC_HTTP): $(head -c 200 /tmp/exc.json 2>/dev/null) — falling back to github-actions[bot]"
           fi
 
       - name: AI governance

@@ -14,7 +14,7 @@
 #   ./checkin.sh -v         # 表格 + 末尾 fail 明细汇总
 #   ./checkin.sh auths_dir  # 指定 auths 目录（透传给 signin_bin）
 #
-# 依赖: go（首次构建 signin_bin）、curl、jq（jq 缺失时 /status 头部降级为原始 JSON）
+# 依赖: go（需要时构建/重编 signin_bin）、curl、jq（jq 缺失时 /status 头部降级为原始 JSON）
 #
 # 环境变量:
 #   WB2A_CONFIG  配置文件路径（默认 ./config.json，读取端口与 api_key）
@@ -93,7 +93,7 @@ echo
 
 # ─── 核心：构建并执行 signin_bin（复用 signin.sh 的构建逻辑）──────────────────
 BIN=./signin_bin
-if [[ ! -x "$BIN" ]]; then
+if [[ ! -x "$BIN" ]] || find . \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) -newer "$BIN" -print -quit | grep -q .; then
     echo "build signin_bin ..."
     if ! command -v go >/dev/null 2>&1; then
         echo "需要 go 构建 signin_bin（或先 ./signin.sh 预构建）" >&2
