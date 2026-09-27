@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -61,6 +62,22 @@ type Model struct {
 	OwnedBy       string `json:"owned_by"`
 	ContextLength int64  `json:"context_length"`
 	MaxOutput     int64  `json:"max_output_tokens"`
+
+	// 以下字段网关 /v1/models 已下发，此前未声明而被丢弃；模型目录页需要，
+	// 故原样透传（缺省时省略，避免把「无此字段」与「空值」混为一谈）。
+	Name              string   `json:"name,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Credits           string   `json:"credits,omitempty"` // 积分倍率原文，如 "x0.03" / "x0.59 credits"
+	Vendor            string   `json:"vendor,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	IsDefault         bool     `json:"is_default,omitempty"`
+	OnlyReasoning     bool     `json:"only_reasoning,omitempty"`
+	SupportsImages    bool     `json:"supports_images,omitempty"`
+	SupportsReasoning bool     `json:"supports_reasoning,omitempty"`
+	SupportsToolCall  bool     `json:"supports_tool_call,omitempty"`
+	MaxAllowedSize    int64    `json:"max_allowed_size,omitempty"`
+	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
+	ReasoningSummary  string   `json:"reasoning_summary,omitempty"`
 }
 
 // Client 网关客户端。每次请求都携带当前 api_key，因此支持运行期改配置。
@@ -409,11 +426,73 @@ type Stats struct {
 	UptimeSec int64       `json:"uptime_sec"`
 	Total     ModelStat   `json:"total"`
 	Models    []ModelStat `json:"models"`
+	// SeriesBuckets 时间序列的桶数（判断数据可回溯范围）。
+	SeriesBuckets int `json:"series_buckets"`
+	// Range 时间维度查询结果（仅当请求带了 range/from/to/interval/model 时返回）。
+	Range *RangeResult `json:"range,omitempty"`
+}
+
+// RangePoint 时间序列上的一个数据点。
+type RangePoint struct {
+	Key     string    `json:"key"`
+	Start   time.Time `json:"start"`
+	End     time.Time `json:"end"`
+	Stats   ModelStat `json:"stats"`
+	Derived ModelStat `json:"derived"` // 派生指标复用同一结构（字段一致）
+}
+
+// RangeResult 时间范围聚合结果。
+type RangeResult struct {
+	Interval string       `json:"interval"`
+	From     time.Time    `json:"from"`
+	To       time.Time    `json:"to"`
+	Points   []RangePoint `json:"points"`
+	Total    ModelStat    `json:"total"`
+	Models   []string     `json:"models"`
+}
+
+// StatsOptions 时间维度查询参数。
+type StatsOptions struct {
+	// Range 相对区间：today / yesterday / 7d / 30d / 90d / all
+	Range string
+	// From/To 绝对区间（RFC3339）；设置后优先于 Range。
+	From string
+	To   string
+	// Interval 聚合粒度：hour / day / week
+	Interval string
+	// Model 只看单个模型（空 = 全部）
+	Model string
 }
 
 // Stats 拉取按模型聚合的请求统计。
 func (c *Client) Stats(ctx context.Context) (*Stats, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/stats", nil)
+	return c.StatsRange(ctx, StatsOptions{})
+}
+
+// StatsRange 拉取统计（可选时间维度参数）。
+func (c *Client) StatsRange(ctx context.Context, opt StatsOptions) (*Stats, error) {
+	q := url.Values{}
+	if opt.Range != "" {
+		q.Set("range", opt.Range)
+	}
+	if opt.From != "" {
+		q.Set("from", opt.From)
+	}
+	if opt.To != "" {
+		q.Set("to", opt.To)
+	}
+	if opt.Interval != "" {
+		q.Set("interval", opt.Interval)
+	}
+	if opt.Model != "" {
+		q.Set("model", opt.Model)
+	}
+	path := "/v1/stats"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

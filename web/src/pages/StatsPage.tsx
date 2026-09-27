@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ModelCost, ModelStat, ModelPrice, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Modal, Spinner } from '../ui'
+import TrendChart, { type TrendMetric } from './TrendChart'
 
 /** 数值格式化：大数用千分位，小数保留位数。 */
 function fmtMs(v: number): string {
@@ -50,13 +51,31 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
   // 价格编辑弹窗：null = 关闭；否则为正在编辑的模型名
   const [editingModel, setEditingModel] = useState<string | null>(null)
 
+  // ── 时间维度 ──
+  // 快捷区间：today / yesterday / 7d / 30d / 90d / all / custom
+  const [range, setRange] = useState('all')
+  const [interval, setInterval] = useState<'hour' | 'day' | 'week'>('day')
+  const [metric, setMetric] = useState<TrendMetric>('requests')
+  // 自定义区间（range=custom 时生效）
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+  // 模型筛选（空 = 全部）
+  const [modelFilter, setModelFilter] = useState('')
+
   const stats = resp?.stats ?? null
 
   const load = useCallback(
     async (silent = false) => {
       if (!silent) setLoading(true)
       try {
-        const s = await api.stats(timeMode)
+        const s = await api.stats({
+          mode: timeMode,
+          range: range === 'custom' ? undefined : range,
+          from: range === 'custom' && customFrom ? new Date(customFrom).toISOString() : undefined,
+          to: range === 'custom' && customTo ? new Date(customTo).toISOString() : undefined,
+          interval,
+          model: modelFilter || undefined,
+        })
         setResp(s)
         setError(null)
       } catch (err) {
@@ -65,7 +84,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         setLoading(false)
       }
     },
-    [timeMode],
+    [timeMode, range, interval, customFrom, customTo, modelFilter],
   )
 
   useEffect(() => {
@@ -75,7 +94,9 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
   // 自动刷新：统计是累计值，10 秒一次足够看出趋势。
   useEffect(() => {
     if (!autoRefresh) return
-    const timer = setInterval(() => void load(true), 10_000)
+    const timer = window.setInterval(() => {
+      void load(true)
+    }, 10_000)
     return () => clearInterval(timer)
   }, [autoRefresh, load])
 
@@ -293,6 +314,121 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           )}
         </div>
       )}
+
+      {/* 时间趋势 */}
+      <div className="card">
+        <div className="card-head">
+          <h2>时间趋势</h2>
+          <span className="hint">
+            {stats?.series_buckets !== undefined && `可回溯 ${stats.series_buckets} 个时间桶（按小时落盘，保留 30 天）`}
+          </span>
+        </div>
+
+        <div className="row" style={{ marginBottom: 6 }}>
+          <div className="field" style={{ flex: '0 0 150px', minWidth: 130 }}>
+            <label>时间范围</label>
+            <select value={range} onChange={(e) => setRange(e.target.value)}>
+              <option value="today">今天</option>
+              <option value="yesterday">昨天</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
+              <option value="90d">最近 90 天</option>
+              <option value="all">全部</option>
+              <option value="custom">自定义…</option>
+            </select>
+          </div>
+          <div className="field" style={{ flex: '0 0 130px', minWidth: 110 }}>
+            <label>聚合粒度</label>
+            <select value={interval} onChange={(e) => setInterval(e.target.value as 'hour' | 'day' | 'week')}>
+              <option value="hour">按小时</option>
+              <option value="day">按天</option>
+              <option value="week">按周</option>
+            </select>
+          </div>
+          <div className="field" style={{ flex: '0 0 170px', minWidth: 140 }}>
+            <label>模型筛选</label>
+            <select value={modelFilter} onChange={(e) => setModelFilter(e.target.value)}>
+              <option value="">全部模型</option>
+              {(resp?.stats.models ?? []).map((m) => (
+                <option key={m.model} value={m.model}>
+                  {m.model}
+                </option>
+              ))}
+            </select>
+          </div>
+          {range === 'custom' && (
+            <>
+              <div className="field" style={{ flex: '0 0 190px', minWidth: 160 }}>
+                <label>开始时间</label>
+                <input
+                  type="datetime-local"
+                  value={customFrom}
+                  onChange={(e) => setCustomFrom(e.target.value)}
+                />
+              </div>
+              <div className="field" style={{ flex: '0 0 190px', minWidth: 160 }}>
+                <label>结束时间</label>
+                <input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} />
+              </div>
+            </>
+          )}
+        </div>
+
+        {resp?.stats.range ? (
+          <>
+            <div className="grid grid-stats" style={{ margin: '10px 0 14px' }}>
+              <div className="stat">
+                <div className="stat-label">区间请求数</div>
+                <div className="stat-value small">{fmtNum(resp.stats.range.total?.requests ?? 0)}</div>
+                <div className="stat-sub">
+                  成功 {fmtNum(resp.stats.range.total?.success ?? 0)}
+                  {(resp.stats.range.total?.failed ?? 0) > 0 && ` · 失败 ${fmtNum(resp.stats.range.total?.failed ?? 0)}`}
+                </div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">区间输出 token</div>
+                <div className="stat-value small">{fmtTok(resp.stats.range.total?.completion_tokens ?? 0)}</div>
+                <div className="stat-sub">输入 {fmtTok(resp.stats.range.total?.prompt_tokens ?? 0)}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">区间平均首字</div>
+                <div className="stat-value small">{fmtMs(resp.stats.range.total?.avg_ttfb_ms ?? 0)}</div>
+                <div className="stat-sub">平均耗时 {fmtMs(resp.stats.range.total?.avg_latency_ms ?? 0)}</div>
+              </div>
+              <div className="stat">
+                <div className="stat-label">区间缓存命中率</div>
+                <div className="stat-value small">{fmtPct(resp.stats.range.total?.cache_hit_rate ?? 0)}</div>
+                <div className="stat-sub">吞吐 {fmtRate(resp.stats.range.total?.tokens_per_sec ?? 0)} tok/s</div>
+              </div>
+            </div>
+
+            <TrendChart
+              points={resp.stats.range.points ?? []}
+              interval={resp.stats.range.interval}
+              metric={metric}
+              onMetricChange={setMetric}
+            />
+
+            {resp.stats.range.from && (
+              <div className="desc" style={{ marginTop: 10 }}>
+                实际区间：{fmtISO(resp.stats.range.from)} → {fmtISO(resp.stats.range.to)}
+                {' · '}
+                粒度：
+                {resp.stats.range.interval === 'hour' ? '小时' : resp.stats.range.interval === 'day' ? '天' : '周'}
+                {(resp.stats.range.points?.length ?? 0) > 0 &&
+                  ` · ${resp.stats.range.points?.length} 个数据点`}
+              </div>
+            )}
+          </>
+        ) : (
+          <Empty>
+            正在加载趋势数据…
+            <div style={{ marginTop: 6, fontSize: 12 }}>
+              时间趋势从启用统计后开始累积（网关重启不清零，但重新部署前的历史不可回溯）。
+            </div>
+          </Empty>
+        )}
+      </div>
 
       {/* 按模型明细 */}
       <div className="card">

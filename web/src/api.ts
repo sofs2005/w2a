@@ -119,9 +119,25 @@ export const api = {
 
   // 模型 / 聊天
   models: () => get<ModelsResponse>('/api/models'),
-  // 请求统计（按模型聚合）+ 官方价换算
-  stats: (mode?: 'peak' | 'offpeak') =>
-    get<StatsResponse>(`/api/stats${mode ? `?mode=${mode}` : ''}`),
+  // 请求统计（按模型聚合 + 时间维度）+ 官方价换算
+  stats: (opt?: {
+    mode?: 'peak' | 'offpeak'
+    range?: string
+    from?: string
+    to?: string
+    interval?: 'hour' | 'day' | 'week'
+    model?: string
+  }) => {
+    const q = new URLSearchParams()
+    if (opt?.mode) q.set('mode', opt.mode)
+    if (opt?.range) q.set('range', opt.range)
+    if (opt?.from) q.set('from', opt.from)
+    if (opt?.to) q.set('to', opt.to)
+    if (opt?.interval) q.set('interval', opt.interval)
+    if (opt?.model) q.set('model', opt.model)
+    const qs = q.toString()
+    return get<StatsResponse>(`/api/stats${qs ? `?${qs}` : ''}`)
+  },
   resetStats: () => post<{ ok: boolean; message: string }>('/api/stats/reset'),
   // 官方价格表编辑
   savePrice: (p: {
