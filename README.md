@@ -357,6 +357,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|
 | 📊 仪表盘 | 账号池可用 / 冷却 / 禁用计数、积分总览、在途与粘性会话、Token 过期预警 |
 | 👥 账号管理 | 全量账号表格、状态筛选、批量签到 / 刷新 / 查积分、单账号详情（含猫档案 / 旅行状态）、手工导入凭证 |
+| 📈 请求统计 | 按模型的累计用量快照，以及时间趋势（范围 / 聚合粒度 / 模型筛选） |
+| 🧮 模型与倍率 | 按域（国际版 / 国内版）列出模型、积分倍率、上下文与能力，并标出限时免费 / 夜间折扣 |
+| 💎 积分到期 | 剩余积分与 7 / 30 天内作废量汇总，可展开每个积分包的明细与到期时间 |
 | ➕ 添加账号 | 网页 OAuth 授权（国内版 / 国际版），自动落盘并热加载，无需重启 |
 | 💬 聊天测试 | 动态模型下拉、流式 / 非流式、推理内容展示、token 用量与首字延迟 |
 | ⚙️ 网关配置 | `config.json` 分组表单或 JSON 源码双模式编辑，保存前自动备份 |
@@ -389,13 +392,34 @@ curl -s -H "Authorization: Bearer $API_KEY" http://localhost:7863/status | grep 
 | `WBGUI_READ_ONLY` | `false` | `true` = 全局只读，关闭一切写操作（仅监控场景） |
 | `WBGUI_DANGEROUS_OPS` | `false` | `true` = 解锁删除账号、恢复配置备份等高危操作 |
 
+| `WBGUI_ALLOWED_ORIGINS` | 空 | 写操作额外允许的来源主机名（逗号分隔），见下「反向代理」 |
+
 > 面板的 `listen` 字段在合并模式下**无效**——端口由网关的 `config.listen` 决定。
 > 面板的备份与登录凭据落在 `data/backups/`、`data/gui-credentials.json`（随 `./data` 卷持久化）。
 
-**已知限制**
+**反向代理部署**
 
-「请求统计」页依赖网关 `/v1/stats` 端点，本上游未提供，故该页默认隐藏
-（`panel/web/src/App.tsx` 的 `STATS_ENABLED`）；其余页面不受影响。
+面板的写操作（添加账号、改配置、重启）有 CSRF 同源校验。置于反向代理之后时，
+后端看到的 `Host` 与浏览器发出的 `Origin` 天然不同，**必须让代理透传原始主机名**，
+否则写操作一律 403「跨站请求被拒绝」：
+
+```nginx
+proxy_set_header Host              $http_host;   # $host 会丢端口
+proxy_set_header X-Forwarded-Host  $http_host;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+校验按**主机名**比较（忽略协议与端口），故 `https` 入口 + `http` 后端、代理丢端口
+都不影响。若代理完全不透传任何主机头，可用 `WBGUI_ALLOWED_ORIGINS` 显式列出域名兜底
+（对应面板配置项 `allowed_origins`）。完整示例见
+[`panel/deploy/nginx.conf.example`](panel/deploy/nginx.conf.example)。
+
+**已知差异**
+
+模型与倍率页的说明文字写「直接填模型 ID、不要加域前缀」——那是对**上游官方网关**
+的实测结论。本 fork 的网关不同：`/v1/models` 对国内版模型返回 `cn:<id>`，且裸名
+一律按国内版路由，故国际版模型需照抄副行的 `global:` 前缀。详见
+[`panel/HOST-PATCHES.md`](panel/HOST-PATCHES.md) 的「已知差异」一节。
 
 ### 更新到最新版本
 
