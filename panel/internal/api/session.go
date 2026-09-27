@@ -185,10 +185,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// SameSite=Strict 已挡住绝大多数跨站请求，这里再校验 Origin 作为纵深防御。
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if origin := r.Header.Get("Origin"); origin != "" {
-				if !sameOrigin(origin, r.Host) {
+				if !sameOrigin(origin, requestHosts(r), s.cfg.AllowedOrigins) {
 					writeJSON(w, http.StatusForbidden, map[string]any{
-						"error": "跨站请求被拒绝",
-						"code":  "csrf",
+						"error": "跨站请求被拒绝。若本面板部署在反向代理之后，" +
+							"请确认代理透传了 Host 或 X-Forwarded-Host 头。",
+						"code": "csrf",
 					})
 					return
 				}
@@ -214,15 +215,127 @@ func (s *Server) currentUser(r *http.Request) (string, bool) {
 	return "", false
 }
 
-// sameOrigin 报告 Origin 是否与本机 Host 同源。
-func sameOrigin(origin, host string) bool {
-	origin = strings.TrimSuffix(origin, "/")
-	for _, scheme := range []string{"http://", "https://"} {
-		if strings.HasPrefix(origin, scheme) {
-			return strings.EqualFold(strings.TrimPrefix(origin, scheme), host)
+// requestHosts 收集本次请求「可能被浏览器用作 Host」的所有候选值。
+//
+// 为什么需要一个列表：反向代理下 r.Host 未必等于浏览器地址栏里的主机名——
+//
+//   - nginx 默认 proxy_set_header Host $host 会**丢掉端口**（用户访问 :8787，
+//     后端看到 panel.example.com）；
+//   - 配了 proxy_set_header Host $proxy_host 或漏配时，后端看到的是
+//     127.0.0.1:8787 这种内网地址；
+//   - 透传 Host 时可能带上端口而 Origin 不带（或反之）。
+//
+// 因此把 Host 与各 X-Forwarded-* / Forwarded 都作为候选，任一匹配即视为同源。
+//
+// 安全性说明：攻击者能伪造这些头，但**浏览器不允许**脚本设置 Host /
+// X-Forwarded-Host（它们属于禁止修改的头，或会被代理解析覆盖），因此对
+// 跨站攻击者来说这些候选值他控制不了——他能控的只有 Origin，而 Origin 由
+// 浏览器写入、无法伪造。真正的信任边界仍是「代理透传了什么」，这与
+// X-Forwarded-For 的既有前提一致。
+func requestHosts(r *http.Request) []string {
+	hosts := []string{r.Host}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			hosts = append(hosts, v)
+		}
+	}
+	// X-Forwarded-Host 可能是逗号分隔的链（proxy1, proxy2），逐个取。
+	for _, raw := range r.Header.Values("X-Forwarded-Host") {
+		for _, part := range strings.Split(raw, ",") {
+			add(part)
+		}
+	}
+	// RFC 7239 Forwarded: for=1.2.3.4;host=example.com;proto=https（可能多条）。
+	for _, raw := range r.Header.Values("Forwarded") {
+		for _, elem := range strings.Split(raw, ",") {
+			for _, kv := range strings.Split(elem, ";") {
+				kv = strings.TrimSpace(kv)
+				i := strings.IndexByte(kv, '=')
+				if i < 0 || !strings.EqualFold(strings.TrimSpace(kv[:i]), "host") {
+					continue
+				}
+				add(strings.Trim(strings.TrimSpace(kv[i+1:]), `"`))
+			}
+		}
+	}
+	// X-Forwarded-Port 补端口：某些代理只透传 host 与 port 分开的两个头。
+	if p := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); p != "" {
+		for _, h := range append([]string(nil), hosts...) {
+			if !strings.Contains(h, ":") {
+				hosts = append(hosts, h+":"+p)
+			}
+		}
+	}
+	return hosts
+}
+
+// sameOrigin 报告 Origin 是否与候选主机之一同源。
+//
+// 比较口径是**主机名**（忽略协议与端口）：
+//   - 忽略协议：反代下后端是 http、用户走 https，协议天然不同，比较协议会
+//     把所有反代部署判成跨站（这正是 issue #7）。
+//   - 忽略端口：nginx 默认丢端口、或用户经 443/80 默认端口访问时 Origin 不带
+//     端口而后端 Host 带，比较端口同样会误判。
+//
+// 放宽端口是否会削弱 CSRF 防护？不会：CSRF 的攻击面是「另一个站点冒充本面板」，
+// 站点由**主机名**区分。同一主机名的不同端口属于同一站点的不同服务，浏览器
+// 的同源策略本就按「协议+主机+端口」三元组划分，但我们的威胁模型是"跨站点
+// 伪造请求"，同主机名的其他端口并不构成跨站攻击面（且攻击者要在你的主机名
+// 上另起端口，已属于另一层面的失陷）。宁可放宽端口，也不能让正常反代部署不可用。
+//
+// 空 Origin、"null"（沙箱 iframe / file://）等一律拒绝。
+//
+// extra 为用户显式配置的额外白名单（config.allowed_origins），用于反代连
+// Host 都不透传、后端无从推导的兜底场景。
+func sameOrigin(origin string, hosts []string, extra []string) bool {
+	oh := hostnameOf(origin)
+	if oh == "" {
+		return false
+	}
+	for _, h := range hosts {
+		if hh := hostnameOf(h); hh != "" && strings.EqualFold(hh, oh) {
+			return true
+		}
+	}
+	for _, e := range extra {
+		if eh := hostnameOf(e); eh != "" && strings.EqualFold(eh, oh) {
+			return true
 		}
 	}
 	return false
+}
+
+// hostnameOf 从 Origin/URL/Host 形式的字符串里取出裸主机名（小写、无端口、无协议）。
+// 无法解析时返回空串。
+func hostnameOf(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// 去掉协议前缀。
+	for _, scheme := range []string{"http://", "https://"} {
+		s = strings.TrimPrefix(s, scheme)
+		s = strings.TrimPrefix(s, scheme) // 容错重复前缀
+	}
+	// 去掉路径/查询（Origin 不带，但 Forwarded 的 host 参数可能被写错）。
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	// 去掉 userinfo。
+	if i := strings.LastIndexByte(s, '@'); i >= 0 {
+		s = s[i+1:]
+	}
+	// 去掉端口。注意 IPv6 字面量形如 [::1]:8787，需按 ] 判断。
+	if strings.HasPrefix(s, "[") {
+		if i := strings.IndexByte(s, ']'); i >= 0 {
+			s = s[:i+1]
+		}
+	} else if i := strings.LastIndexByte(s, ':'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSuffix(s, ".")
+	return strings.ToLower(s)
 }
 
 // ---------------------------------------------------------------------------

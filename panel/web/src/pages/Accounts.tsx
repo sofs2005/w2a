@@ -359,7 +359,20 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                           </div>
                         )}
                       </td>
-                      <td className="num">{fmtNum(a.live_credits ?? a.credits)}</td>
+                      <td className="num">
+                        {(() => {
+                          // 区分「还没查到」与「真的是 0 分」——
+                          // 之前统一显示 0，外部渠道新增的账号会被误读成没积分
+                          // （issue #8）。查询结果优先，其次网关缓存值。
+                          if (a.live_credits !== undefined) return fmtNum(a.live_credits)
+                          if (a.credits > 0) return fmtNum(a.credits)
+                          return (
+                            <span className="text-faint" title="尚未查到积分（不是 0 分），正在自动查询…">
+                              —
+                            </span>
+                          )
+                        })()}
+                      </td>
                       <td className="num text-dim" style={{ fontSize: 12 }}>
                         {fmtNum(a.success_count)} / {a.err_total > 0 ? <span className="text-warn">{a.err_total}</span> : '0'}
                       </td>

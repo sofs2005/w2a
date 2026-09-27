@@ -8,11 +8,13 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -58,6 +60,10 @@ const (
 	EndpointAuthToken = "/v2/plugin/auth/token?state="
 	// EndpointLoginAccount 拿 uid / nickname / enterpriseId。
 	EndpointLoginAccount = "/v2/plugin/login/account?state="
+
+	// EndpointV3Config 模型目录 + 促销配置（/v3/config）。网关用它取模型目录，
+	// 但未解析其中的 modelPromotions；GUI 直连取促销（限时免费 / 夜间折扣）。
+	EndpointV3Config = "/v3/config"
 
 	// growth 域「猫猫旅行」路径。
 	TravelStatusPath   = "/activity/growth/buddy/travel/status"
@@ -248,6 +254,56 @@ func regionBases(region Region) (chatBase, billingBase, origin string) {
 		return ChatBaseGlobal, BillingBaseGlobal, originGlobal
 	}
 	return ChatBaseCN, BillingBaseCN, originCN
+}
+
+// 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersion/defaultCliVersion 同值）。
+const (
+	desktopClientVersion = "5.5.4"
+	desktopCLIVersion    = "2.137.1"
+)
+
+// promoFetchTimeout 促销配置的单次超时。
+//
+// 促销只是模型页上的一列装饰，不值得拖住整个模型列表：客户端全局 timeout 默认
+// 120 秒，上游一旦卡住，/api/models 会跟着转圈两分钟（两个域还是串行的）。
+// 超时后按「拉取失败」处理 —— 模型列表照常返回，只是「优惠」列为空。
+const promoFetchTimeout = 15 * time.Second
+
+// desktopUA 组装官方桌面端 UA：`WorkBuddy/<v> <平台品牌>/<v> CLI/<cli>`。
+// 平台段品牌按 realm 切——global 用 `WorkBuddy AI`，cn 用 `WorkBuddy`
+// （送错品牌段会被上游风控判 403 code 11140）。
+func desktopUA(region Region) string {
+	platform := "WorkBuddy"
+	if region == RegionGlobal {
+		platform = "WorkBuddy AI"
+	}
+	return "WorkBuddy/" + desktopClientVersion + " " + platform + "/" + desktopClientVersion +
+		" CLI/" + desktopCLIVersion
+}
+
+// desktopHeaders 设置官方桌面端出站请求头（网关 CommonHeaders 的同款口径）。
+//
+// 为什么不能复用包内既有的 commonHeaders（CLI UA `CLI/2.63.2 CodeBuddy/2.63.2`）：
+// 实测同一账号同一时刻，两种 UA 从 /v3/config 拿到的是**两份不同配置**——
+//
+//	CLI UA      → 21 个模型，无 modelPromotions
+//	桌面端 UA   → 23 个模型，3 条 modelPromotions
+//
+// 模型促销是桌面端面的配置，用 CLI UA 取永远是空的（这正是本页「优惠」列一开始
+// 全空的原因）。登录 / 刷新 / 计费仍走既有 commonHeaders，不动它们的指纹。
+func desktopHeaders(req *http.Request, region Region) {
+	_, _, origin := regionBases(region)
+	lang := "zh-CN"
+	if region == RegionGlobal {
+		lang = "en-US"
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", desktopUA(region))
+	req.Header.Set("Accept-Language", lang)
 }
 
 // regionOfAccount 从账号 domain 反推 region；空/未知 domain 按 CN 处理。
@@ -552,13 +608,25 @@ func (c *Client) DailyCheckin(a *authstore.Account) (*CheckinResult, error) {
 
 // resourcePackage 单个套餐的容量字段。
 type resourcePackage struct {
-	PackageName         string `json:"PackageName"`
-	CapacityRemain      int64  `json:"CapacityRemain"`
-	CapacityUsed        int64  `json:"CapacityUsed"`
-	CapacitySize        int64  `json:"CapacitySize"`
-	CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-	CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-	CycleCapacitySize   int64  `json:"CycleCapacitySize"`
+	PackageName string `json:"PackageName"`
+	// CycleEndTime 积分包**周期**结束时间（"2006-01-02 15:04:05"）。
+	//
+	// ⚠️ 它不总是「到期时间」：按周期发量的包（实测「CodeBuddy个人体验版」）这里是本月
+	// 周期边界，而真正的扣费截止在 DeductionEndTime。判定到期一律用 expiryString()。
+	CycleEndTime string `json:"CycleEndTime"`
+	// DeductionEndTime 扣费截止（毫秒时间戳）。**这是真正的到期时刻**。
+	//
+	// 实测（2026-09-23，抽查 12 个积分包）：11 个 CycleEndTime == DeductionEndTime，
+	// 唯一例外是「个人体验版」——CycleEndTime 2026-09-30（月周期边界）、
+	// DeductionEndTime 2034-12-22。按 DeductionEndTime 排序的结果与官方「平台奖励积分明细」
+	// 面板逐行一致；按 CycleEndTime 排则会把这个包错排到最前面，虚报「7 天后作废 500」。
+	DeductionEndTime    int64 `json:"DeductionEndTime"`
+	CapacityRemain      int64 `json:"CapacityRemain"`
+	CapacityUsed        int64 `json:"CapacityUsed"`
+	CapacitySize        int64 `json:"CapacitySize"`
+	CycleCapacityRemain int64 `json:"CycleCapacityRemain"`
+	CycleCapacityUsed   int64 `json:"CycleCapacityUsed"`
+	CycleCapacitySize   int64 `json:"CycleCapacitySize"`
 }
 
 // Credits 账号积分概览。
@@ -567,6 +635,92 @@ type Credits struct {
 	Used     int64 `json:"used"`
 	Size     int64 `json:"size"`
 	Packages int   `json:"packages"`
+
+	// ExpiresAt 最近一次积分到期时间，原样保留上游字符串（空 = 所有包都无到期）。
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// ExpiringRemain 与 ExpiresAt 同一时刻到期的那批积分剩余量。
+	ExpiringRemain int64 `json:"expiring_remain"`
+	// Details 逐包明细，按到期时间升序，无到期的排最后。
+	Details []CreditPack `json:"details,omitempty"`
+}
+
+// expiryString 返回该包真正的到期时间（creditPackLayout 格式）。
+//
+// 优先 DeductionEndTime（扣费截止，毫秒时间戳）；缺省/为 0 时回退 CycleEndTime 原文。
+// 两者都没有 → 返回空，调用方按「无到期」处理（不编造）。
+func (p resourcePackage) expiryString() string {
+	if p.DeductionEndTime > 0 {
+		return time.UnixMilli(p.DeductionEndTime).Format(creditPackLayout)
+	}
+	return p.CycleEndTime
+}
+
+// CreditPack 单个积分包的到期明细。
+type CreditPack struct {
+	Name string `json:"name,omitempty"`
+	// EndTime 到期时间（creditPackLayout 原文），= DeductionEndTime 优先。
+	EndTime string `json:"end_time,omitempty"`
+	// CycleEndTime 上游下发的周期结束时间原文。与 EndTime 不同时才需要展示
+	// （说明这个包是按周期发量的，EndTime 才是真到期）。
+	CycleEndTime string `json:"cycle_end_time,omitempty"`
+	Remain       int64  `json:"remain"`
+	Size         int64  `json:"size"`
+}
+
+// creditPackLayout 上游 CycleEndTime 的格式（与 billing 请求体里的时间格式同源）。
+const creditPackLayout = "2006-01-02 15:04:05"
+
+// summarizeExpiry 从逐包明细里挑出最近一次**有余额的**到期：解析成功且晚于 now 的最小时间，
+// 并把同一时刻到期的包剩余量合并计入 expiring。没有这样的包 → 返回空。
+//
+// 为什么跳过 remain <= 0 的包：一个已经用光的包到期时丢不了任何东西，但它的到期时间
+// 往往最早（实测：最早到期的是 9/30 的 0 余额包，而真正有余额的是 10/1 的 45 分）。
+// 拿它当「最近到期」会把有余额的那批挤出视野，正好把这一栏的用途反掉了。
+func summarizeExpiry(packs []CreditPack, now time.Time) (at string, expiring int64) {
+	best := time.Time{}
+	for _, p := range packs {
+		if p.EndTime == "" || p.Remain <= 0 {
+			continue
+		}
+		t, err := time.ParseInLocation(creditPackLayout, p.EndTime, now.Location())
+		if err != nil || !t.After(now) {
+			continue
+		}
+		if best.IsZero() || t.Before(best) {
+			best, at, expiring = t, p.EndTime, p.Remain
+			continue
+		}
+		if t.Equal(best) {
+			expiring += p.Remain
+		}
+	}
+	return at, expiring
+}
+
+// sortPacksByExpiry 按到期时间升序重排明细；无到期（或解析失败）的排最后，组内保持原序。
+func sortPacksByExpiry(packs []CreditPack) []CreditPack {
+	key := func(p CreditPack) (time.Time, bool) {
+		if p.EndTime == "" {
+			return time.Time{}, false
+		}
+		t, err := time.ParseInLocation(creditPackLayout, p.EndTime, time.Local)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return t, true
+	}
+	sort.SliceStable(packs, func(i, j int) bool {
+		ti, oki := key(packs[i])
+		tj, okj := key(packs[j])
+		if oki != okj {
+			return oki // 有到期的在前
+		}
+		if !oki {
+			return false
+		}
+		return ti.Before(tj)
+	})
+	return packs
 }
 
 // UserResource 查询账号可花费积分余额（所有套餐聚合，负值钳 0）。
@@ -606,7 +760,17 @@ func (c *Client) UserResource(a *authstore.Account) (*Credits, error) {
 		out.Remain += remain
 		out.Used += used
 		out.Size += size
+		pack := CreditPack{
+			Name:         p.PackageName,
+			EndTime:      p.expiryString(),
+			CycleEndTime: p.CycleEndTime,
+			Remain:       remain,
+			Size:         size,
+		}
+		out.Details = append(out.Details, pack)
 	}
+	out.Details = sortPacksByExpiry(out.Details)
+	out.ExpiresAt, out.ExpiringRemain = summarizeExpiry(out.Details, now)
 	if out.Size > 0 {
 		if derived := out.Size - out.Remain; derived > out.Used {
 			out.Used = derived
@@ -622,6 +786,154 @@ func (c *Client) UserResource(a *authstore.Account) (*Credits, error) {
 		out.Remain = 0
 	}
 	return out, nil
+}
+
+// PromoWindow 促销的每日时段窗口（"23:00" ~ "7:50"，跨零点由 start > end 表达）。
+type PromoWindow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// ModelPromotion 上游 /v3/config 下发的模型促销条目。
+//
+// 两种形态（由 Schedule 的字段区分）：
+//   - 日期区间型：ValidFrom/ValidUntil 有值（如「限时免费至 9-25」）
+//   - 每日时段型：Daily 有值（如「每晚 23:00—次日 8:00 五折」）
+//
+// Factor 是折扣系数：0 = 免费，0.5 = 五折，1 = 无折扣。
+type ModelPromotion struct {
+	ID         string   `json:"id"`
+	ModelIDs   []string `json:"model_ids"`
+	Enabled    bool     `json:"enabled"`
+	Kind       string   `json:"kind,omitempty"`
+	Priority   int      `json:"priority,omitempty"`
+	BadgeLabel string   `json:"badge_label,omitempty"`
+	BadgeColor string   `json:"badge_color,omitempty"`
+	// HasDiscount 上游是否下发了 discount 块。
+	//
+	// 有若干条目只带 badge、不带 discount（上游用它做「时段内/时段外」两张脸，
+	// 例如 glm-5.2 的夜间折扣在白天挂一张同名的 daytime-badge）。
+	// 这些条目 factor 会缺省为 0，若不区分就会把「白天原价」误报成「免费」。
+	HasDiscount bool `json:"has_discount,omitempty"`
+	// Factor 折扣系数：0 = 免费，0.5 = 五折，1 = 无折扣。
+	//
+	// 指针 + omitempty：没有 discount 块的条目直接不下发这个字段。若用 float64 的
+	// 零值，JSON 里会出现「has_discount:false 但 factor:0」—— 单看 factor 会读成
+	// 「免费」，正是上面说的那个误报。字段缺席比给个会被误读的 0 诚实。
+	Factor            *float64      `json:"factor,omitempty"`
+	DiscountedCredits string        `json:"discounted_credits,omitempty"`
+	ValidFrom         string        `json:"valid_from,omitempty"`
+	ValidUntil        string        `json:"valid_until,omitempty"`
+	Daily             []PromoWindow `json:"daily,omitempty"`
+	Timezone          string        `json:"timezone,omitempty"`
+	Text              string        `json:"text,omitempty"` // hover.textZh 原文
+}
+
+// Promotions 拉取账号所在域的模型促销配置。
+//
+// 数据源是 /v3/config 的 data.modelPromotions —— 与网关 /v1/models 的模型目录同源，
+// 但网关只解析 models/agents，未解析这一段，所以 GUI 自己直连取（与积分查询同思路）。
+// 促销是营销配置，调用方负责缓存；本方法不做缓存。
+func (c *Client) Promotions(a *authstore.Account) ([]ModelPromotion, error) {
+	region := regionOfAccount(a)
+	req, err := http.NewRequest(http.MethodGet, c.chatBase(a)+EndpointV3Config, nil)
+	if err != nil {
+		return nil, err
+	}
+	// 必须用桌面端头：CLI UA 拿到的配置里没有 modelPromotions（见 desktopHeaders 注释）。
+	desktopHeaders(req, region)
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	req.Header.Set("X-CodeBuddy-Request", "1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), promoFetchTimeout)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	data, err := c.doJSON(req)
+	if err != nil {
+		return nil, err
+	}
+	// 注意 doJSON 已经把信封剥掉了（返回 data 本身），所以这里直接解顶层 modelPromotions。
+	var resp struct {
+		Promotions []struct {
+			ID       string   `json:"id"`
+			ModelIDs []string `json:"modelIds"`
+			Enabled  bool     `json:"enabled"`
+			Kind     string   `json:"kind"`
+			Priority int      `json:"priority"`
+			Badge    struct {
+				Label string `json:"label"`
+				Color string `json:"color"`
+			} `json:"badge"`
+			// 指针：区分「上游没给 discount 块」与「给了但 factor=0（真免费）」。
+			Discount *struct {
+				Factor            float64 `json:"factor"`
+				DiscountedCredits string  `json:"discountedCredits"`
+			} `json:"discount"`
+			Schedule struct {
+				Timezone   string `json:"timezone"`
+				ValidFrom  string `json:"validFrom"`
+				ValidUntil string `json:"validUntil"`
+				Daily      []struct {
+					Start string `json:"start"`
+					End   string `json:"end"`
+				} `json:"daily"`
+			} `json:"schedule"`
+			Hover struct {
+				TextZh string `json:"textZh"`
+			} `json:"hover"`
+		} `json:"modelPromotions"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("促销配置解析失败: %w", err)
+	}
+	out := make([]ModelPromotion, 0, len(resp.Promotions))
+	for _, p := range resp.Promotions {
+		if !p.Enabled {
+			continue // 停用的促销不下发，避免页面展示已下线的活动
+		}
+		mp := ModelPromotion{
+			ID:         p.ID,
+			ModelIDs:   p.ModelIDs,
+			Enabled:    p.Enabled,
+			Kind:       p.Kind,
+			Priority:   p.Priority,
+			BadgeLabel: p.Badge.Label,
+			BadgeColor: p.Badge.Color,
+			ValidFrom:  p.Schedule.ValidFrom,
+			ValidUntil: p.Schedule.ValidUntil,
+			Timezone:   p.Schedule.Timezone,
+			Text:       p.Hover.TextZh,
+		}
+		// 已过期的促销不下发：上游会把结束的活动继续挂在配置里（实测 hy4-preview
+		// 的限免 2026-09-08 已结束但仍在列表），照搬会让页面显示一个假的「限时免费」。
+		if end, ok := parseRFC3339(mp.ValidUntil); ok && end.Before(time.Now()) {
+			continue
+		}
+		if p.Discount != nil {
+			mp.HasDiscount = true
+			mp.Factor = &p.Discount.Factor
+			mp.DiscountedCredits = p.Discount.DiscountedCredits
+		}
+		for _, w := range p.Schedule.Daily {
+			mp.Daily = append(mp.Daily, PromoWindow{Start: w.Start, End: w.End})
+		}
+		out = append(out, mp)
+	}
+	return out, nil
+}
+
+// parseRFC3339 解析促销里的 schedule 时间（带时区偏移，如 "2026-09-25T00:00:00+08:00"）。
+// 解析失败返回 ok=false —— 上游格式变了也不该让整条促销消失。
+func parseRFC3339(s string) (time.Time, bool) {
+	if strings.TrimSpace(s) == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // packageRemainUsed 按 Cycle* 优先的口径拆出 remain/used/size

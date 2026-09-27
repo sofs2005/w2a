@@ -3,8 +3,12 @@
 本目录（`panel/`）由 `git subtree` 引入自
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
-上次同步：面板上游 `9413e70`（2026-09-18，实为 2026-09-19 拉取）。
+上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
 当前须保留的改动为第 1–3 条与第 5 条；第 4 条已撤销（原前提失效，见该节）。
+
+本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
+反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
+三处补丁均按原样重放，`App.tsx` 与上游逐字一致。另见文末「已知差异」一节。
 
 为了让它与网关**同进程、同端口**运行，合并时改动了下面几处面板源码。
 这些文件上游也会改，因此**每次 `git subtree pull` 后都需要重新确认**。
@@ -90,3 +94,33 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 
 宿主的对应文件在仓库根：`cmd/server/panel.go`（路由合并）、`cmd/server/reload.go`
 （账号热加载）。它们不属于 subtree，不受 pull 影响。
+
+## 已知差异（未改上游代码，仅记录）
+
+### 模型页的「不要加域前缀」与本网关的 `cn:` 前缀
+
+上游 `a26cd0f` 新增的「模型与倍率」页（`web/src/pages/Models.tsx`）说明文字写：
+
+> 调用时**直接填第一列的模型 ID**（如 `glm-5.3`）—— 网关按账号所属域自动路由，
+> 不要加「域前缀」，上游不认这种写法。
+
+该结论来自面板作者对**上游官方网关**的实测（带前缀调用被拒：
+`{"code":11102,"msg":"model [cn:glm-5.1] service info not found"}`）。但**本 fork
+的网关是加前缀的**，两处口径不同：
+
+- `internal/server/handler.go` 的 `modelList` 对 CN 模型输出 `"id": "cn:" + mi.ID`
+  （global 为 `"global:" + id`），故第一列小字副行展示的是**带前缀**的 id；
+  相关断言见 `internal/server/handler_context_length_test.go`（如 `byID["cn:glm-5.2"]`）。
+- `internal/server/resolve_model.go` 的 `resolveModel`：裸名一律判为 `realm=cn`；
+  而 `realm` 参与选号（`handler.go` 中 `acct.Realm() != realm` 的过滤），
+  **不剥离前缀、也不是「按账号所属域自动路由」**。
+
+因此在本 fork 上：
+
+- 填**裸名**（`glm-5.3`）等价于 `cn:glm-5.3`，走国内版号；国内版模型这样写没问题。
+- 填**带前缀名**（照抄副行 `global:xxx`）是**可用**的，与本页文案相反。
+- 只有国际版账号时，填裸名会按 CN 域筛号而选不到号——需填 `global:` 前缀。
+
+未改动面板源码：该文案对上游是准确的，属两套网关的语义差异，不宜把面板改成
+与本 fork 强绑定。**若今后要让本 fork 的 `/v1/models` 返回裸 ID**（与上游对齐），
+那是一次网关侧的行为变更，需同步改上述测试与 `resolveModel` 的默认域语义。

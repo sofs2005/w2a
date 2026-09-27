@@ -35,6 +35,26 @@ export interface Account {
   credits: number
   live_credits?: number
   credits_at?: string
+  /** 积分到期：与 live_credits 同源同时刻。 */
+  credits_expire_at?: string
+  credits_expiring?: number
+}
+
+/** 单个积分包的到期明细。 */
+export interface CreditPack {
+  name?: string
+  /**
+   * 真正的到期时间，上游原文 "2006-01-02 15:04:05"；空 = 无到期。
+   *
+   * 后端取的是上游 `DeductionEndTime`（扣费截止），不是 `CycleEndTime` ——
+   * 按周期发量的包（如「个人体验版」）CycleEndTime 只是月周期边界，
+   * 拿它当到期会虚报「几天后作废」。两者不同时 cycle_end_time 会一并给出。
+   */
+  end_time?: string
+  /** 上游 CycleEndTime 原文；与 end_time 不同才需要展示。 */
+  cycle_end_time?: string
+  remain: number
+  size: number
 }
 
 export interface Credits {
@@ -42,6 +62,11 @@ export interface Credits {
   used: number
   size: number
   packages: number
+  /** 最近一次积分到期时间（上游原文，空 = 无到期）。 */
+  expires_at?: string
+  /** 与 expires_at 同时刻到期的那批剩余积分。 */
+  expiring_remain?: number
+  details?: CreditPack[] | null
 }
 
 export interface CreditsTotal {
@@ -168,11 +193,77 @@ export interface Model {
   owned_by: string
   context_length: number
   max_output_tokens?: number
+
+  /** 以下为网关 /v1/models 透出的上游元信息（模型目录页用）。 */
+  /** 上游显示名，如 "Deepseek-V4.1-Flash"。 */
+  name?: string
+  description?: string
+  /** 积分倍率原文，形如 "x0.03" 或 "x0.59 credits"；缺省 = 上游未标倍率。 */
+  credits?: string
+  vendor?: string
+  tags?: string[]
+  is_default?: boolean
+  only_reasoning?: boolean
+  /**
+   * 上游声明的图片能力。
+   *
+   * ⚠️ **不要拿它上屏**：2026-09-23 实测国际版 hy* 系（hy3 / hy4-preview-f / hy4-preview）
+   * 全标 true 但根本认不出图（二选一 8/20 = 瞎猜水平；同账号 glm-5v-turbo 4/4、
+   * 国内版同族模型各 8/8）。这个字段只说明「接口收得下图片」，不代表看得懂。
+   * 要判断图片能力只能实测，故模型页不展示这一列。
+   */
+  supports_images?: boolean
+  supports_reasoning?: boolean
+  supports_tool_call?: boolean
+  max_allowed_size?: number
+  reasoning_effort?: string
+  reasoning_summary?: string
+
+  /** 命中的上游促销（限时免费 / 折扣）。按优先级降序，可能同时有多条。 */
+  promotions?: ModelPromotion[] | null
+}
+
+/** 促销的每日时段（如夜间折扣）。 */
+export interface PromoWindow {
+  /** "HH:MM" */
+  start: string
+  /** "HH:MM"；早于 start 表示跨零点（如 23:00→08:00） */
+  end: string
+}
+
+/** 上游 /v3/config 下发的模型促销条目。 */
+export interface ModelPromotion {
+  id: string
+  /** 生效的裸模型名（无域前缀），与 Model.id 去掉 realm 前缀后对齐。 */
+  model_ids: string[] | null
+  enabled: boolean
+  /** 促销类型原文，如 "limited_free" / "off_peak"。 */
+  kind?: string
+  priority?: number
+  badge_label?: string
+  badge_color?: string
+  /** 上游是否下发了 discount 块。false = 只挂徽标的条目（factor 无意义，别当免费）。 */
+  has_discount?: boolean
+  /** 折扣系数：0 = 免费，0.5 = 五折，1 = 无折扣。
+   *  仅在 has_discount 为真时下发 —— 没有 discount 块的条目这个字段是**缺席**的，
+   *  不是 0（后端用指针 + omitempty 保证），所以别用 `factor ?? 0`。 */
+  factor?: number
+  discounted_credits?: string
+  /** 日期区间型促销的起止（上游原文，形如 "2026-09-25 23:59:59"）。 */
+  valid_from?: string
+  valid_until?: string
+  /** 每日时段型促销的窗口。 */
+  daily?: PromoWindow[] | null
+  timezone?: string
+  /** 上游 hover 文案（中文）。 */
+  text?: string
 }
 
 export interface ModelsResponse {
   data: Model[] | null
   count: number
+  /** 按域记录促销拉取失败原因（best-effort，失败不影响模型列表）。 */
+  promo_errors?: Record<string, string> | null
 }
 
 export interface SessionInfo {

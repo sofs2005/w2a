@@ -18,6 +18,23 @@ export function fmtTime(sec?: number): string {
 }
 
 /** 把 ISO 时间字符串格式化为本地时间（相对时间优先）。 */
+/** 上游时间 → Unix 秒。兼容两种形态：
+ *   · RFC3339 带时区偏移（促销 schedule，如 "2026-09-25T00:00:00+08:00"）
+ *   · "2006-01-02 15:04:05"（积分包的 CycleEndTime，无时区，按本地时间解）
+ *  带偏移的必须交给 Date.parse —— 自己拆数字会把 +08:00 的午夜按浏览器时区解，跨时区差一天。 */
+export function upstreamSec(s?: string): number | undefined {
+  const t = (s || '').trim()
+  if (!t) return undefined
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(t)) {
+    const ms = Date.parse(t)
+    return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000)
+  }
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(t)
+  if (!m) return undefined
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
+  return Number.isNaN(d.getTime()) ? undefined : Math.floor(d.getTime() / 1000)
+}
+
 export function fmtISO(iso?: string): string {
   if (!iso) return '—'
   const t = Date.parse(iso)
@@ -93,9 +110,18 @@ export function coolKindText(kind?: string): string {
   }
 }
 
-export function Badge({ cls, children }: { cls: string; children: React.ReactNode }) {
+export function Badge({
+  cls,
+  children,
+  title,
+}: {
+  cls: string
+  children: React.ReactNode
+  /** 悬停说明（可选）。徽标本身很短，装不下的口径差异写这里。 */
+  title?: string
+}) {
   return (
-    <span className={`badge ${cls}`}>
+    <span className={`badge ${cls}`} title={title}>
       <span className="badge-dot" />
       {children}
     </span>

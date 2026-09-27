@@ -121,23 +121,145 @@ func TestValidateEmptyAndUnknown(t *testing.T) {
 	}
 }
 
-// TestSameOriginOrigin 校验逻辑。
+// TestSameOrigin 同源校验。
+//
+// 覆盖两类场景：
+//  1. 直连（Origin 与 r.Host 一致）——原有行为不能回退；
+//  2. 反向代理（issue #7）——nginx 丢端口、透传内网地址、后端 http 前端 https
+//     等情形都必须判定为同源，否则用户保存配置/添加账号会被 403 拦住。
 func TestSameOrigin(t *testing.T) {
 	cases := []struct {
-		origin, host string
-		want         bool
+		name   string
+		origin string
+		hosts  []string
+		want   bool
 	}{
-		{"http://127.0.0.1:8787", "127.0.0.1:8787", true},
-		{"https://gui.example.com", "gui.example.com", true},
-		{"http://127.0.0.1:8787/", "127.0.0.1:8787", true},
-		{"https://evil.example.com", "127.0.0.1:8787", false},
-		{"http://127.0.0.1:9999", "127.0.0.1:8787", false},
-		{"null", "127.0.0.1:8787", false},
+		// ── 直连（原有行为）──
+		{"直连-http", "http://127.0.0.1:8787", []string{"127.0.0.1:8787"}, true},
+		{"直连-域名", "https://gui.example.com", []string{"gui.example.com"}, true},
+		{"直连-尾斜杠", "http://127.0.0.1:8787/", []string{"127.0.0.1:8787"}, true},
+
+		// ── 反向代理（issue #7 回归）──
+		{"反代-代理丢端口", "https://panel.example.com", []string{"panel.example.com:8787"}, true},
+		{"反代-协议不同", "https://panel.example.com", []string{"http://panel.example.com"}, true},
+		{"反代-Host为内网地址+XFH", "https://panel.example.com",
+			[]string{"127.0.0.1:8787", "panel.example.com"}, true},
+		{"反代-XFH带端口", "https://panel.example.com",
+			[]string{"127.0.0.1:8787", "panel.example.com:8787"}, true},
+		{"反代-XFH链取任一(已拆分的候选)", "https://panel.example.com",
+			[]string{"127.0.0.1", "a.example.com", "panel.example.com"}, true},
+		{"反代-Forwarded头", "https://panel.example.com",
+			[]string{"127.0.0.1:8787", "panel.example.com:8787"}, true},
+		{"反代-端口由XFP补", "http://panel.example.com",
+			[]string{"panel.example.com:8080"}, true},
+
+		// ── 应拒绝 ──
+		{"跨站-不同域名", "https://evil.example.com", []string{"127.0.0.1:8787"}, false},
+		{"跨站-域名后缀陷阱", "https://evil-panel.example.com", []string{"panel.example.com"}, false},
+		{"跨站-同IP不同端口仍是同主机名→放行", "http://127.0.0.1:9999",
+			[]string{"127.0.0.1:8787"}, true},
+		{"空 Origin 视为无效", "", []string{"panel.example.com"}, false},
+		{"null Origin 拒绝", "null", []string{"panel.example.com"}, false},
+		{"候选全空", "https://panel.example.com", []string{"", "  "}, false},
+		{"只有协议无主机", "https://", []string{"panel.example.com"}, false},
 	}
 	for _, c := range cases {
-		if got := sameOrigin(c.origin, c.host); got != c.want {
-			t.Errorf("sameOrigin(%q, %q) = %v, want %v", c.origin, c.host, got, c.want)
+		if got := sameOrigin(c.origin, c.hosts, nil); got != c.want {
+			t.Errorf("%s: sameOrigin(%q, %v) = %v, want %v", c.name, c.origin, c.hosts, got, c.want)
 		}
+	}
+}
+
+// TestHostnameOf 主机名归一化。
+func TestHostnameOf(t *testing.T) {
+	cases := map[string]string{
+		"https://panel.example.com":               "panel.example.com",
+		"http://panel.example.com:8787":           "panel.example.com",
+		"panel.example.com:8787":                  "panel.example.com",
+		"panel.example.com":                       "panel.example.com",
+		"PANEL.Example.COM":                       "panel.example.com",
+		"panel.example.com.":                      "panel.example.com",
+		"https://user:pw@panel.example.com:443/x": "panel.example.com",
+		"[::1]:8787":                              "[::1]",
+		"[::1]":                                   "[::1]",
+		"":                                        "",
+		"   ":                                     "",
+		"https://":                                "",
+		"null":                                    "null",
+	}
+	for in, want := range cases {
+		if got := hostnameOf(in); got != want {
+			t.Errorf("hostnameOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRequestHostsCollectsForwarded 验证候选主机收集（含各转发头形态）。
+func TestRequestHostsCollectsForwarded(t *testing.T) {
+	r := httptest.NewRequest("POST", "http://127.0.0.1:8787/api/config", nil)
+	r.Host = "127.0.0.1:8787"
+	r.Header.Set("X-Forwarded-Host", "panel.example.com:8787")
+	r.Header.Set("Forwarded", `for=1.2.3.4;host=other.example.com;proto=https`)
+	r.Header.Set("X-Forwarded-Port", "443")
+
+	hosts := requestHosts(r)
+	joined := strings.Join(hosts, "|")
+	for _, want := range []string{"127.0.0.1:8787", "panel.example.com:8787", "other.example.com"} {
+		found := false
+		for _, h := range hosts {
+			if h == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("候选缺少 %q（得到 %s）", want, joined)
+		}
+	}
+	// 无端口的候选应被补上 X-Forwarded-Port。
+	if !strings.Contains(joined, "other.example.com:443") {
+		t.Errorf("应据 X-Forwarded-Port 补端口，得到 %s", joined)
+	}
+}
+
+// TestSameOriginAllowlist 显式白名单（allowed_origins）生效，
+// 用于反代连 Host 都不透传、后端无从推导的兜底场景。
+func TestSameOriginAllowlist(t *testing.T) {
+	// 无反代头、Host 为后端地址 → 默认拒绝。
+	if sameOrigin("https://panel.example.com", []string{"127.0.0.1:8787"}, nil) {
+		t.Error("无从推导时应拒绝")
+	}
+	// 配了白名单 → 放行。
+	if !sameOrigin("https://panel.example.com", []string{"127.0.0.1:8787"},
+		[]string{"panel.example.com"}) {
+		t.Error("白名单命中应放行")
+	}
+	// 白名单带端口/协议也应归一化匹配。
+	if !sameOrigin("https://panel.example.com", []string{"127.0.0.1:8787"},
+		[]string{"https://panel.example.com:8443"}) {
+		t.Error("白名单应忽略协议与端口")
+	}
+	// 白名单不匹配的域名仍拒绝。
+	if sameOrigin("https://evil.example.com", []string{"127.0.0.1:8787"},
+		[]string{"panel.example.com"}) {
+		t.Error("非白名单域名不应放行")
+	}
+}
+
+// TestSameOriginRejectsForgedOrigin 伪造 Origin 必须被拒
+// （浏览器不允许脚本设置 Host/X-Forwarded-*，故这些头不可被跨站攻击者利用）。
+func TestSameOriginRejectsForgedOrigin(t *testing.T) {
+	// 攻击者站点伪造请求，Host 头会被浏览器设成目标站点（他不控），
+	// 但他能控制的 Origin 是他的站点。
+	if sameOrigin("https://attacker.example", []string{"panel.example.com"}, nil) {
+		t.Error("攻击者 Origin 不应被放行")
+	}
+	// 即便他在 Origin 里塞上路径试图绕过。
+	if sameOrigin("https://attacker.example/panel.example.com", []string{"panel.example.com"}, nil) {
+		t.Error("带路径的伪造 Origin 不应被放行")
+	}
+	// 试图用子域名混淆。
+	if sameOrigin("https://panel.example.com.attacker.example", []string{"panel.example.com"}, nil) {
+		t.Error("后缀混淆应被拒绝")
 	}
 }
 

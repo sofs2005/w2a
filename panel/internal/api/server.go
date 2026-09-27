@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	// 注意：积分补齐不在这里做。所有展示积分的页面（账号页、仪表盘）
+	// 都会调 /api/accounts，故统一由 handleAccounts 触发，避免重复。
 	writeJSON(w, http.StatusOK, s.svc.Overview(r.Context()))
 }
 
@@ -115,6 +118,10 @@ func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// 顺带在后台补齐积分（issue #8）：外部渠道写入的账号在网关池里 credits
+	// 初值为 0，而网关只在签到任务里更新它——不主动查就会一直显示 0。
+	// 异步执行，不阻塞本响应；前端 20 秒轮询即可看到结果。
+	s.svc.EnsureCredits(accounts)
 	resp := map[string]any{
 		"accounts":    accounts,
 		"file_issues": issues,
@@ -517,13 +524,70 @@ func (s *Server) handlePricingDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已移除该模型价格"})
 }
 
+// modelView 模型条目 + 挂上的促销。内嵌 gateway.Model 让原有字段平铺，
+// promotions 是附加字段（无促销时省略，前端按「无优惠」处理）。
+type modelView struct {
+	gateway.Model
+	Promotions []upstream.ModelPromotion `json:"promotions,omitempty"`
+}
+
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models, err := s.svc.Gateway().Models(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": models, "count": len(models)})
+
+	// 促销按域取。best-effort：拿不到只是少一列优惠信息，不该让模型列表打不开，
+	// 故失败降级为 promo_errors 里的文案，不影响 data。
+	promosByRealm := map[string][]upstream.ModelPromotion{}
+	promoErrs := map[string]string{}
+	for _, realm := range []string{"global", "cn"} {
+		p, msg := s.svc.PromotionsForRealm(realm)
+		if len(p) > 0 {
+			promosByRealm[realm] = p
+		}
+		if msg != "" {
+			promoErrs[realm] = msg
+		}
+	}
+
+	out := make([]modelView, 0, len(models))
+	for _, m := range models {
+		realm, bare := modelRealmBare(m.ID)
+		v := modelView{Model: m}
+		for _, p := range promosByRealm[realm] {
+			for _, id := range p.ModelIDs {
+				if strings.EqualFold(id, bare) {
+					v.Promotions = append(v.Promotions, p)
+					break
+				}
+			}
+		}
+		// 优先级高的排前面（同域可同时存在「限时免费」与「夜间折扣」两条）。
+		sort.SliceStable(v.Promotions, func(i, j int) bool {
+			return v.Promotions[i].Priority > v.Promotions[j].Priority
+		})
+		out = append(out, v)
+	}
+
+	resp := map[string]any{"data": out, "count": len(out)}
+	if len(promoErrs) > 0 {
+		resp["promo_errors"] = promoErrs
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// modelRealmBare 拆出模型 id 的域与裸名：global:xxx → (global, xxx)；
+// cn:xxx 或无前缀 → (cn, xxx)。促销的 modelIds 用的是裸名，靠这里对齐。
+func modelRealmBare(id string) (realm, bare string) {
+	if strings.HasPrefix(id, "global:") {
+		return "global", id[len("global:"):]
+	}
+	if strings.HasPrefix(id, "cn:") {
+		return "cn", id[len("cn:"):]
+	}
+	return "cn", id
 }
 
 // chatRequest 聊天测试台请求。

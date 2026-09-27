@@ -1,0 +1,148 @@
+# ============================================================================
+# nginx 反向代理 workbuddy2api 的参考配置
+#
+# 已按本项目实测行为调优，四处的取值依据见注释。
+# 用法：改 server_name / 证书路径 / upstream 地址后 include 进主配置。
+# ============================================================================
+
+# ── 上游定义 ────────────────────────────────────────────────────────────────
+# keepalive 让 nginx 复用与后端的连接。客户端高频调 API 时能省掉大量
+# TCP 握手（尤其是 HTTPS 反代 + 本地明文后端这种组合）。
+upstream wb2a_gateway {
+    server 127.0.0.1:7864;
+    keepalive 32;
+}
+upstream wb2a_panel {
+    server 127.0.0.1:8787;
+    keepalive 16;
+}
+
+# 后端若跑在容器里、nginx 在宿主机上，用 Docker 网桥地址：
+#   server 172.17.0.1:7864;
+# nginx 也在容器里则换成容器名（需同一 network）：
+#   server workbuddy2api-v2:7864;
+
+# ══════════════════════════════════════════════════════════════════════════
+# 1) 网关 API —— 给程序/脚本调用（OpenAI 兼容）
+# ══════════════════════════════════════════════════════════════════════════
+server {
+    listen 443 ssl;
+    http2 on;                       # nginx ≥1.25.1 写法；旧版用 listen 443 ssl http2;
+    server_name api.example.com;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+
+    # 请求体上限。nginx 默认 1m —— 长对话/带图请求很容易超过，
+    # 超了会直接 413（客户端看到的是 nginx 报错，不是网关的）。
+    # 网关自身默认限 8MB（server.max_body_mb），这里留一倍余量。
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://wb2a_gateway;
+
+        # 用 1.1 才能配合上面的 keepalive 复用连接（默认 1.0 每次新建）。
+        proxy_http_version 1.1;
+        # 清空 Connection：配合 1.1 让 nginx 与后端保持长连接。
+        # 注意不是升级 WebSocket —— 网关没有 WS，无需其他 Upgrade 头。
+        proxy_set_header Connection "";
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # ── SSE 流式必需 ───────────────────────────────────────────────
+        # nginx 对 Content-Type: text/event-stream 会**自动**关闭缓冲，
+        # 所以实测默认值下流式也能逐帧到达。但仍显式关掉：
+        # 一是不依赖隐式行为（换 CDN/网关后行为可能不同），
+        # 二是 gzip 之类的缓冲层也会让 SSE 攒批。
+        proxy_buffering off;
+        proxy_cache off;                # 别缓存 SSE 响应
+        chunked_transfer_encoding on;
+
+        # ── 超时：这是最容易踩的坑 ─────────────────────────────────────
+        # proxy_read_timeout 是「两次读之间的空闲超时」，不是请求总时长。
+        # 默认仅 60s —— 实测本网关有 TTFB（首字节等待）高达 624 秒的流式
+        # 请求（推理模型长思考时上游长时间不吐字），默认值下这些请求会在
+        # 60 秒处被 nginx 截断成 504。
+        # 实测：静默 75 秒的上游 + 默认配置 → 60.06s 处 504；
+        #       改 300s                      → 75.6s 正常完成。
+        proxy_read_timeout    900s;
+        proxy_send_timeout    900s;
+        proxy_connect_timeout 30s;
+
+        # SSE 无需 gzip；开启反而会引入缓冲。
+        gzip off;
+    }
+}
+
+# ══════════════════════════════════════════════════════════════════════════
+# 2) 控制面板 —— 浏览器访问
+# ══════════════════════════════════════════════════════════════════════════
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name panel.example.com;
+
+    ssl_certificate     /etc/nginx/certs/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/privkey.pem;
+
+    # 面板的「导入凭证」上限 4MB。
+    client_max_body_size 8m;
+
+    location / {
+        proxy_pass http://wb2a_panel;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        # ── Host 必须透传，否则写操作会被 CSRF 拦成 403 ────────────────
+        # 用 $http_host（带端口）而不是 $host（丢端口）。
+        # 面板的 CSRF 校验会拿 Origin 与这些候选值比对：只要有一个对得上
+        # 就放行。$host 丢端口时，浏览器发的 Origin 带端口就对不上了。
+        # 若代理连 Host 都不透传（最简 proxy_pass），改用面板配置兜底：
+        #   { "allowed_origins": ["panel.example.com"] }
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Forwarded-Host  $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+
+        # 面板的「聊天测试」页是 SSE，同样需要关缓冲。
+        proxy_buffering off;
+
+        # 面板请求通常很快；但聊天测试页走网关，可能同样等很久。
+        proxy_read_timeout    900s;
+        proxy_send_timeout    900s;
+        proxy_connect_timeout 30s;
+    }
+}
+
+# ══════════════════════════════════════════════════════════════════════════
+# 3) 只有 HTTP、没有域名/证书时的最简版
+# ══════════════════════════════════════════════════════════════════════════
+# server {
+#     listen 80;
+#     server_name _;
+#     client_max_body_size 16m;
+#
+#     location / {                      # 网关 API
+#         proxy_pass http://wb2a_gateway;
+#         proxy_http_version 1.1;
+#         proxy_set_header Connection "";
+#         proxy_set_header Host $http_host;
+#         proxy_buffering off;
+#         proxy_read_timeout 900s;
+#         proxy_send_timeout 900s;
+#     }
+#     location /panel/ {                # 面板（子路径需前端配合，一般另开端口）
+#         proxy_pass http://wb2a_panel;
+#         proxy_http_version 1.1;
+#         proxy_set_header Connection "";
+#         proxy_set_header Host $http_host;
+#         proxy_set_header X-Forwarded-Host $http_host;
+#         proxy_buffering off;
+#         proxy_read_timeout 900s;
+#     }
+# }

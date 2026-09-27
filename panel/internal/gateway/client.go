@@ -62,6 +62,22 @@ type Model struct {
 	OwnedBy       string `json:"owned_by"`
 	ContextLength int64  `json:"context_length"`
 	MaxOutput     int64  `json:"max_output_tokens"`
+
+	// 以下字段网关 /v1/models 已下发，此前未声明而被丢弃；模型目录页需要，
+	// 故原样透传（缺省时省略，避免把「无此字段」与「空值」混为一谈）。
+	Name              string   `json:"name,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	Credits           string   `json:"credits,omitempty"` // 积分倍率原文，如 "x0.03" / "x0.59 credits"
+	Vendor            string   `json:"vendor,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	IsDefault         bool     `json:"is_default,omitempty"`
+	OnlyReasoning     bool     `json:"only_reasoning,omitempty"`
+	SupportsImages    bool     `json:"supports_images,omitempty"`
+	SupportsReasoning bool     `json:"supports_reasoning,omitempty"`
+	SupportsToolCall  bool     `json:"supports_tool_call,omitempty"`
+	MaxAllowedSize    int64    `json:"max_allowed_size,omitempty"`
+	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
+	ReasoningSummary  string   `json:"reasoning_summary,omitempty"`
 }
 
 // Client 网关客户端。每次请求都携带当前 api_key，因此支持运行期改配置。

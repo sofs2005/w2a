@@ -68,6 +68,17 @@ type Config struct {
 	// 留空 = 关闭重启能力。
 	DockerContainer string `json:"docker_container"`
 
+	// AllowedOrigins 额外允许的写操作来源（Origin 的 host 部分）。
+	//
+	// 用途：面板部署在**不转发任何 Host/X-Forwarded-* 头**的反向代理之后时
+	// （如最简 `location / { proxy_pass http://gui:8787; }`），后端拿不到用户
+	// 实际访问的域名，CSRF 同源校验无从比对 —— 此时在这里列出域名即可。
+	//
+	// 建议优先用「让代理透传 Host 或 X-Forwarded-Host」，本项是兜底手段。
+	// 例：["panel.example.com", "10.0.0.5:8787"]
+	// 留空 = 不额外放行（仅按请求头推导候选主机）。
+	AllowedOrigins []string `json:"allowed_origins"`
+
 	// DangerousOps 解锁高危操作（解禁账号 / 删除凭证 / 容器重启）。
 	// 默认 false：这些动作不可通过上游 API 撤销，误点代价高。
 	DangerousOps bool `json:"dangerous_ops"`
@@ -213,6 +224,14 @@ func applyEnv(c *Config) {
 	str("WBGUI_CONTAINER", &c.DockerContainer)
 	str("WBGUI_CREDENTIALS_FILE", &c.CredentialsFile)
 	str("WBGUI_PRICING_FILE", &c.PricingFile)
+	// WBGUI_ALLOWED_ORIGINS：逗号分隔的额外允许来源（反代兜底）。
+	if v := os.Getenv("WBGUI_ALLOWED_ORIGINS"); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				c.AllowedOrigins = append(c.AllowedOrigins, p)
+			}
+		}
+	}
 	if v := os.Getenv("WBGUI_AUTH_OWNER_UID"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.AuthOwnerUID = n
