@@ -1,4 +1,4 @@
-// 积分包真实到期解析：DeductionEndTime 优先、CycleEndTime 回退，产出有序到期批次。
+// 积分包真实到期解析：CycleEndTime 优先、DeductionEndTime 回退，产出有序到期批次。
 package upstream
 
 import (
@@ -9,10 +9,12 @@ import (
 // CreditExpiry 单个积分包的到期批次（真到期时刻 + 该包剩余可用积分）。
 //
 // 「真到期」的口径与面板（panel/internal/upstream/client.go 的 expiryString）一致：
-// DeductionEndTime 优先，缺失/为 0 时回退 CycleEndTime。两者的差别是实测出来的：
-// 按周期发量的包（「CodeBuddy个人体验版」）CycleEndTime 只是本月周期边界，
-// 真正的扣费截止在 DeductionEndTime——只按 CycleEndTime 判定会把这个包错排到最前，
-// 虚报「7 天后作废 500」，进而让选号把长期有效的积分当临期积分抢着烧。
+// CycleEndTime 优先，缺失/解析失败时回退 DeductionEndTime。两者的取舍是实测出来的：
+// 按周期发量的包（「CodeBuddy个人体验版」）CycleEndTime 是本周期边界（月末 23:59:59），
+// 而 DeductionEndTime 是 2034 年——与注册日同月日、恰隔 10 年，是**账户级的登记上限**，
+// 不是这批积分的作废时刻。实证：上游扣费**先扣该包**（余额在动），而更晚到期的包分文未动。
+// 取 DeductionEndTime 会把这个包算成 2034 年才到期，永远不进 72 小时紧急窗口，
+// 于是每期赠送的积分白白作废——正是本机制要防的事。
 type CreditExpiry struct {
 	// ExpiresAt 该批积分的真实到期时刻。零值 = 上游两个字段都缺（无到期），
 	// 调用方按「永不过期」处理（不参与临期优先）。
@@ -21,21 +23,21 @@ type CreditExpiry struct {
 	Remain int64
 }
 
-// packageExpiryTime 解析单个套餐的真实到期时刻（DeductionEndTime 优先，CycleEndTime 回退）。
-// ok=false 表示上游两个字段都没给（无到期）或回退字段解析失败——调用方按「无到期」处理，
+// packageExpiryTime 解析单个套餐的真实到期时刻（CycleEndTime 优先，DeductionEndTime 回退）。
+// ok=false 表示上游两个字段都没给（无到期）或两者都解析失败——调用方按「无到期」处理，
 // 不编造时刻（与面板「不编造」口径一致）。
-func packageExpiryTime(deductionEndMs int64, cycleEndTime string, loc *time.Location) (time.Time, bool) {
+// 参数按判据优先级排列：周期串在前，毫秒时间戳在后。
+func packageExpiryTime(cycleEndTime string, deductionEndMs int64, loc *time.Location) (time.Time, bool) {
+	if cycleEndTime != "" {
+		if t, err := time.ParseInLocation(packageEndLayout, cycleEndTime, loc); err == nil {
+			return t, true
+		}
+		// 周期串是脏数据：不因此判「无到期」，继续试 DeductionEndTime（少一层信息好过没有）。
+	}
 	if deductionEndMs > 0 {
 		return time.UnixMilli(deductionEndMs), true
 	}
-	if cycleEndTime == "" {
-		return time.Time{}, false
-	}
-	t, err := time.ParseInLocation(packageEndLayout, cycleEndTime, loc)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
+	return time.Time{}, false
 }
 
 // expiryBatches 从 accounts 产出选号所需的到期信息：
@@ -58,7 +60,7 @@ func expiryBatches(accounts []resourceAccount, now time.Time, soon time.Duration
 			continue
 		}
 		total += r
-		end, ok := packageExpiryTime(acct.DeductionEndTime, acct.CycleEndTime, loc)
+		end, ok := packageExpiryTime(acct.CycleEndTime, acct.DeductionEndTime, loc)
 		if !ok || !end.After(now) {
 			continue // 无到期 / 已过期：不产批次，也不进窗口
 		}
@@ -75,8 +77,8 @@ func expiryBatches(accounts []resourceAccount, now time.Time, soon time.Duration
 // 具名类型便于 expiryBatches 独立持有切片（匿名 struct 无法在函数签名里复用）。
 type resourceAccount struct {
 	PackageName      string `json:"PackageName"`
-	CycleEndTime     string `json:"CycleEndTime"`     // "2006-01-02 15:04:05"，缺省/空 = 无周期时间
-	DeductionEndTime int64  `json:"DeductionEndTime"` // 毫秒时间戳，真正的扣费截止（优先判据）
+	CycleEndTime     string `json:"CycleEndTime"`     // "2006-01-02 15:04:05"，本周期边界 = 真到期（优先判据）
+	DeductionEndTime int64  `json:"DeductionEndTime"` // 毫秒时间戳，周期串缺失/脏数据时的回退
 	CapacitySize     int64  `json:"CapacitySize"`
 	CapacityRemain   int64  `json:"CapacityRemain"`
 	CapacityUsed     int64  `json:"CapacityUsed"`

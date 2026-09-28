@@ -8,50 +8,54 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestExpiryPrefersDeductionEndTime 到期判据是 DeductionEndTime（毫秒时间戳），
-// 优先于可能只是周期边界的 CycleEndTime——与面板 /credits 的 expiryString 同口径。
-// 场景取自实测：「个人体验版」CycleEndTime=本月周期边界，真到期在 DeductionEndTime。
-func TestExpiryPrefersDeductionEndTime(t *testing.T) {
+// TestExpiryPrefersCycleEndTime 到期判据是 CycleEndTime（本周期边界，积分到期即作废），
+// 优先于 DeductionEndTime——后者对按周期发量的包只是账户级登记上限（见 expiry.go）。
+// 场景取自实测：「个人体验版」CycleEndTime=本周期边界，DeductionEndTime=2034 年。
+func TestExpiryPrefersCycleEndTime(t *testing.T) {
 	now := time.Now()
-	cycle := now.Add(3 * 24 * time.Hour).Format(packageEndLayout) // 3 天后（周期边界）
-	deduction := now.Add(200 * 24 * time.Hour).UnixMilli()        // 真到期：200 天后
+	cycle := now.Add(3 * 24 * time.Hour).Format(packageEndLayout) // 真到期：3 天后（本周期边界）
+	deduction := now.Add(10 * 365 * 24 * time.Hour).UnixMilli()   // 2034 年那类账户级上限
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
 			`{"PackageName":"个人体验版","CycleEndTime":"` + cycle + `","DeductionEndTime":` + itoa(deduction) + `,"CycleCapacitySize":500,"CycleCapacityRemain":500,"CycleCapacityUsed":0}`), nil
 	})
-	// 7 天窗口：若误用 CycleEndTime 会归入 Expiring；正确口径（DeductionEndTime）应归 Stable。
+	// 7 天窗口：正确口径（CycleEndTime）应归 Expiring；误用 DeductionEndTime 会归 Stable，
+	// 该包就永远不进紧急窗口，每期赠送的积分白白作废。
 	remain, buckets, expiries, err := c.UserResourceExpiry(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("expiry: %v", err)
 	}
-	if remain != 500 || buckets.Expiring != 0 || buckets.Stable != 500 {
-		t.Errorf("remain=%d buckets=%+v, want 500/{Expiring:0 Stable:500}（按真到期判定）", remain, buckets)
+	if remain != 500 || buckets.Expiring != 500 || buckets.Stable != 0 {
+		t.Errorf("remain=%d buckets=%+v, want 500/{Expiring:500 Stable:0}（按周期边界判定）", remain, buckets)
 	}
 	if len(expiries) != 1 {
 		t.Fatalf("批次 = %d 条, want 1", len(expiries))
 	}
-	if got := expiries[0].ExpiresAt.UnixMilli(); got != deduction {
-		t.Errorf("批次到期 = %d, want %d（DeductionEndTime）", got, deduction)
+	if got := expiries[0].ExpiresAt.Format(packageEndLayout); got != cycle {
+		t.Errorf("批次到期 = %q, want %q（CycleEndTime）", got, cycle)
 	}
 }
 
-// TestExpiryFallsBackToCycleEndTime 缺 DeductionEndTime 时回退 CycleEndTime。
-func TestExpiryFallsBackToCycleEndTime(t *testing.T) {
+// TestExpiryFallsBackToDeductionEndTime 缺 CycleEndTime 时回退 DeductionEndTime。
+func TestExpiryFallsBackToDeductionEndTime(t *testing.T) {
 	now := time.Now()
-	cycle := now.Add(3 * 24 * time.Hour).Format(packageEndLayout)
+	deduction := now.Add(3 * 24 * time.Hour)
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
-			`{"PackageName":"奖励包","CycleEndTime":"` + cycle + `","CycleCapacitySize":1500,"CycleCapacityRemain":1200,"CycleCapacityUsed":300}`), nil
+			`{"PackageName":"奖励包","DeductionEndTime":` + itoa(deduction.UnixMilli()) + `,"CycleCapacitySize":1500,"CycleCapacityRemain":1200,"CycleCapacityUsed":300}`), nil
 	})
 	_, buckets, expiries, err := c.UserResourceExpiry(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("expiry: %v", err)
 	}
 	if buckets.Expiring != 1200 {
-		t.Errorf("expiring=%d want 1200（回退 CycleEndTime 且落在 7 天窗内）", buckets.Expiring)
+		t.Errorf("expiring=%d want 1200（回退 DeductionEndTime 且落在 7 天窗内）", buckets.Expiring)
 	}
 	if len(expiries) != 1 || expiries[0].Remain != 1200 {
-		t.Errorf("批次 = %+v, want 单条 Remain=1200", expiries)
+		t.Fatalf("批次 = %+v, want 单条 Remain=1200", expiries)
+	}
+	if got := expiries[0].ExpiresAt.UnixMilli(); got != deduction.UnixMilli() {
+		t.Errorf("批次到期 = %d, want %d（DeductionEndTime）", got, deduction.UnixMilli())
 	}
 }
 
@@ -150,7 +154,7 @@ func TestExpiryMissingBothFieldsNoBatch(t *testing.T) {
 	}
 }
 
-// TestExpiryInvalidCycleEndTimeNoBatch 回退字段解析失败 → 无到期（不产批次）。
+// TestExpiryInvalidCycleEndTimeNoBatch 周期串解析失败且无回退字段 → 无到期（不产批次）。
 func TestExpiryInvalidCycleEndTimeNoBatch(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
@@ -162,6 +166,30 @@ func TestExpiryInvalidCycleEndTimeNoBatch(t *testing.T) {
 	}
 	if len(expiries) != 0 || buckets.Expiring != 0 {
 		t.Errorf("解析失败应按无到期处理：expiries=%+v buckets=%+v", expiries, buckets)
+	}
+}
+
+// TestExpiryDirtyCycleEndTimeFallsBack 周期串是脏数据时继续试 DeductionEndTime——
+// 「少一层信息好过没有」：不因周期串坏掉就断言这个包无到期。
+func TestExpiryDirtyCycleEndTimeFallsBack(t *testing.T) {
+	now := time.Now()
+	deduction := now.Add(3 * 24 * time.Hour)
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return mkDetailedResp(
+			`{"PackageName":"脏周期","CycleEndTime":"not-a-time","DeductionEndTime":`+itoa(deduction.UnixMilli())+`,"CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20}`), nil
+	})
+	_, buckets, expiries, err := c.UserResourceExpiry(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("expiry: %v", err)
+	}
+	if len(expiries) != 1 || expiries[0].Remain != 80 {
+		t.Fatalf("应回退 DeductionEndTime 产批次，got %+v", expiries)
+	}
+	if got := expiries[0].ExpiresAt.UnixMilli(); got != deduction.UnixMilli() {
+		t.Errorf("批次到期 = %d, want %d（回退 DeductionEndTime）", got, deduction.UnixMilli())
+	}
+	if buckets.Expiring != 80 {
+		t.Errorf("expiring=%d want 80（回退值落在 7 天窗内）", buckets.Expiring)
 	}
 }
 
