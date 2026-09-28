@@ -4,11 +4,12 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条与第 5 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5 条与第 6 条；第 4 条已撤销（原前提失效，见该节）。
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
 三处补丁均按原样重放，`App.tsx` 与上游逐字一致。另见文末「已知差异」一节。
+**第 6 条例外**：积分到期判据与上游 `a26cd0f` 相反，是按本 fork 的实测改的（见该节）。
 
 为了让它与网关**同进程、同端口**运行，合并时改动了下面几处面板源码。
 这些文件上游也会改，因此**每次 `git subtree pull` 后都需要重新确认**。
@@ -82,6 +83,29 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 `9413e70` 同步时上游更新了此文件引用的 hash（`index-BQ3iX5L-` → `index-BEIjNl4j`）。
 已在 `panel/web/` 跑 `npm run build` 重新生成，产物 hash 与引用一致；源码模式下
 （不经 Dockerfile）也能正常渲染。
+
+### 6. 积分到期判据改回 `CycleEndTime`（**与上游相反，务必重放**）
+
+上游 `a26cd0f` 把到期判据从 `CycleEndTime` 改成 `DeductionEndTime`（毫秒时间戳），
+理由是「按 `DeductionEndTime` 排序与官方平台奖励积分明细逐行一致」。**该结论是错的**，
+本 fork 已改回 `CycleEndTime` 优先、`DeductionEndTime` 仅作回退：
+
+- `internal/upstream/client.go`：`expiryString()` 与 `resourcePackage`/`CreditPack` 的字段注释
+- `web/src/types.ts`：`CreditPack.end_time` / `cycle_end_time` 的文档注释
+- `web/src/pages/Credits.tsx`：表头说明与「周期至 …」小字的 tooltip
+
+**为什么上游错了**：「个人体验版」的 `DeductionEndTime` 是 `2034-12-22` / `2034-10-13`，
+与注册日同月日、恰隔 10 年——这是**账户级的登记上限**，不是这批积分的作废时刻。
+实证：该包 `CycleEndTime` 是月末 23:59:59（本周期边界），且**上游扣费时先扣这个包**
+（余额在动），而到期更晚的包分文未动。上游据「明细页排序一致」推断，但那只反映
+**相邻两次扣费的展示顺序**，不是「何时作废」——把展示顺序当成了扣费顺序。
+按上游口径，该包会显示成 2034 年到期，`CycleEndTime` 一到积分就作废而页面毫无预警。
+
+**连带**：根网关 `internal/upstream/expiry.go` 的 `packageExpiryTime` 是同口径，
+选号 72 小时紧急优先依赖它——不重放此改动，面板会显示「2034 年到期」而网关其实
+已按月末判定，两边自相矛盾。
+
+`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
 
 ## 纯新增、不会冲突的文件
 

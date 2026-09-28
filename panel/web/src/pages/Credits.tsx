@@ -437,12 +437,12 @@ export default function Credits() {
                                       <td className="num">{fmtNum(p.size)}</td>
                                       <td className="mono" style={{ fontSize: 12 }}>
                                         {p.end_time || <span className="text-faint">无到期</span>}
-                                        {/* 周期边界与真实到期不同时才提示，避免噪音 */}
+                                        {/* 周期串是脏数据、到期回退到 DeductionEndTime 时才提示 */}
                                         {p.cycle_end_time && p.cycle_end_time !== p.end_time && (
                                           <div
                                             className="text-faint"
                                             style={{ fontSize: 11 }}
-                                            title="上游 CycleEndTime（按周期发量的包，这里只是周期边界，不是到期）"
+                                            title="上游 CycleEndTime 原文（本应是到期时间，但格式解析失败，故这一行的到期回退到了 DeductionEndTime）"
                                           >
                                             周期至 {p.cycle_end_time}
                                           </div>
@@ -466,7 +466,7 @@ export default function Credits() {
 
         <p className="text-faint" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.7 }}>
           「最近到期」是账号各积分包里最早的**真实到期时间**（上游{' '}
-          <span className="mono">DeductionEndTime</span>，扣费截止），「到期时剩余」是同一时刻作废的那批积分量
+          <span className="mono">CycleEndTime</span>，周期边界，积分到期即作废），「到期时剩余」是同一时刻作废的那批积分量
           —— 两者一起看才知道哪些积分快打水漂。<span className="text-faint">
           官方赠送积分按批过期，不用就归零，所以选号算法会优先消耗快过期的那批。</span>
           <br />

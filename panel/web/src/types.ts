@@ -46,12 +46,15 @@ export interface CreditPack {
   /**
    * 真正的到期时间，上游原文 "2006-01-02 15:04:05"；空 = 无到期。
    *
-   * 后端取的是上游 `DeductionEndTime`（扣费截止），不是 `CycleEndTime` ——
-   * 按周期发量的包（如「个人体验版」）CycleEndTime 只是月周期边界，
-   * 拿它当到期会虚报「几天后作废」。两者不同时 cycle_end_time 会一并给出。
+   * 后端取的是上游 `CycleEndTime`（本周期边界，积分到期即作废）——**不是**
+   * `DeductionEndTime`：按周期发量的包（如「个人体验版」）后者是 2034 年，
+   * 与注册日同月日、恰隔 10 年，是账户级的登记上限而非作废时刻。
    */
   end_time?: string
-  /** 上游 CycleEndTime 原文；与 end_time 不同才需要展示。 */
+  /**
+   * 上游 CycleEndTime 原文。仅当它解析失败、end_time 回退到 DeductionEndTime 时
+   * 才与 end_time 不同，此时一并给出便于排查。
+   */
   cycle_end_time?: string
   remain: number
   size: number

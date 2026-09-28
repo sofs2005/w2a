@@ -611,15 +611,16 @@ type resourcePackage struct {
 	PackageName string `json:"PackageName"`
 	// CycleEndTime 积分包**周期**结束时间（"2006-01-02 15:04:05"）。
 	//
-	// ⚠️ 它不总是「到期时间」：按周期发量的包（实测「CodeBuddy个人体验版」）这里是本月
-	// 周期边界，而真正的扣费截止在 DeductionEndTime。判定到期一律用 expiryString()。
+	// **这就是真正的到期时刻**：按周期发量的包（实测「CodeBuddy个人体验版」）在这里给出
+	// 本周期边界（月末 23:59:59），积分到期即作废。判定到期一律用 expiryString()。
 	CycleEndTime string `json:"CycleEndTime"`
-	// DeductionEndTime 扣费截止（毫秒时间戳）。**这是真正的到期时刻**。
+	// DeductionEndTime 上游下发的扣费截止（毫秒时间戳）。**只是回退判据，不是到期时刻**。
 	//
-	// 实测（2026-09-23，抽查 12 个积分包）：11 个 CycleEndTime == DeductionEndTime，
-	// 唯一例外是「个人体验版」——CycleEndTime 2026-09-30（月周期边界）、
-	// DeductionEndTime 2034-12-22。按 DeductionEndTime 排序的结果与官方「平台奖励积分明细」
-	// 面板逐行一致；按 CycleEndTime 排则会把这个包错排到最前面，虚报「7 天后作废 500」。
+	// 实测（2026-09-23 起）：绝大多数包这两个字段等值（11/12），但「个人体验版」是例外——
+	// CycleEndTime 2026-09-30（月周期边界），DeductionEndTime 2034-12-22/2034-10-13。
+	// 后者与注册日同月日、恰隔 10 年，是**账户级的登记上限**而非这批积分的作废时刻：
+	// 上游扣费时**先扣这个包**（余额在动），而到期更晚的包分文未动。若按它判定，该包会
+	// 显示成 2034 年到期、永远不进紧急窗口，每期赠送积分白白作废。
 	DeductionEndTime    int64 `json:"DeductionEndTime"`
 	CapacityRemain      int64 `json:"CapacityRemain"`
 	CapacityUsed        int64 `json:"CapacityUsed"`
@@ -646,22 +647,28 @@ type Credits struct {
 
 // expiryString 返回该包真正的到期时间（creditPackLayout 格式）。
 //
-// 优先 DeductionEndTime（扣费截止，毫秒时间戳）；缺省/为 0 时回退 CycleEndTime 原文。
-// 两者都没有 → 返回空，调用方按「无到期」处理（不编造）。
+// 优先 CycleEndTime（本周期边界 = 真到期，原文即 creditPackLayout）；缺失/解析失败时
+// 回退 DeductionEndTime（毫秒时间戳格式化）。两者都没有 → 返回空，调用方按「无到期」处理（不编造）。
 func (p resourcePackage) expiryString() string {
+	if p.CycleEndTime != "" {
+		if _, err := time.ParseInLocation(creditPackLayout, p.CycleEndTime, time.Local); err == nil {
+			return p.CycleEndTime
+		}
+		// 周期串是脏数据：继续试 DeductionEndTime（少一层信息好过没有）。
+	}
 	if p.DeductionEndTime > 0 {
 		return time.UnixMilli(p.DeductionEndTime).Format(creditPackLayout)
 	}
-	return p.CycleEndTime
+	return ""
 }
 
 // CreditPack 单个积分包的到期明细。
 type CreditPack struct {
 	Name string `json:"name,omitempty"`
-	// EndTime 到期时间（creditPackLayout 原文），= DeductionEndTime 优先。
+	// EndTime 到期时间（creditPackLayout 原文），= CycleEndTime 优先。
 	EndTime string `json:"end_time,omitempty"`
-	// CycleEndTime 上游下发的周期结束时间原文。与 EndTime 不同时才需要展示
-	// （说明这个包是按周期发量的，EndTime 才是真到期）。
+	// CycleEndTime 上游下发的周期结束时间原文。EndTime 回退到 DeductionEndTime 时才与它不同
+	// （周期串是脏数据），此时一并给出便于排查。
 	CycleEndTime string `json:"cycle_end_time,omitempty"`
 	Remain       int64  `json:"remain"`
 	Size         int64  `json:"size"`
