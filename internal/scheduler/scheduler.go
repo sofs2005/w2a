@@ -385,9 +385,10 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 		} else {
 			oc.Status = CheckinOK
 		}
-		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
-		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
-		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
+		// 分桶 + 逐包到期快照：快过期窗口内的积分单独标记（权重因子），逐包真实到期
+		// 批次交给 pool 做 72 小时硬优先（issue:积分过期）。ExpiringSoonWindow<=0 时
+		// 退化为纯总量（与引入前一致），但批次照常传递（硬优先只依赖批次，与窗口无关）。
+		remain, buckets, expiries, err := s.cfg.Upstream.UserResourceExpiry(a, s.cfg.ExpiringSoonWindow)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			oc.Status = CheckinFail
@@ -397,7 +398,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
-		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		s.cfg.Pool.SetCreditsExpiring(st.UID, remain, buckets.Expiring, toCreditBatches(expiries))
 		oc.Credits = &remain
 		switch oc.Status {
 		case CheckinOK:
@@ -426,6 +427,20 @@ func joinDetail(existing, add string) string {
 		return add
 	}
 	return existing + "; " + add
+}
+
+// toCreditBatches 把上游的逐包到期快照转成 pool 的批次类型（跨包类型转换：
+// upstream.CreditExpiry → pool.CreditBatch，字段同名同义，仅避免 upstream 依赖 pool）。
+// expiries 为空（无未到期积分包）→ nil，pool 侧清空快照、账号失去临期优先资格。
+func toCreditBatches(expiries []upstream.CreditExpiry) []pool.CreditBatch {
+	if len(expiries) == 0 {
+		return nil
+	}
+	out := make([]pool.CreditBatch, 0, len(expiries))
+	for _, e := range expiries {
+		out = append(out, pool.CreditBatch{ExpiresAt: e.ExpiresAt, Remain: e.Remain})
+	}
+	return out
 }
 
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报。
@@ -783,15 +798,16 @@ func (s *Scheduler) RefreshCreditsOnce(ctx context.Context) {
 				}
 			}
 		}
-		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
+		remain, buckets, expiries, err := s.cfg.Upstream.UserResourceExpiry(a, s.cfg.ExpiringSoonWindow)
 		if err != nil {
 			log.Printf("startup credits %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			failN++
 			continue
 		}
-		// 与签到同口径：SetCreditsDetailed 一并更新快过架子集（选号权重因子）。
-		// creditsExpiring 会被钳到 [0, credits]，上游分桶异常不污染权重。
-		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, buckets.Expiring)
+		// 与签到同口径：SetCreditsExpiring 一并更新快过架子集（权重因子）与逐包到期
+		// 快照（72 小时硬优先）。creditsExpiring 会被钳到 [0, credits]，批次经
+		// normalizeBatches 过滤（过期/零值剔除、升序、累计钳制）。
+		s.cfg.Pool.SetCreditsExpiring(st.UID, remain, buckets.Expiring, toCreditBatches(expiries))
 		okN++
 	}
 	log.Printf("启动余额刷新完成：成功 %d，失败 %d，跳过 %d", okN, failN, skipN)

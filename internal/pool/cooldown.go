@@ -18,8 +18,9 @@ import (
 // 行为失去断言）。
 //
 // 但**钳制不能省**：creditsExpiring 被钳到 [0, credits]。这不是「分桶更新」，
-// 而是维护「expiring 是 credits 的子集」这条不变量——它有三处守卫
-// （applyAccountsLocked 加载、SetCreditsDetailed 写入、本入口），缺一处就会漏。
+// 而是维护「expiring 是 credits 的子集」这条不变量——它现在有四处守卫
+// （applyAccountsLocked 加载、SetCreditsExpiring / SetCreditsDetailed 写入、
+// 本入口），缺一处就会漏。
 // 漏掉的后果是真实的：weightOf 里 expiring/credits 是无保护的比值项
 // （pick.go），比值 >1 会把 ×expiringWeight 的加成放大到远超设计上限，
 // 让该账号被异常频繁地选中。场景：签到留下 expiring>0 后，权威余额因上游侧
@@ -41,6 +42,8 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 
 // SetCreditsDetailed 更新账号余额总量 + 快过架子集（签到时调用，供优先消耗快过期积分）。
 // expiring 会被钳到 [0, credits]：上游分桶异常时不污染权重。
+// 兼容入口：不更新逐包到期快照（creditBatches 保持不变）——生产已改用
+// SetCreditsExpiring 一并传入权威批次；保留本入口供「只有总量+桶」的调用方使用。
 func (p *Pool) SetCreditsDetailed(uid string, credits, expiring int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -55,6 +58,33 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, expiring int64) {
 		e.creditsExpiring = expiring
 		p.dirty.Store(true)
 	}
+}
+
+// SetCreditsExpiring 更新账号余额总量 + 快过架子集 + 逐包到期快照（签到/启动刷新调用）。
+//
+// 这是**权威覆盖**入口：batches 来自上游 get-user-resource（upstream.UserResourceExpiry），
+// 整体替换本地快照，把两次刷新之间的本地递减估算漂移（debitBatchesLocked 的"最早到期
+// 优先被扣"假设）收敛掉。expiring 钳到 [0, credits] 的不变量同 SetCreditsDetailed；
+// batches 经 normalizeBatches 过滤（零值/非正剩余/已过期剔除，按到期升序，累计钳到
+// credits）——上游脏数据不得让明细反过来放大选号决策。
+// batches 为空是合法输入（该号当前没有未到期积分包）→ 清空快照，账号失去临期优先资格。
+func (p *Pool) SetCreditsExpiring(uid string, credits, expiring int64, batches []CreditBatch) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	if expiring < 0 {
+		expiring = 0
+	}
+	if expiring > credits {
+		expiring = credits
+	}
+	e.credits = credits
+	e.creditsExpiring = expiring
+	e.creditBatches = normalizeBatches(batches, credits, time.Now())
+	p.dirty.Store(true)
 }
 
 // Cooldown 冷却账号至 now+d（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）。

@@ -65,6 +65,11 @@ func (p *Pool) disableLocked(e *entry, reason string) {
 // 历史软冷却累积。调用方必须已持有 p.mu。
 func (p *Pool) reviveCoolingLocked(e *entry, credits int64) {
 	e.credits = credits
+	// 余额恢复时同步推进批次：批次明细是 credits 的分解，累计不得超过总量。
+	// 签到路径随后会经 SetCreditsExpiring 用上游权威批次整体覆盖（权威优先），
+	// 这里是**兜底**——reviveCoolingLocked 的调用方若没带批次（如测试直接调
+	// ReenableIfCredits），钳制仍要成立，否则明细会长期大于总量。
+	e.creditBatches = normalizeBatches(e.creditBatches, credits, time.Now())
 	e.clearCoolingLocked()
 }
 

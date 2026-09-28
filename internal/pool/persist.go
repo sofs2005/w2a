@@ -202,6 +202,10 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			consecutiveFails: s.ConsecutiveFails,
 			creditsExpiring:  expiring,
 		}
+		// 恢复逐包到期快照（credits.go）：惰性过滤已过期/零值条目（同 modelCooldowns
+		// 口径——过期批次上游不会再扣，留着只会虚报临期优先），并按到期升序重排 +
+		// 累计钳到 credits。**必须在 credits 赋好之后**（钳制依赖总量）。
+		e.creditBatches = normalizeBatches(s.CreditBatches, s.Credits, now)
 		// 恢复熔断器：breakerUntil 在未来才恢复（惰性过滤过期/零值，与落盘同口径）。
 		// retryCount 仅在 breakerUntil 未过期时恢复——已过期则归零（不保留无用退避指数）。
 		if s.BreakerUntil != nil && !s.BreakerUntil.IsZero() && now.Before(*s.BreakerUntil) {
@@ -430,6 +434,10 @@ func (p *Pool) stateOverviewLocked() stateFile {
 		// 账号的 reason 是禁用原因，不在冷却语义内，照常保留。
 		// 与 statusOf（state.go）共用 cooledReasonLocked，保证落盘与查询同口径。
 		coolKind, reason := cooledReasonLocked(e, now)
+		// 逐包到期快照落盘：只写未过期且剩余 > 0 的条目（落盘即清理，与恢复侧同口径），
+		// 空则省略。normalizeBatches 顺带保证升序 + 累计不超 credits（credits 落盘值
+		// 与内存一致，钳制口径一致）。
+		batches := normalizeBatches(e.creditBatches, e.credits, now)
 		sf.Accounts[uid] = stateAccount{
 			Credits:          e.credits,
 			Disabled:         e.disabled,
@@ -449,6 +457,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			BreakerUntil:     breakerUntil,
 			RetryCount:       retryCount,
 			CreditsExpiring:  e.creditsExpiring,
+			CreditBatches:    batches,
 			ModelCooldowns:   mcs,
 			ModelCosts:       mcosts,
 		}

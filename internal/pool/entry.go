@@ -111,6 +111,13 @@ type entry struct {
 	// 签到之间第四因子（weightOf ×8）不应失忆——签到 09:00/21:00 定期刷新，
 	// 窗口外重启会丢快过期积分偏好，可能让奖励积分到期作废。
 	creditsExpiring int64
+	// creditBatches 逐包到期快照（到期时刻 + 该包剩余），按到期升序，仅含未过期条目。
+	// 由签到/启动刷新的上游权威数据整体替换（SetCreditsExpiring），随请求消耗本地
+	// 递减（debitBatchesLocked，与 credits 扣减同一次调用）。
+	// 与 creditsExpiring 的分工：creditsExpiring 是"窗口内快过期总量"的权重因子（软偏好），
+	// 本字段提供**最早到期时刻**，供 72 小时硬优先判定（credits.go）。
+	// 持久化（stateAccount.CreditBatches）：重启后到下次签到之间（最长 12h）不应失忆。
+	creditBatches []CreditBatch
 	successCount    int64     // 累计成功
 	// errTotal 累计错误（终身累计，仅状态展示用；选号权重不消费——原「成功率」
 	// 因子已删，见 pick.weightOf 注释与 success-ema-review）。
@@ -396,6 +403,11 @@ type stateAccount struct {
 	// （weightOf ×8）的快过期积分偏好——重启后到下次签到之间不应失忆。
 	// 零值也显式写出（运维口径，见 err_total 注释）。
 	CreditsExpiring int64 `json:"credits_expiring"`
+	// CreditBatches 逐包到期快照（credits.go 的 CreditBatch，与运行态同构）。
+	// 持久化以保留**72 小时硬优先**所需的"最早到期时刻"——重启后到下次签到之间
+	// （最长 12h）不应失忆，否则临期积分可能被跨重启放过而作废。
+	// 落盘/恢复均惰性过滤已过期条目（同 modelCooldowns 口径），空则省略。
+	CreditBatches []CreditBatch `json:"credit_batches,omitempty"`
 	// ModelCooldowns 6004 模型级独立冷却表（model → 冷却记录）。持久化：
 	// PR #96 把 6004 改成精确对齐上游重置墙钟后，单模型冷却可长达数小时，
 	// 跨重启是常态；不持久化导致每次重启 healthyForModel 失忆、重新踩一遍

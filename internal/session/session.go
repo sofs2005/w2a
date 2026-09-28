@@ -42,6 +42,14 @@ type Config struct {
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
 	AvailableForModel func(model string) []string
+	// UrgentForModel 按请求模型返回「紧急到期优先」的可用账号子集：仅当池里存在
+	// 积分将在 72 小时内到期的候选时非空，否则 nil（无紧急候选 = 保持原有分配）。
+	// 供**新建/失效重绑**时缩小哈希候选集，让新会话先去烧临期积分（issue:积分过期）。
+	//
+	// 为什么只在初次分配生效：已有有效绑定走 fast path 直接复用，不因积分到期被
+	// 切号（用户要求保留粘性）；绑定号失效时本就在重分配，此时才轮到紧急集参与。
+	// nil 时回落 AvailableForModel（无该维度，行为与引入前一致）。
+	UrgentForModel func(model string) []string
 }
 
 // Router 会话粘性路由器。
@@ -172,6 +180,13 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if len(uids) == 0 {
 		return "", false
 	}
+	// 紧急到期优先（issue:积分过期）：池里有 72 小时内到期的可用号时，把哈希候选集
+	// 缩到那批（免费层优先的子集由 pool 侧算好）。**只在新建/失效重绑走到这里时生效**
+	// ——快路径命中已在上面直接返回，已有有效绑定不因积分到期被切号。
+	// urgent 为空（无紧急候选）时 uids 原样不动，分配逻辑与引入前逐字一致。
+	if urgent := r.urgentSlice(model); len(urgent) > 0 {
+		uids = urgent
+	}
 
 	// 双段策略：优先"空闲账号"（未被任何会话绑定的可用号），其次全池。
 	bound := map[string]bool{}
@@ -281,6 +296,14 @@ func (r *Router) availableSlice(model string) []string {
 		return nil
 	}
 	return r.cfg.Available()
+}
+
+// urgentSlice 安全调用紧急到期优先子集函数（未注入 → nil = 无该维度）。
+func (r *Router) urgentSlice(model string) []string {
+	if r.cfg.UrgentForModel == nil {
+		return nil
+	}
+	return r.cfg.UrgentForModel(model)
 }
 
 func expired(e entry, now time.Time, ttl time.Duration) bool {

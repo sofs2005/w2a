@@ -209,6 +209,14 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			}
 			e.creditsExpiring -= d
 		}
+		// 逐包批次同步递减（最早到期优先被扣的本地估算）：扣穿的批次随即移除，
+		// 账号的最早到期时刻自然推进到下一条——否则批次用完后该号仍会被当成"临期"
+		// 持续获得硬优先（credits.preferredCandidatesLocked）。上游不回报包级归属，
+		// 这里只是内插估计，下次签到/启动刷新由权威快照整体替换。
+		// 注意传入的是**未被 creditsExpiring 钳过的原始消耗量**语义：批次与 credits
+		// 是同一份余额的两种表示，扣减量以本次真实消耗 credit 为准（d 已被 credits
+		// 上限钳过，对批次同样成立——批次合计不超过 credits 由 normalizeBatches 保证）。
+		e.debitBatchesLocked(d)
 	}
 	if e.modelCost == nil {
 		e.modelCost = make(map[string]modelCostEntry)

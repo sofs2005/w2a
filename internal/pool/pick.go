@@ -68,6 +68,21 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm)
 	}
+	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「72 小时内到期」的
+	// 账号时，按真实到期时刻硬优先（最早优先），已实测免费的临期号排在最前。
+	// **只在有紧急候选时启用**——窗口外（含"全池最早到期但还很久"）一律走下方原有
+	// 逻辑，否则最早到期的那个号会被永久垄断（用户明确要求：3 天内才提优先级）。
+	// 分支独立于成本分层/探索/Top5/加权随机：这些机制都可能把选号拉回非临期号，
+	// 与"硬优先"的语义冲突（探索不得改道到非免费候选）。
+	// minPickGap 不参与本分支：紧急集通常只有一两个号，跳过会直接退回非临期号、
+	// 违背硬优先语义；并发扩散由"批次耗尽即前移"（debitBatchesLocked）承担。
+	if pref := p.preferredCandidatesLocked(cands, reqModel, now); len(pref) > 0 {
+		e := p.pickEarliestExpiryAmongLocked(pref, reqModel, now)
+		e.lastUsed = now
+		p.pickSeq++
+		e.usedSeq = p.pickSeq
+		return e.a
+	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿
 	// 根本进不了短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
@@ -93,16 +108,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
 	// 为什么用硬过滤而非仅排序：pickWeighted 会在候选内加权随机，只排序的话
 	// 收费号仍有机会抽中，达不到"优先免费"的语义。
-	costTier := func(e *entry) (int, float64) {
-		mc, ok := e.modelCostOf(reqModel, now)
-		if !ok {
-			return 1, 0
-		}
-		if mc.CostPer1k <= 0 {
-			return 0, 0
-		}
-		return 2, mc.CostPer1k
-	}
+	// 分层口径收在 credits.go 的 costTierOf（紧急分支的"免费层优先"复用同一实现）。
+	costTier := func(e *entry) (int, float64) { return costTierOf(e, reqModel, now) }
 	bestTier := 2
 	hasTier1 := false
 	explored := false // 本次 pick 是否切了探索层（事件日志在选中号确定后打）
@@ -223,6 +230,58 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
 	return e.a
+}
+
+// pickEarliestExpiryAmongLocked 在紧急到期候选里选最早到期者（issue:积分过期）。
+//
+// 排序口径（三级，全序且稳定）：
+//  1. 最早到期时刻升序——**核心判据**，让 72 小时内作废的积分先被烧掉。
+//  2. 成本层升序（0 免费 / 1 未知 / 2 收费）——同一到期时刻（或都没有到期批次）时
+//     优先免费号；preferredCandidatesLocked 已保证不会出现"非免费压过免费"。
+//  3. 单价升序 + UID 字典序——兜底确定性（同一时刻到期的批次常见：批量赠送的积分
+//     到期时刻相同，此时不能让 map 遍历顺序决定选号）。
+//
+// 为什么不做加权随机：本分支的语义是"必须先把最早到期的积分烧掉"，随机化会重新
+// 引入"临期积分放过期"的可能。防集中由"批次耗尽即前移"（debitBatchesLocked）
+// 与 72 小时窗口自然约束——批次用完后该号退出紧急集，选号回到正常逻辑。
+// 调用方必须已持有 p.mu 写锁（本函数只读，但选号路径统一在写锁内）。
+func (p *Pool) pickEarliestExpiryAmongLocked(cands []*entry, reqModel string, now time.Time) *entry {
+	best := cands[0]
+	bestAt, bestOK := best.earliestExpiryAt(now)
+	bestTier, bestCost := costTierOf(best, reqModel, now)
+	for _, e := range cands[1:] {
+		at, ok := e.earliestExpiryAt(now)
+		tier, cost := costTierOf(e, reqModel, now)
+		if betterExpiryPick(at, ok, tier, cost, e.a.UID,
+			bestAt, bestOK, bestTier, bestCost, best.a.UID) {
+			best, bestAt, bestOK, bestTier, bestCost = e, at, ok, tier, cost
+		}
+	}
+	return best
+}
+
+// betterExpiryPick 报告候选 a 是否优于当前最优 b（排序口径见 pickEarliestExpiryAmongLocked）。
+// 抽成独立函数便于单测直接锁定比较语义，也避免在循环里重复三层嵌套分支。
+func betterExpiryPick(
+	aAt time.Time, aOK bool, aTier int, aCost float64, aUID string,
+	bAt time.Time, bOK bool, bTier int, bCost float64, bUID string,
+) bool {
+	// 1. 到期时刻：有批次的恒优于无批次的（有批次 = 确实有未到期积分要烧）。
+	if aOK != bOK {
+		return aOK
+	}
+	if aOK && bOK && !aAt.Equal(bAt) {
+		return aAt.Before(bAt)
+	}
+	// 2. 成本层（0 免费最优）。
+	if aTier != bTier {
+		return aTier < bTier
+	}
+	// 3. 单价 + UID 字典序（确定性兜底）。
+	if aCost != bCost {
+		return aCost < bCost
+	}
+	return aUID < bUID
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。

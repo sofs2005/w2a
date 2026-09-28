@@ -76,3 +76,50 @@ func TestResolveKeepsOldBehavior(t *testing.T) {
 		t.Errorf("Resolve()=%s ok=%v want a1/true", got, ok)
 	}
 }
+
+// TestResolveUrgentForModelNarrowsCandidates 新建/失效重绑时，紧急到期子集必须
+// 缩小哈希候选集（让新会话先去烧临期积分）。
+func TestResolveUrgentForModelNarrowsCandidates(t *testing.T) {
+	r := routerWith(newCountingStore(), []string{"stable-1", "stable-2", "urgent"}, time.Minute)
+	r.cfg.UrgentForModel = func(model string) []string { return []string{"urgent"} }
+
+	for _, key := range []string{"c1", "c2", "c3", "c4"} {
+		got, ok := r.ResolveForModel(key, "m")
+		if !ok || got != "urgent" {
+			t.Fatalf("%s 分配到 %s ok=%v, want urgent（紧急候选应缩窄候选集）", key, got, ok)
+		}
+	}
+}
+
+// TestResolveUrgentNilKeepsHashSpreading 无紧急候选（UrgentForModel 返回 nil）时，
+// 分配必须回到原有哈希打散语义——不得把所有新会话钉到同一账号。
+func TestResolveUrgentNilKeepsHashSpreading(t *testing.T) {
+	uids := []string{"a1", "a2", "a3"}
+	r := routerWith(newCountingStore(), uids, time.Minute)
+	r.cfg.UrgentForModel = func(model string) []string { return nil }
+
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		got, ok := r.ResolveForModel("conv-"+string(rune('a'+i)), "m")
+		if !ok {
+			t.Fatal("应能分配")
+		}
+		seen[got] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("无紧急候选时应哈希打散，实际只用到 %v", seen)
+	}
+}
+
+// TestResolveKeepsHealthyBindingDespiteUrgent 已有有效绑定不因别的号临期而被切号
+// （用户要求保留粘性）：快路径命中直接返回，UrgentForModel 不参与。
+func TestResolveKeepsHealthyBindingDespiteUrgent(t *testing.T) {
+	r := routerWith(newCountingStore(), []string{"bound", "urgent"}, time.Minute)
+	r.cfg.UrgentForModel = func(model string) []string { return []string{"urgent"} }
+	r.Bind("c1", "bound")
+
+	got, ok := r.ResolveForModel("c1", "m")
+	if !ok || got != "bound" {
+		t.Fatalf("有效绑定被切到 %s ok=%v, want bound（粘性优先于临期重分配）", got, ok)
+	}
+}

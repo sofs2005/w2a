@@ -1493,13 +1493,14 @@ func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 }
 
 // CreditBuckets 按到期紧迫度拆分的积分余额（供 pool 优先消耗快过期积分）。
-// 背景（issue:积分过期）：套餐/奖励积分按 CycleEndTime 分批过期，总量口径的
+// 背景（issue:积分过期）：套餐/奖励积分按到期时间分批过期，总量口径的
 // remain 会让"明天就作废"的积分与"30 天后才过期"的积分被无差别选号，
 // 导致快过期积分没优先用掉、白白作废。拆桶后选号可优先消耗 Expiring。
 type CreditBuckets struct {
-	// Expiring 在 soon 窗口内（<= now+soon）即将过期的可用积分。
+	// Expiring 在 soon 窗口内（now < 到期 <= now+soon）即将过期的可用积分。
 	Expiring int64
-	// Stable 其余有效积分（到期时间更远或无到期时间）。
+	// Stable 其余有效积分（到期更远、无到期时间，或**已过期**——已过期配额上游不再扣，
+	// 既无优先价值也不该计入 remain 之外的量）。
 	Stable int64
 }
 
@@ -1510,64 +1511,49 @@ func (b CreditBuckets) Total() int64 { return b.Expiring + b.Stable }
 const packageEndLayout = "2006-01-02 15:04:05"
 
 // UserResourceDetailed 同 UserResource，但按到期时间把余额拆成 CreditBuckets。
-// soon>0 时把到期时间 <= now+soon 的套餐余额计入 Expiring；soon<=0 时全部归 Stable。
-// 到期时间判据是 CycleEndTime（R-A/R-B 实测：CN/global 两域字段全集均无 PackageEndTime，
-// 旧判据恒 miss 致 Expiring 恒 0；CycleEndTime 是上游真实下发的到期时刻——
-// global Bonus Pack 14 天赠送积分的到期时间即此字段）。解析失败/缺失的套餐保守
-// 归入 Stable（不误标为快过期而插队）。
+// soon>0 时把**未过期**且到期时间 <= now+soon 的套餐余额计入 Expiring；soon<=0 时全部归 Stable。
+//
+// 到期判据是 DeductionEndTime（毫秒时间戳，真正的扣费截止）优先、CycleEndTime 回退，
+// 与面板 /credits 的 expiryString 同一口径（见 expiry.go 的 CreditExpiry 注释：
+// 按周期发量的包 CycleEndTime 只是周期边界，用它判定会把长期有效的积分错排成临期）。
+// 解析失败/两字段都缺的套餐归入 Stable（不误标为快过期而插队）。
+//
 // 单套餐取数统一调 packageRemainUsed（与 ResourceSummary/cmd/credit 同一事实来源，
 // 含 remain 钳 [0,size] 与 used 修正；A/B 口径在 remain 维度实测一致，此改动消除
 // 双份逻辑漂移——旧中间 switch 只钳负值，上游脏数据 CycleRemain>Size 时会高估）。
 func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain int64, buckets CreditBuckets, err error) {
-	now := time.Now()
-	resp, err := c.getUserResourceBody(a)
+	_, buckets, _, err = c.UserResourceExpiry(a, soon)
 	if err != nil {
 		return 0, CreditBuckets{}, err
 	}
-	for _, acct := range resp.Response.Data.Accounts {
-		r, _, _ := packageRemainUsed(respAccount{
-			CapacityRemain:      acct.CapacityRemain,
-			CapacityUsed:        acct.CapacityUsed,
-			CapacitySize:        acct.CapacitySize,
-			CycleCapacityRemain: acct.CycleCapacityRemain,
-			CycleCapacityUsed:   acct.CycleCapacityUsed,
-			CycleCapacitySize:   acct.CycleCapacitySize,
-		})
-		if r < 0 {
-			r = 0
-		}
-		remain += r
-		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → Expiring。
-		if soon > 0 && r > 0 && acct.CycleEndTime != "" {
-			// 上游时间为 UTC+8 墙钟（与 softRateResetLoc 同口径，官网展示时区）。
-			if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
-				if !end.After(now.Add(soon)) {
-					buckets.Expiring += r
-					continue
-				}
-			}
-		}
-		buckets.Stable += r
+	return buckets.Total(), buckets, nil
+}
+
+// UserResourceExpiry 是 UserResourceDetailed 的完整口径：除总量与两桶外，额外返回
+// **逐包到期批次**（按到期时刻升序，仅含未过期且剩余 > 0 的包），供 pool 持久化后
+// 按最早到期优先选号（issue:积分过期 的硬优先级部分）。
+//
+// 批次里的 ExpiresAt 是上游权威到期时刻；pool 侧随消耗本地递减的只是 Remain 估算，
+// 每次签到/启动刷新都用本函数的快照整体替换（见 pool.SetCreditsExpiring）。
+func (c *Client) UserResourceExpiry(a *auth.Auth, soon time.Duration) (remain int64, buckets CreditBuckets, expiries []CreditExpiry, err error) {
+	now := time.Now()
+	resp, err := c.getUserResourceBody(a)
+	if err != nil {
+		return 0, CreditBuckets{}, nil, err
 	}
-	return remain, buckets, nil
+	batches, total, inWindow := expiryBatches(resp.Response.Data.Accounts, now, soon, softRateResetLoc)
+	// 上游时间为 UTC+8 墙钟（与 softRateResetLoc 同口径，官网展示时区）。
+	return total, CreditBuckets{Expiring: inWindow, Stable: total - inWindow}, batches, nil
 }
 
 // userResourceResp get-user-resource 响应结构（UserResourceDetailed 与 ResourceSummary
-// 共享；含分桶所需 CycleEndTime 与聚合所需 TotalDosage，缺省字段按零值处理）。
+// 共享；含到期解析所需 DeductionEndTime/CycleEndTime 与聚合所需 TotalDosage，
+// 缺省字段按零值处理）。
 type userResourceResp struct {
 	Response struct {
 		Data struct {
-			TotalDosage int64 `json:"TotalDosage"`
-			Accounts    []struct {
-				PackageName         string `json:"PackageName"`
-				CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
-				CapacitySize        int64  `json:"CapacitySize"`
-				CapacityRemain      int64  `json:"CapacityRemain"`
-				CapacityUsed        int64  `json:"CapacityUsed"`
-				CycleCapacitySize   int64  `json:"CycleCapacitySize"`
-				CycleCapacityRemain int64  `json:"CycleCapacityRemain"`
-				CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
-			} `json:"Accounts"`
+			TotalDosage int64             `json:"TotalDosage"`
+			Accounts    []resourceAccount `json:"Accounts"`
 		} `json:"Data"`
 	} `json:"Response"`
 }
