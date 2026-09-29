@@ -457,8 +457,18 @@ func parseRetryNumber(v, headerName string) (time.Duration, bool) {
 	}
 	switch headerName {
 	case "Retry-After":
+		// 先做上限校验再乘 time.Second：len<=16 的数字乘 1e9 仍会溢出 int64
+		// （16 位 ≈ 1e16，×1e9 = 1e25 远超 9.2e18）回绕成小正数，进而通过调用方
+		// ParseRetryAfter 的 retryAfterSanity 校验被当作合法等待时长（对齐 fork
+		// linguo2625469 的 5f6c7ca）。
+		if n > int64(retryAfterSanity/time.Second) {
+			return 0, false
+		}
 		return time.Duration(n) * time.Second, true
 	case "Retry-After-Ms":
+		if n > int64(retryAfterSanity/time.Millisecond) {
+			return 0, false
+		}
 		return time.Duration(n) * time.Millisecond, true
 	default: // X-Ratelimit-Reset：epoch → 剩余量
 		sec := n

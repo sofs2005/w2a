@@ -228,8 +228,13 @@ func (e *entry) healthy(now time.Time) bool {
 }
 
 // modelExempt 报告账号是否处于「6004 模型级软冷却」形态：存在任一有效的 6004
-// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断。
+// 模型级冷却（modelCooldowns 非空），且尚未禁用、未熔断、未账号级冷却、未连败降权。
 // 此形态下账号仅对限流中的模型不可用，对其他模型仍可选（issue #31）。
+//
+// 排除账号级冷却（until）与连败降权（degradeUntil）是必须的：模型级豁免的语义是
+// 「本号还能服务别的模型」，而账号级冷却/降权把整个账号从选号池摘除——此时豁免
+// 不成立。漏判会让 /healthz 把实际不可用的号报成可服务（ServableNow 的
+// `healthy || modelExempt` 旁路），探活结果虚高（对齐 fork linguo2625469 的 5f6c7ca）。
 // 本谓词仅供探活侧使用（ServableNow/ServableForRealm）：/healthz 无请求模型
 // 上下文，用「存在豁免形态」表达"该账号还有别的模型可服务"；
 // chat 侧按请求模型细粒度判定（healthyForModel：全账号健康且该模型不在独立
@@ -237,7 +242,8 @@ func (e *entry) healthy(now time.Time) bool {
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && !e.manualDisabled && e.breakerUntil.IsZero()
+		!e.disabled && !e.manualDisabled && e.until.IsZero() && e.degradeUntil.IsZero() &&
+		e.breakerUntil.IsZero()
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。

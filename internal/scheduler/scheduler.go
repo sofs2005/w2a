@@ -223,6 +223,53 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 	return sleepCtx(ctx, wakeupGraceDelay)
 }
 
+// wallclockCheckStep 墙钟校验段长：等待槽位时单次 timer 的最大时长，每段醒来用
+// 墙钟重判是否到点。值是「时点精度」与「空闲唤醒频率」的折中——60s 段内时点
+// 偏差上限 60s，对签到/保活类任务足够（对齐同源 fork linguo2625469 的 97335bd）。
+const wallclockCheckStep = time.Minute
+
+// slotWake waitSlot 的结果。
+type slotWake int
+
+const (
+	slotFired  slotWake = iota // 墙钟已到达计划时点：补跑本批
+	slotCancel                 // ctx 取消：上层优雅退出
+)
+
+// waitSlot 分段等待到 next 的**墙钟**时刻（next 由 nextFire 用 time.Date 构造、
+// 不携带单调读数，time.Until 对它是纯墙钟差）。
+//
+// 为什么不一把 time.NewTimer(time.Until(next)) 睡到底：timer 的等待基于单调时钟，
+// macOS / Windows Modern Standby 睡眠会冻结它——睡眠时长不足整个等待周期时，fire
+// 被顺延「睡眠时长」（墙钟已过点、timer 还要继续等），时点被错过且不会立即补跑；
+// 睡眠时长超过整个等待周期时倒是无害的（唤醒瞬间 timer 到期，awaitWakeupGrace 补跑，
+// 本地原有的 issue #152 处理覆盖的正是这一半）。
+//
+// 分段睡、每段醒来用墙钟重判，把冻结的影响限制在一段之内：睡眠结束后的第一段末尾
+// 必然发现「墙钟已越过时点」并立即补跑，偏差上限 = step + 睡眠落段余量。
+// ctx 取消在每段的 select 里随时返回，段长不影响响应性。
+func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Duration) slotWake {
+	for {
+		wallRemain := time.Until(next)
+		if wallRemain <= 0 {
+			return slotFired
+		}
+		d := wallRemain
+		if d > step {
+			d = step
+		}
+		timer := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return slotCancel
+		case <-timer.C:
+			// 段末回到循环顶用墙钟重判：正常推进时若干段后到点；单调时钟被
+			// 睡眠冻结时，墙钟大幅前进，至多一段之后即到点补跑。
+		}
+	}
+}
+
 // Run 主循环，阻塞直到 ctx 取消。
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
@@ -232,25 +279,21 @@ func (s *Scheduler) Run(ctx context.Context) {
 			<-ctx.Done()
 			return
 		}
-		timer := time.NewTimer(time.Until(next))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if s.waitSlot(ctx, next, wallclockCheckStep) == slotCancel {
 			return
-		case <-timer.C:
-			// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
-			// 迟到唤醒（睡眠跨过槽位时刻，timer 在唤醒瞬间才到期）先等网络宽限：
-			// 唤醒瞬间 DNS 未就绪，零宽限派发等于把唯一一次补跑机会打在注定失败
-			// 的窗口里（issue #152）；准点触发零延迟不受影响。
-			if !awaitWakeupGrace(ctx, next) {
-				return // ctx 取消：放弃本批，优雅退出
-			}
-			// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
-			// 54 号 × 5 条 ≈ 7-8 分钟睡眠）不再阻塞同槽其他任务族；返回前
-			// 等全部任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠
-			// 的风险与串行版相同——nextWake 只挑现在之后的时点）。
-			s.runBatch(ctx, kinds)
 		}
+		// 到点任务在排程时确定（不依赖唤醒时刻的小时数），迟到唤醒也不会漏跑。
+		// 迟到唤醒（睡眠跨过槽位时刻）先等网络宽限：唤醒瞬间 DNS 未就绪，零宽限
+		// 派发等于把唯一一次补跑机会打在注定失败的窗口里（issue #152）；准点触发
+		// 零延迟不受影响。
+		if !awaitWakeupGrace(ctx, next) {
+			return // ctx 取消：放弃本批，优雅退出
+		}
+		// 唤醒时全部并行派发：每类一个 goroutine，慢任务族（如活跃上报
+		// 54 号 × 5 条 ≈ 7-8 分钟睡眠）不再阻塞同槽其他任务族；返回前
+		// 等全部任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠
+		// 的风险与串行版相同——nextWake 只挑现在之后的时点）。
+		s.runBatch(ctx, kinds)
 	}
 }
 
@@ -384,6 +427,9 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			}
 		} else {
 			oc.Status = CheckinOK
+			// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
+			// 重复触发时出现），成功也落一行。
+			log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 		}
 		// 分桶 + 逐包到期快照：快过期窗口内的积分单独标记（权重因子），逐包真实到期
 		// 批次交给 pool 做 72 小时硬优先（issue:积分过期）。ExpiringSoonWindow<=0 时
