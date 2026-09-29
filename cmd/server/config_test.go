@@ -306,6 +306,12 @@ func TestScheduleEnabledByDefault(t *testing.T) {
 		t.Errorf("school/cat enabled defaults want true/true, got %v/%v",
 			c.Schedule.SchoolEnabled, c.Schedule.CatEnabled)
 	}
+	if len(c.Schedule.GrowthHours) != 1 || c.Schedule.GrowthHours[0] != 8 {
+		t.Errorf("growth_hours=%v want [8]", c.Schedule.GrowthHours)
+	}
+	if !c.Schedule.GrowthEnabled {
+		t.Error("growth_enabled 默认应为 true（缺省即补跑，老 config 行为不受影响）")
+	}
 }
 
 // TestScheduleLegacyConfigKeepsRunning 老 config（只写签到/保活小时数组，无新键）加载后仍是启用态，
@@ -340,8 +346,14 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	if len(c.Schedule.CatHours) != 1 || c.Schedule.CatHours[0] != 1 {
 		t.Errorf("cat_hours=%v want default [1]", c.Schedule.CatHours)
 	}
+	if len(c.Schedule.GrowthHours) != 1 || c.Schedule.GrowthHours[0] != 8 {
+		t.Errorf("growth_hours=%v want default [8]", c.Schedule.GrowthHours)
+	}
 	if !c.Schedule.SchoolEnabled || !c.Schedule.CatEnabled {
 		t.Errorf("school/cat switches must default true on legacy config: %+v", c.Schedule)
+	}
+	if !c.Schedule.GrowthEnabled {
+		t.Errorf("growth switch must default true on legacy config: %+v", c.Schedule)
 	}
 }
 
@@ -494,6 +506,7 @@ func TestScheduleInvalidHourRejected(t *testing.T) {
 		{`{"schedule":{"checkin_hours":[25]}}`, "checkin_enabled"},
 		{`{"schedule":{"checkin_hours":[-1]}}`, "checkin_enabled"},
 		{`{"schedule":{"keepalive_hours":[-1]}}`, "keepalive_enabled"},
+		{`{"schedule":{"growth_hours":[24]}}`, "growth_enabled"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -747,5 +760,22 @@ func TestPromptInvalidModeStillErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "custom / append / passthrough") {
 		t.Errorf("error should mention (custom / append / passthrough): %v", err)
+	}
+}
+
+// TestExampleConfigLoads config.example.json 是用户唯一的配置模板，必须永远能被
+// Load 接受：示例里写错一个键名/大小写（如 growth_hour）会被 Normalize 静默回落默认，
+// 用户照着抄却配不上，且没有任何报错。测试把模板本身钉住。
+func TestExampleConfigLoads(t *testing.T) {
+	c, err := Load("../../config.example.json")
+	if err != nil {
+		t.Fatalf("config.example.json 必须能被 Load 接受: %v", err)
+	}
+	// 示例应体现全部七类排程（缺一类即模板落后于代码）。
+	if len(c.Schedule.GrowthHours) == 0 {
+		t.Errorf("示例缺 growth_hours（七类排程之一）: %+v", c.Schedule)
+	}
+	if !c.Schedule.GrowthEnabled {
+		t.Errorf("示例的 growth_enabled 应为 true: %+v", c.Schedule)
 	}
 }

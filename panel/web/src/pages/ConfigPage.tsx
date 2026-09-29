@@ -178,6 +178,15 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
     const v = getPath(doc ?? {}, path)
     return v === undefined || v === null ? '' : String(v)
   }
+  // defaultOn 读「缺省即开启」的开关：网关侧 schedule 段的 enabled 语义是
+  // 「缺省 true，只有显式 false 才关」（internal/config/schedule.go 的
+  // DefaultSchedule + Normalize）。旧 config.json 里没有 school/cat/growth 这些键，
+  // 用 bool() 的 === true 会把它们全渲染成未勾选——用户一保存就把任务全关掉。
+  // 不复用 bool()：会话粘性等开关的既有勾选/点击语义不受本次改动影响。
+  const defaultOn = (path: string) => {
+    const v = getPath(doc ?? {}, path)
+    return v === undefined || v === null ? true : v !== false
+  }
   const bool = (path: string) => getPath(doc ?? {}, path) === true
   const numStr = (path: string) => {
     const v = getPath(doc ?? {}, path)
@@ -317,7 +326,29 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                   onChange={(e) => update('schedule.checkin_hours', textToHours(e.target.value))}
                   placeholder="9, 21"
                 />
-                <div className="desc">逗号分隔的整点（0-23）。签到同时会推进猫猫旅行。</div>
+                <div className="desc">逗号分隔的整点（0-23）。签到同时会查余额，余额恢复的冷却账号自动解冻。</div>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>猫猫旅行 travel_hours</label>
+                <input
+                  type="text"
+                  value={hoursToText(getPath(doc, 'schedule.travel_hours'))}
+                  onChange={(e) => update('schedule.travel_hours', textToHours(e.target.value))}
+                  placeholder="9, 21"
+                />
+                <div className="desc">独立排程：领养 / 派出 / 领奖一趟闭环，已不再搭签到的便车。</div>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label>活跃上报 activity_hours</label>
+                <input
+                  type="text"
+                  value={hoursToText(getPath(doc, 'schedule.activity_hours'))}
+                  onChange={(e) => update('schedule.activity_hours', textToHours(e.target.value))}
+                  placeholder="10"
+                />
+                <div className="desc">每号上报 activity_report_count 条（默认 5）点亮连登，随后领连登奖励与抽奖。</div>
               </div>
               <div className="field" style={{ flex: 1 }}>
                 <label>保活小时 keepalive_hours</label>
@@ -332,25 +363,115 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
             </div>
             <div className="row">
               <div className="field" style={{ flex: 1 }}>
+                <label>开学季 school_hours</label>
+                <input
+                  type="text"
+                  value={hoursToText(getPath(doc, 'schedule.school_hours'))}
+                  onChange={(e) => update('schedule.school_hours', textToHours(e.target.value))}
+                  placeholder="12"
+                />
+                <div className="desc">调 school_open_day_2026.py ALL --run --yes，活动下线时脚本自行全量跳过。</div>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>夜猫子 cat_hours</label>
+                <input
+                  type="text"
+                  value={hoursToText(getPath(doc, 'schedule.cat_hours'))}
+                  onChange={(e) => update('schedule.cat_hours', textToHours(e.target.value))}
+                  placeholder="1"
+                />
+                <div className="desc">只跑 task_runner.py 的 black_cat；夜猫窗口 23:00–08:00，窗口外自动跳过。</div>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label>成长任务 growth_hours</label>
+                <input
+                  type="text"
+                  value={hoursToText(getPath(doc, 'schedule.growth_hours'))}
+                  onChange={(e) => update('schedule.growth_hours', textToHours(e.target.value))}
+                  placeholder="8"
+                />
+                <div className="desc">每晚跑一遍 task_runner.py ALL --yes 补跑成长任务。脚本幂等：已领/已达标逐项跳过，新账号当天自动补齐。</div>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
                 <label className="checkbox">
                   <input
                     type="checkbox"
-                    checked={bool('schedule.checkin_enabled')}
+                    checked={defaultOn('schedule.checkin_enabled')}
                     onChange={(e) => update('schedule.checkin_enabled', e.target.checked)}
                   />
                   启用签到
                 </label>
-                <div className="desc">关闭后签到与猫猫旅行都会停摆（旅行搭签到便车）。</div>
               </div>
               <div className="field" style={{ flex: 1 }}>
                 <label className="checkbox">
                   <input
                     type="checkbox"
-                    checked={bool('schedule.keepalive_enabled')}
+                    checked={defaultOn('schedule.travel_enabled')}
+                    onChange={(e) => update('schedule.travel_enabled', e.target.checked)}
+                  />
+                  启用猫猫旅行
+                </label>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={defaultOn('schedule.activity_enabled')}
+                    onChange={(e) => update('schedule.activity_enabled', e.target.checked)}
+                  />
+                  启用活跃上报
+                </label>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={defaultOn('schedule.keepalive_enabled')}
                     onChange={(e) => update('schedule.keepalive_enabled', e.target.checked)}
                   />
                   启用 Token 保活
                 </label>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={defaultOn('schedule.school_enabled')}
+                    onChange={(e) => update('schedule.school_enabled', e.target.checked)}
+                  />
+                  启用开学季
+                </label>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={defaultOn('schedule.cat_enabled')}
+                    onChange={(e) => update('schedule.cat_enabled', e.target.checked)}
+                  />
+                  启用夜猫子
+                </label>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={defaultOn('schedule.growth_enabled')}
+                    onChange={(e) => update('schedule.growth_enabled', e.target.checked)}
+                  />
+                  启用成长任务补跑
+                </label>
+                <div className="desc">七类排程互不影响：关掉一个不会停掉其余（小时配置保留，可随时重开）。</div>
               </div>
             </div>
           </div>

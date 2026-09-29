@@ -28,12 +28,16 @@
     "cat_hours": [
       1
     ],
+    "growth_hours": [
+      8
+    ],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
     "keepalive_enabled": true,
     "school_enabled": true,
-    "cat_enabled": true
+    "cat_enabled": true,
+    "growth_enabled": true
   },
   "admin": {
     "enabled": false

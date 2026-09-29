@@ -1,4 +1,4 @@
-// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 六类独立排程。
+// Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 / 成长任务补跑 七类独立排程。
 // 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
 package scheduler
 
@@ -18,7 +18,7 @@ import (
 
 // Config 调度器依赖。
 //
-// 任务开关用「禁用」命名而非「启用」：零值 Config 即六类任务都启用（hours 回落默认），
+// 任务开关用「禁用」命名而非「启用」：零值 Config 即七类任务都启用（hours 回落默认），
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
 	Pool           *pool.Pool
@@ -51,6 +51,13 @@ type Config struct {
 	SchoolDisabled bool
 	// CatDisabled 显式关闭夜猫子任务排程（schedule.cat_enabled=false）。
 	CatDisabled bool
+	// GrowthHours 成长任务补跑时点：默认 [8]。task_runner.py 是幂等脚本（已
+	// claimed/达标的账号自动跳过），每日扫一遍即天然覆盖新账号——存量账号的一次性
+	// 成长任务（first_buddy/create_canvas/chat_5 等 16 项）此前无任何排程，只能手动
+	// 跑脚本；新号入库后若没人记得跑，奖励就一直躺在"可点亮"状态。
+	GrowthHours []int
+	// GrowthDisabled 显式关闭成长任务补跑（schedule.growth_enabled=false）。
+	GrowthDisabled bool
 }
 
 // Scheduler 调度器。
@@ -91,6 +98,9 @@ func New(cfg Config) *Scheduler {
 	}
 	if len(cfg.CatHours) == 0 {
 		cfg.CatHours = []int{1}
+	}
+	if len(cfg.GrowthHours) == 0 {
+		cfg.GrowthHours = []int{8}
 	}
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
@@ -150,6 +160,7 @@ const (
 	taskKeepalive
 	taskSchool
 	taskCat
+	taskGrowth
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -178,6 +189,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !s.cfg.CatDisabled {
 		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
+	}
+	if !s.cfg.GrowthDisabled {
+		slots = append(slots, slot{nextFire(now, s.cfg.GrowthHours), taskGrowth})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -275,7 +289,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
-			// 六类任务全部禁用：不空转，只等退出信号。
+			// 七类任务全部禁用：不空转，只等退出信号。
 			<-ctx.Done()
 			return
 		}
@@ -328,6 +342,8 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 		s.RunSchoolNow()
 	case taskCat:
 		s.RunCatNow()
+	case taskGrowth:
+		s.RunGrowthTasksNow()
 	}
 }
 

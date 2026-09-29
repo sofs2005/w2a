@@ -1,9 +1,10 @@
-// school.go 开学季任务与夜猫子任务的脚本类排程：从系统 crontab 迁入 Go scheduler。
+// school.go 开学季任务、夜猫子任务与成长任务补跑的脚本类排程：从系统 crontab 迁入 Go scheduler。
 //
 // 背景：school（12:00）与 cat（01:00 夜猫窗口）原由系统 crontab 调
 // scripts/school_open_day_cron.sh 执行——依赖外部系统 cron、容器重建可能丢失、
 // 不在 config 里配置。迁入后成为第五、第六类任务，时点由 schedule.school_hours /
 // schedule.cat_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
+// 第七类 growth（08:00）是后来补的：同脚本 task_runner.py 的全量入口，见 RunGrowthTasksNow。
 package scheduler
 
 import (
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // repoRoot 定位仓库根（容器内 /app、宿主 /root/workbuddy2api）。
@@ -102,8 +104,43 @@ func (s *Scheduler) RunSchoolNow() {
 // black_cat 时段敏感：夜猫窗口 23:00–08:00 CST 内最多补 1 次（task_runner 内部
 // 判定，非窗口期打印 skip 正常退出）。失败只记 WARN。
 func (s *Scheduler) RunCatNow() {
+	taskRunnerMu.Lock()
+	defer taskRunnerMu.Unlock()
 	root := repoRoot()
 	runScript("cat", root, [][]string{
 		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
+	})
+}
+
+// taskRunnerMu 串行化 task_runner.py 的两个排程入口（夜猫子 / 成长任务补跑）。
+//
+// 为什么需要：两者是同一个脚本、同一批 auth 文件。默认时点（cat 01:00 / growth 08:00）
+// 不会撞，但用户可以配到同一小时——那时刻 runBatch 会把两者丢进并行的 goroutine，
+// 两个 python 进程同时读写同一份 auth 目录与任务状态，结果不确定。
+// 锁只覆盖 task_runner.py 自身；school 脚本不共享它要的包级状态，不进这把锁。
+var taskRunnerMu sync.Mutex
+
+// RunGrowthTasksNow 立即执行成长任务补跑：task_runner.py ALL --yes。
+//
+// 与 RunCatNow 的分工：cat 只管时段敏感的 black_cat（--only 限定），本入口跑全量
+// 23 项映射任务——其中 16 项是**一次性**成长任务（first_buddy / create_canvas /
+// chat_5 / expert_5 / Buddy_App …），账号跑过一次就永久达标，此前没有任何排程挂
+// 这个脚本，新号入库后奖励一直躺在"可点亮"状态无人领。脚本自身幂等（已 claimed /
+// 已达标的账号逐项 skip），每日扫一遍即天然覆盖新账号，无需维护"已跑过"状态。
+//
+// 三项由脚本内部规则自行处置、排程侧不必分支：
+//   - black_cat：非夜猫窗口（23-08 CST）打印 skip pending 正常退出；即便用户把
+//     growth_hours 配进窗口，补跑自身的 cap 限制（单次最多补 1 次）与 cat 排程的
+//     已达标即跳过共同兜底，重叠无非幂等写。
+//   - Expert_Philanthropy：MAPPING 标注 unforgeable（真实捐款），skip 并注明原因。
+//   - global realm 账号：脚本 auth_is_global 门控跳过，不发起任何 CN 任务中心请求。
+//
+// 失败只记 WARN（runScript 口径），不影响同槽其余任务族。
+func (s *Scheduler) RunGrowthTasksNow() {
+	taskRunnerMu.Lock()
+	defer taskRunnerMu.Unlock()
+	root := repoRoot()
+	runScript("growth", root, [][]string{
+		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes"},
 	})
 }

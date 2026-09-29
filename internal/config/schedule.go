@@ -10,7 +10,7 @@ import "fmt"
 
 // Schedule 排程配置段（对应 config.json 的 "schedule" 对象）。
 //
-// 六类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子。
+// 七类独立排程：签到 / 活跃上报 / 猫猫旅行 / token keepalive / 开学季 / 夜猫子 / 成长任务。
 // cmd/server 与 cmd/activity 共用本结构，默认值由 DefaultSchedule 填充、
 // 缺省归一由 Normalize 完成——两命令走同一份语义，不再各自复制。
 type Schedule struct {
@@ -20,7 +20,8 @@ type Schedule struct {
 	KeepaliveHours []int `json:"keepalive_hours"` // [22]
 	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
 	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
-	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled
+	GrowthHours    []int `json:"growth_hours"`    // [8] 成长任务补跑（一次性任务，幂等，覆盖新账号）
+	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled/GrowthEnabled
 	// 显式禁用开关（缺省 true）。
 	//
 	// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
@@ -35,6 +36,7 @@ type Schedule struct {
 	KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 	SchoolEnabled    bool `json:"school_enabled"`    // 缺省 true；false = 停开学季任务
 	CatEnabled       bool `json:"cat_enabled"`       // 缺省 true；false = 停夜猫子任务
+	GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 停成长任务补跑
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
@@ -52,15 +54,17 @@ func DefaultSchedule() Schedule {
 		CheckinHours:        []int{9, 21},
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
-		KeepaliveHours:       []int{22},
+		KeepaliveHours:      []int{22},
 		SchoolHours:          []int{12},
 		CatHours:             []int{1},
+		GrowthHours:          []int{8},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,
 		KeepaliveEnabled:    true,
 		SchoolEnabled:       true,
 		CatEnabled:          true,
+		GrowthEnabled:       true,
 		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
 	}
 }
@@ -92,6 +96,9 @@ func (s *Schedule) Normalize() error {
 	if len(s.CatHours) == 0 {
 		s.CatHours = []int{1}
 	}
+	if len(s.GrowthHours) == 0 {
+		s.GrowthHours = []int{8}
+	}
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
@@ -120,7 +127,10 @@ func (s *Schedule) validateHours() error {
 	if err := checkHourRange("schedule.school_hours", "school_enabled", s.SchoolHours); err != nil {
 		return err
 	}
-	return checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours)
+	if err := checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours); err != nil {
+		return err
+	}
+	return checkHourRange("schedule.growth_hours", "growth_enabled", s.GrowthHours)
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {

@@ -156,6 +156,7 @@ func main() {
 		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
 		SchoolHours:         cfg.Schedule.SchoolHours,
 		CatHours:            cfg.Schedule.CatHours,
+		GrowthHours:         cfg.Schedule.GrowthHours,
 		ActivityReportCount: cfg.Schedule.ActivityReportCount,
 		ExpiringSoonWindow:  cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
 		CheckinDisabled:     !cfg.Schedule.CheckinEnabled,
@@ -164,6 +165,7 @@ func main() {
 		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
 		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
 		CatDisabled:         !cfg.Schedule.CatEnabled,
+		GrowthDisabled:      !cfg.Schedule.GrowthEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -197,6 +199,11 @@ func main() {
 		log.Printf("夜猫子任务已禁用（schedule.cat_enabled=false）")
 	} else {
 		log.Printf("夜猫子任务已启用：%v 点（task_runner.py ALL --yes --only black_cat）", cfg.Schedule.CatHours)
+	}
+	if !cfg.Schedule.GrowthEnabled {
+		log.Printf("成长任务补跑已禁用（schedule.growth_enabled=false）")
+	} else {
+		log.Printf("成长任务补跑已启用：%v 点（task_runner.py ALL --yes，幂等：已领/已达标逐项跳过）", cfg.Schedule.GrowthHours)
 	}
 
 	h := server.NewHandler(server.Config{

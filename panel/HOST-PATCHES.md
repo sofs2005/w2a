@@ -4,7 +4,7 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5 条与第 6 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5–7 条；第 4 条已撤销（原前提失效，见该节）。
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
@@ -104,6 +104,28 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 **连带**：根网关 `internal/upstream/expiry.go` 的 `packageExpiryTime` 是同口径，
 选号 72 小时紧急优先依赖它——不重放此改动，面板会显示「2034 年到期」而网关其实
 已按月末判定，两边自相矛盾。
+
+`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
+
+### 7. `web/src/pages/ConfigPage.tsx`（定时任务表单）
+
+原表单只有「签到 / 保活」两项，与网关实际的**七类**排程（签到 / 旅行 / 活跃上报 /
+保活 / 开学季 / 夜猫子 / 成长任务补跑）长期不一致，且两处文案是错的：
+
+- 「签到同时会推进猫猫旅行」——旅行早已剥离为独立排程（`travel_hours`）。
+- 「关闭后签到与猫猫旅行都会停摆（旅行搭签到便车）」——同上，`checkin_enabled=false`
+  不再影响旅行。
+
+本次补齐七类的小时 + 开关字段，并修正上述文案。**关键点**：新增的
+`school_/cat_/growth_enabled` 在老 `config.json` 里**不存在**，而网关侧语义是
+「缺省 true，只有显式 false 才关」（`internal/config/schedule.go` 的
+`DefaultSchedule` + `Normalize`）。原先表单的 `bool()` 是 `=== true`，会把这些
+键渲染成**未勾选**——用户随手保存一次就把三类任务全关掉。故本页新增 `defaultOn()`
+（`undefined/null` → true），七处 schedule 开关改用它。`bool()` 保留原语义，
+供「会话粘性」等缺省即关的开关使用。
+
+**上游影响面**：上游也在改这个文件（「定时任务」卡片所在），`git subtree pull`
+后需重放本节的字段与 `defaultOn()`。
 
 `panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
 

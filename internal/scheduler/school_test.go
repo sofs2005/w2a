@@ -8,21 +8,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // fakeScriptExec 记录命令构建参数并按需模拟执行失败，替代真实 exec 拉起 python3 子进程。
+// running/maxRunning 用于断言 task_runner.py 的两个排程入口（cat / growth）不会并发，
+// 用 delay 把 Run 拉长到足以让并发窗口出现（否则锁没锁都测不出来）。
 type fakeScriptExec struct {
 	lastName string
 	lastArgs []string
 	lastDir  string
 	runN     int
 	err      error
+	delay    time.Duration
+
+	mu         sync.Mutex
+	running    int
+	maxRunning int
 }
 
 func (f *fakeScriptExec) SetDir(dir string) { f.lastDir = dir }
-func (f *fakeScriptExec) Run() error        { f.runN++; return f.err }
+
+func (f *fakeScriptExec) Run() error {
+	f.mu.Lock()
+	f.runN++
+	f.running++
+	if f.running > f.maxRunning {
+		f.maxRunning = f.running
+	}
+	f.mu.Unlock()
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
+	f.mu.Lock()
+	f.running--
+	f.mu.Unlock()
+	return f.err
+}
+
+func (f *fakeScriptExec) peakConcurrency() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxRunning
+}
 
 // installFakeExec 替换 newScriptCmd，测试结束还原。
 func installFakeExec(t *testing.T) *fakeScriptExec {
@@ -103,6 +133,107 @@ func TestNextWakeSchoolCatDisabled(t *testing.T) {
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
+	}
+}
+
+// TestNextWakeGrowthSlot 成长任务补跑在 growth_hours（默认 8 点）处有独立时点。
+// 与 cat 的分工：cat 是时段敏感的单任务（black_cat），growth 是幂等全量补跑。
+func TestNextWakeGrowthSlot(t *testing.T) {
+	s := New(Config{
+		CheckinHours:      []int{9},
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
+		KeepaliveDisabled: true,
+		SchoolDisabled:    true,
+		CatDisabled:       true,
+		GrowthHours:       []int{8},
+	})
+	at, kinds := s.nextWake(time.Date(2026, 9, 14, 7, 0, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v（growth 08:00 独立时点）", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskGrowth {
+		t.Errorf("kinds=%v want [growth]", kinds)
+	}
+}
+
+// TestNextWakeGrowthDisabled 显式禁用成长任务补跑后排程只剩签到时点。
+func TestNextWakeGrowthDisabled(t *testing.T) {
+	s := New(Config{
+		CheckinHours:      []int{21},
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
+		KeepaliveDisabled: true,
+		SchoolDisabled:    true,
+		CatDisabled:       true,
+		GrowthHours:       []int{8},
+		GrowthDisabled:    true,
+	})
+	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local))
+	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v（growth 禁用 → 只有签到 21:00）", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskCheckin {
+		t.Errorf("kinds=%v want [checkin]", kinds)
+	}
+}
+
+// TestNewGrowthHoursDefaults 零值 Config（老调用方/老测试）下 GrowthHours 回落 [8]，
+// 与其余六类同口径——否则 len==0 的 nextFire 返回零时点，任务静默永不触发。
+func TestNewGrowthHoursDefaults(t *testing.T) {
+	s := New(Config{})
+	if len(s.cfg.GrowthHours) != 1 || s.cfg.GrowthHours[0] != 8 {
+		t.Errorf("GrowthHours=%v want [8]", s.cfg.GrowthHours)
+	}
+}
+
+// TestRunGrowthTasksNowBuildsCommand RunGrowthTasksNow 构造
+// python3 scripts/task_runner.py ALL --yes（全量、不加 --only），工作目录为仓库根。
+//
+// 断言「不带 --only」是本测试的重点：带上 --only 就退化成 cat 排程，
+// 16 项一次性成长任务（first_buddy / create_canvas / chat_5 …）永远补不上。
+func TestRunGrowthTasksNowBuildsCommand(t *testing.T) {
+	t.Setenv("WB2A_PYTHON", "")
+	f := installFakeExec(t)
+	s := New(Config{})
+	s.RunGrowthTasksNow()
+	want := []string{"scripts/task_runner.py", "ALL", "--yes"}
+	if f.lastName != "python3" || !equalArgs(f.lastArgs, want) {
+		t.Errorf("cmd=%s %v want python3 %v", f.lastName, f.lastArgs, want)
+	}
+	if f.lastDir != repoRoot() {
+		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
+	}
+}
+
+// TestDispatchGrowth dispatch 把 growth 分发给 task_runner.py 全量入口。
+func TestDispatchGrowth(t *testing.T) {
+	t.Setenv("WB2A_PYTHON", "")
+	f := installFakeExec(t)
+	s := New(Config{})
+	s.dispatch(context.Background(), taskGrowth)
+	if f.runN != 1 || !equalArgs(f.lastArgs, []string{"scripts/task_runner.py", "ALL", "--yes"}) {
+		t.Errorf("dispatch(growth) 未按全量入口执行: runN=%d last=%v", f.runN, f.lastArgs)
+	}
+}
+
+// TestTaskRunnerEntriesSerialized cat 与 growth 是同一脚本、同一批 auth 文件，
+// 配到同一小时时 runBatch 会并行派发两者——两个 python 进程同时读写同一份
+// auth 目录，结果不确定。taskRunnerMu 必须把它们串起来。
+func TestTaskRunnerEntriesSerialized(t *testing.T) {
+	t.Setenv("WB2A_PYTHON", "")
+	f := installFakeExec(t)
+	f.delay = 50 * time.Millisecond // 拉长子进程时长，让并发窗口真实存在
+	s := New(Config{})
+
+	// 两个任务族并行派发（复刻 runBatch 对同一槽位多类任务的处置）。
+	s.runBatch(context.Background(), []taskKind{taskCat, taskGrowth})
+
+	if f.runN != 2 {
+		t.Fatalf("两个入口都应执行: runN=%d want 2", f.runN)
+	}
+	if peak := f.peakConcurrency(); peak != 1 {
+		t.Errorf("task_runner.py 两个入口并发执行了（peak=%d want 1）——auth 目录会被同时读写", peak)
 	}
 }
 
