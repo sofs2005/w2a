@@ -13,7 +13,8 @@ import (
 // 锁定迁移原语对这四个维度的边界，特别是旧实现的缺陷点：
 //   - Disable 旧实现只置 disabled+reason，不碰 until/modelCooldowns → 「disabled 但
 //     cooling」杂交态（疑点 4）。新语义：disableLocked 置 disabled 并清冷却域。
-//   - reviveCoolingLocked（签到解冻）只清冷却域、不动熔断器（C5 语义）。
+//   - reviveCoolingLocked（签到/余额刷新解冻）只解冻 CoolHard、不动熔断器（C5 语义），
+//     软限流退避与模型级台账保留（余额恢复不是限流解除证据）。
 //
 // 与 pool_test.go / modelcooldown_test.go / sessiondead_test.go 的差异：那些测试
 // 锁定各维度的行为，本文件锁定「跨维度」的迁移边界（冷却↔禁用↔熔断互不越界）。
@@ -128,15 +129,19 @@ func TestTransitionSessionDeadDisableClearsCooling(t *testing.T) {
 	}
 }
 
-// TestTransitionReviveClearsCoolingKeepsBreaker reviveCoolingLocked（签到解冻）语义：
-// 清冷却域（until/coolKind/reason/softStreak/modelCooldowns）+ 更新 credits，不动熔断。
-// 既有单维度测试已各自锁定 reason/softStreak/modelCooldowns，本用例一次性断言完整
-// 字段集，锁定迁移原语对冷却域/熔断域的处置永远一致。
-func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
+// TestTransitionReviveKeepsSoftCoolingKeepsBreaker reviveCoolingLocked（签到/余额
+// 刷新解冻）语义：只解冻余额耗尽冷却（CoolHard），软限流冷却与 6004 模型级台账
+// **保留**（限流恢复证据是重置墙钟到期或探测成功，不是余额恢复）+ 更新 credits，
+// 不动熔断。既有单维度测试已各自锁定 reason/softStreak/modelCooldowns，本用例
+// 一次性断言完整字段集，锁定迁移原语对冷却域/熔断域的处置永远一致。
+func TestTransitionReviveKeepsSoftCoolingKeepsBreaker(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	// 冷却域：软冷却 + 6004 模型级冷却（softStreak 累计）。
-	p.Cooldown("u1", CoolSoft, 600*time.Second, "429")
+	// 冷却域：软冷却（经 CooldownSoftRate 累计 softStreak 到 2）+ 6004 模型级冷却。
+	// 顺序有讲究：CooldownSoftRate 会清 modelCooldowns，故模型级写入放最后。
+	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "429")
+	p.forceSoftExpired("u1")
+	p.CooldownSoftRate("u1", 600*time.Second, time.Time{}, "429")
 	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(5*time.Minute), "glm-5.3", "6004")
 	// 熔断域：独立信号，签到不解冻。
 	p.SetBreaker(1, time.Hour, time.Hour)
@@ -149,9 +154,14 @@ func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
 		t.Errorf("revive 后 credits=%d want 700", st.Credits)
 	}
 	until, kind, reason, streak, mc := coolingDomain(t, p, "u1")
-	if !until.IsZero() || kind != 0 || reason != "" || streak != 0 || mc != 0 {
-		t.Errorf("revive 应清冷却域：until=%v kind=%v reason=%q streak=%d modelCooldowns=%d",
-			until, kind, reason, streak, mc)
+	if until.IsZero() || kind != CoolSoft || reason == "" {
+		t.Errorf("revive 不得解除软限流冷却：until=%v kind=%v reason=%q", until, kind, reason)
+	}
+	if streak != 2 {
+		t.Errorf("revive 不得清零软限流退避计数 softStreak（与余额无关）：got %d want 2", streak)
+	}
+	if mc != 1 {
+		t.Errorf("revive 不得清 6004 模型级台账（余额恢复不构成限流解除证据）：got %d want 1", mc)
 	}
 	if bt, ok := p.breakerUntil("u1"); !ok || bt.IsZero() {
 		t.Fatal("revive 不得清熔断（chat 通道健康未证明）")
@@ -159,5 +169,31 @@ func TestTransitionReviveClearsCoolingKeepsBreaker(t *testing.T) {
 	// 熔断域保留 → 账号不进 normal 候选（仅全冷却兜底仍可能选中，与熔断兜底语义一致）。
 	if p.internalHealthy("u1") {
 		t.Fatal("revive 后熔断期内不应 healthy（熔断域未被签到覆盖）")
+	}
+}
+
+// TestTransitionReviveUnfreezesHardCooling 余额耗尽冷却（CoolHard）才是
+// ReenableIfCredits 的解冻对象：余额恢复（remain>0）正是它的权威恢复证据。
+// 同时锁定「解冻 Hard 不顺带清模型级台账」——两者互相独立。
+func TestTransitionReviveUnfreezesHardCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownUntilTomorrow4AM("u1", "余额不足")
+	// 硬冷却入口（经 Cooldown）会清 modelCooldowns，故模拟「先硬冷却、后撞限」：
+	// 模型级台账在硬冷却之后写入，解冻时不得被牵连清除。
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(2*time.Hour), "glm-5.3", "6004")
+
+	p.ReenableIfCredits("u1", 800)
+
+	st, _ := p.Status("u1")
+	if st.Credits != 800 {
+		t.Errorf("revive 后 credits=%d want 800", st.Credits)
+	}
+	until, kind, reason, _, mc := coolingDomain(t, p, "u1")
+	if !until.IsZero() || kind != 0 || reason != "" {
+		t.Errorf("Hard 冷却应被余额恢复解冻：until=%v kind=%v reason=%q", until, kind, reason)
+	}
+	if mc != 1 {
+		t.Errorf("解冻 Hard 冷却不得清 modelCooldowns（两者独立）：got %d want 1", mc)
 	}
 }

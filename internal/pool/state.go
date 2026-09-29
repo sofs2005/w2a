@@ -111,11 +111,13 @@ func (p *Pool) ManualDisabledState(uid string) (disabled bool, reason string, ok
 	return e.manualDisabled, e.manualReason, true
 }
 
-// ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号非禁用时，清冷却域（余额恢复）。
-// 迁移经 transition.reviveCoolingLocked：只清冷却域（until/coolKind/softStreak/
-// modelCooldowns）并更新 credits，不动熔断器（fails/retryCount/breakerUntil）——
-// 签到成功只证明余额恢复与 billing 通道健康，不证明 chat 通道健康，熔断（连续 5xx
-// 信号）不应被签到覆盖。remain==0 或禁用时只更新 credits（不动冷却/禁用）。
+// ReenableIfCredits 签到/余额刷新后解冻：仅当 remain > 0 且账号非禁用时，解冻
+// **余额耗尽冷却**（CoolHard）。迁移经 transition.reviveCoolingLocked：只解冻
+// CoolHard 的 until/coolKind/reason 并更新 credits，**不清**软限流退避（CoolSoft/
+// softStreak）与模型级台账（modelCooldowns）——限流恢复证据是上游重置墙钟到期或
+// 探测成功，不是余额恢复（余额刷新每 5 分钟一次，全清会把限流保护寿命压到一个
+// 刷新周期内）。也不动熔断器（fails/retryCount/breakerUntil）——余额恢复只证明
+// billing 通道健康，不证明 chat 通道健康。remain==0 或禁用时只更新 credits。
 func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
