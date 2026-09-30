@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -154,7 +155,10 @@ func TestAccountsMergesLedgerFields(t *testing.T) {
 
 	// 凭证目录为空 → 账号全部来自 /status 的「池中存在但磁盘无凭证」分支，
 	// 该分支同样要带上台账字段，正好一并覆盖。
-	accounts, status, _, err := svc.Accounts(t.Context())
+	// 用 context.Background() 而非 t.Context()：后者是 Go 1.24 才加的，
+	// 而本模块 go.mod 声明 go 1.22、CI 按 go-version-file 取该版本（本地 Go 更新，
+	// 用了新 API 也编得过，只在 CI 上炸）。
+	accounts, status, _, err := svc.Accounts(context.Background())
 	if err != nil {
 		t.Fatalf("Accounts: %v", err)
 	}
