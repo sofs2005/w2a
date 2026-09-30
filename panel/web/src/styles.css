@@ -385,6 +385,46 @@ textarea::placeholder {
   flex: 1;
   min-width: 120px;
 }
+
+/* ── 候选建议输入框（SuggestInput）────────────────────
+   自绘弹层，替代原生 <datalist>：后者样式不可控，且会被浏览器密码管理器抢占
+   （在已保存口令的站点上，点文本框弹出的是"自动填充密码"而非候选）。 */
+.suggest {
+  position: relative;
+  width: 100%;
+}
+.suggest-pop {
+  /* fixed + 实测坐标：不受任何祖先的 overflow 裁剪影响（见 SuggestInput 注释）。 */
+  position: fixed;
+  z-index: 60;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.suggest-item {
+  padding: 5px 9px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: var(--text);
+  cursor: pointer;
+  /* 模型名可能很长（带版本后缀），单行省略而不是撑宽弹层。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.suggest-item.active {
+  background: rgba(79, 140, 255, 0.18);
+  color: #a9c8ff;
+}
+.suggest-empty {
+  padding: 6px 9px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
 .row > .shrink {
   flex: 0 0 auto;
   min-width: 0;

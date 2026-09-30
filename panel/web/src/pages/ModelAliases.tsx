@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { AliasEntry, AliasMeta, Model, SessionInfo } from '../types'
 import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import { SuggestInput } from '../SuggestInput'
 import { modelRealms, type Realm } from '../realm'
 
 /** 空行模板：新加的行默认只有对外名待填。 */
@@ -289,30 +290,33 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
             {rows.map((row, idx) => (
               <tr key={idx}>
                 <td>
-                  <input
-                    type="text"
-                    list="alias-catalog-all"
+                  <SuggestInput
                     value={row.name}
+                    onChange={(v) => update(idx, { name: v })}
+                    options={catalog.all}
                     placeholder="my-model"
-                    onChange={(e) => update(idx, { name: e.target.value })}
+                    disabled={writeDisabled}
+                    ariaLabel="对外模型名"
                   />
                 </td>
                 <td>
-                  <input
-                    type="text"
-                    list="alias-catalog-cn"
+                  <SuggestInput
                     value={row.cn}
+                    onChange={(v) => update(idx, { cn: v })}
+                    options={catalog.byRealm.cn}
                     placeholder="留空 = 国内无此模型"
-                    onChange={(e) => update(idx, { cn: e.target.value })}
+                    disabled={writeDisabled}
+                    ariaLabel="国内真实模型名"
                   />
                 </td>
                 <td>
-                  <input
-                    type="text"
-                    list="alias-catalog-global"
+                  <SuggestInput
                     value={row.global}
+                    onChange={(v) => update(idx, { global: v })}
+                    options={catalog.byRealm.global}
                     placeholder="留空 = 国际无此模型"
-                    onChange={(e) => update(idx, { global: e.target.value })}
+                    disabled={writeDisabled}
+                    ariaLabel="国际真实模型名"
                   />
                 </td>
                 <td>
@@ -329,24 +333,6 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
             ))}
           </tbody>
         </table>
-
-        {/* 按列的候选：对外名 = 全部裸名；cn/global 列 = 只在该域存在的名字。
-            datalist 不强制取值（可填任意名），也不随行变化——故三份挂在表格外。 */}
-        <datalist id="alias-catalog-all">
-          {catalog.all.map((id) => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
-        <datalist id="alias-catalog-cn">
-          {catalog.byRealm.cn.map((id) => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
-        <datalist id="alias-catalog-global">
-          {catalog.byRealm.global.map((id) => (
-            <option key={id} value={id} />
-          ))}
-        </datalist>
 
         <div className="page-actions" style={{ marginTop: 13 }}>
           <button className="btn" onClick={addRow} disabled={writeDisabled}>

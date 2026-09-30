@@ -183,6 +183,14 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
    （裸名本就跨域通用），自动写入只会把用户的手工条目淹没在几十行噪声里。故只做
    只读展示 + 一个「从目录导入这 N 条」按钮（点了才填表格，保存才落盘）。
    `realms` 缺席（老网关）时不显示该卡片，改提示"无法按域区分"。
+4. **下拉框改用自绘 `SuggestInput`（`web/src/SuggestInput.tsx`，纯新增）**。
+   按域切分候选后用户仍报「国际列点上去没有下拉」，且**弹出的是自动填充密码**——
+   这是浏览器密码管理器抢占：面板登录页存了口令，Chrome 把紧随其后的文本框当成新的
+   凭据字段，`<datalist>` 的原生弹层根本没机会显示。这类拦截**无法从应用侧关闭**
+   （`autocomplete="off"` 对密码管理器只是建议），只能不用原生弹层。
+   故改为自绘：`position: fixed` + 实测坐标（不受祖先 overflow 裁剪）、输入即过滤、
+   键盘上下选择/回车确认/Esc 收起。刻意**不放进 `ui.tsx`**——那是上游文件，放进去
+   会给 subtree pull 增加一处冲突面。
 
 **回归测试**：`internal/api/alias_test.go`（含「推导路径必须与网关一致」
 「非法输入不得改动磁盘文件」两条要害断言）。
@@ -200,6 +208,7 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 | `internal/api/alias_test.go` | 见第 8 条。 |
 | `internal/api/models_test.go` | 见第 8 条（`realms` 透传回归）。 |
 | `web/src/pages/ModelAliases.tsx` | 见第 8 条。 |
+| `web/src/SuggestInput.tsx` | 见第 8 条（自绘候选下拉，替代被密码管理器抢占的 `<datalist>`）。 |
 | `HOST-PATCHES.md` | 本文件。 |
 
 宿主的对应文件在仓库根：`cmd/server/panel.go`（路由合并）、`cmd/server/reload.go`
