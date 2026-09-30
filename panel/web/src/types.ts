@@ -17,6 +17,8 @@ export interface Account {
   in_gateway: boolean
   /** healthy | cooling | disabled | token_expired | gateway_unreachable | missing_credential | unknown */
   status: string
+  /** cn | global。统一调度后裸名跨域选号，靠它分辨请求落在哪一域的号上。 */
+  realm?: string
 
   cooling: boolean
   cool_kind?: string
@@ -32,12 +34,49 @@ export interface Account {
   last_success?: string
   last_err?: string
 
+  /**
+   * 该账号当前仍在限额的模型（6004 模型级冷却，未到期条目）。
+   * 网关侧到期即消失，故这里恒为「此刻仍受限」的集合；缺省 = 无受限模型。
+   */
+  rate_limited_models?: RateLimitedModel[]
+  /**
+   * 该账号每模型的实测成本台账。
+   *
+   * 这是「按号分账」在面板上唯一的可见处：/v1/stats 只按模型字符串聚合、
+   * 不区分账号，所以「裸名的请求落在国内号还是国际号、各自花了多少」
+   * 只能从这里或容器日志看。
+   */
+  model_costs?: ModelCostStatus[]
+
   credits: number
   live_credits?: number
   credits_at?: string
   /** 积分到期：与 live_credits 同源同时刻。 */
   credits_expire_at?: string
   credits_expiring?: number
+}
+
+/** 单个被限流模型的台账行（账号详情用）。 */
+export interface RateLimitedModel {
+  model: string
+  /** 该模型独立冷却的截止（可能已被 soft_rate_max 截断）。 */
+  until?: string
+  /** 上游「将在 … 重置」的原始墙钟；未截断时与 until 同值。 */
+  reset_at?: string
+  reason?: string
+}
+
+/**
+ * 单个 (账号, 模型) 的成本台账行。
+ *
+ * tier 不单独下发，按 cost_per_1k 推出（与网关同一口径，避免两处表示漂移）：
+ * ≤0 = 实测免费（tier 0，选号优先）；>0 = 按单价排序（tier 2）。
+ */
+export interface ModelCostStatus {
+  model: string
+  cost_per_1k: number
+  last_seen: string
+  samples?: number
 }
 
 /** 单个积分包的到期明细。 */

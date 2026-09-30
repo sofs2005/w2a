@@ -51,6 +51,7 @@ type AccountView struct {
 	// gateway 侧运行态；InGateway=false 表示该账号在池中不存在。
 	InGateway       bool      `json:"in_gateway"`
 	Status          string    `json:"status"` // healthy | cooling | disabled | unknown
+	Realm           string    `json:"realm,omitempty"`
 	Cooling         bool      `json:"cooling"`
 	CoolKind        string    `json:"cool_kind,omitempty"`
 	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
@@ -64,6 +65,12 @@ type AccountView struct {
 	ErrTotal        int64     `json:"err_total"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
 	LastErrTime     time.Time `json:"last_err,omitempty"`
+
+	// 网关侧的两处台账（统一调度后可观测性的关键：/v1/stats 按模型字符串聚合，
+	// 看不到「哪个号在哪个模型上花了多少、哪个号被哪个模型限流」，只能从这里看）。
+	// 均原样透传 /status，空集合省略——面板据此区分「无记录」与「查询失败」。
+	RateLimitedModels []gateway.RateLimitedModel `json:"rate_limited_models,omitempty"`
+	ModelCosts        []gateway.ModelCostStatus  `json:"model_costs,omitempty"`
 
 	// 积分：GatewayCredits 来自 /status（分钟级刷新），LiveCredits 来自主动查询（更准）。
 	GatewayCredits int64      `json:"credits"`
@@ -321,6 +328,7 @@ func (s *Service) Accounts(ctx context.Context) ([]AccountView, *gateway.Status,
 				byUID[ga.UID] = v
 			}
 			v.InGateway = true
+			v.Realm = ga.Realm
 			v.Cooling = ga.Cooling
 			v.CoolKind = ga.CoolKind
 			v.CoolRemaining = ga.CoolRemaining
@@ -335,6 +343,8 @@ func (s *Service) Accounts(ctx context.Context) ([]AccountView, *gateway.Status,
 			v.LastSuccessTime = ga.LastSuccessTime
 			v.LastErrTime = ga.LastErrTime
 			v.GatewayCredits = ga.Credits
+			v.RateLimitedModels = ga.RateLimitedModels
+			v.ModelCosts = ga.ModelCosts
 			if v.Nickname == "" {
 				v.Nickname = ga.Nickname
 			}

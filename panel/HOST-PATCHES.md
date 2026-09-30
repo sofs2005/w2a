@@ -197,6 +197,36 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 
 `panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
 
+## 9. 账号台账透传：`internal/gateway/client.go` + `internal/ops/ops.go` + `web/src/pages/Accounts.tsx`
+
+**动机**：网关 `/status` 每个账号都带 `realm`、`rate_limited_models`（6004 模型级
+限流台账）、`model_costs`（每模型实测成本台账），但面板侧 `gateway.AccountStatus`
+**一个都没声明** → `encoding/json` 静默丢弃 → 面板上完全看不到。这与第 8 条的
+`realms` 是同一个坑，而后果更重：`/v1/stats` 只按**请求体的模型字符串**聚合、不区分
+账号，统一调度后裸名又会在 cn/global 账号间调度，于是「同一个裸名，国内号花了多少、
+国际号花了多少」在面板上**没有任何出口**——只有这两份台账能答。
+
+**改动**（三处，全部是新增字段，无逻辑改写）：
+
+1. `internal/gateway/client.go`：`AccountStatus` 增 `Realm` / `RateLimitedModels` /
+   `ModelCosts`，并新增两个从属结构体（与 `pool.RateLimitedModel`、
+   `pool.ModelCostStatus` 逐字段对齐）。**声明纪律**写进了结构体注释：网关 `/status`
+   下发的每个运维字段都必须在此显式声明，否则静默丢弃。
+2. `internal/ops/ops.go`：`AccountView` 增同名字段，`Accounts()` 的 merge 循环里逐字段
+   搬运（`v.Realm = ga.Realm` 等三行）。**漏搬一行与漏声明一样静默**，故
+   `account_ledger_test.go` 真起假网关走完 `Accounts()` 全路径来钉住这几行。
+3. `web/src/pages/Accounts.tsx`：账号行显示域标签（`realmLabel(acctRealm(a))`）与限流
+   模型数；详情弹窗新增 `AccountLedgers` 组件渲染两张台账表。
+
+**上游冲突面**：`client.go` / `ops.go` / `Accounts.tsx` 都是上游文件，三处改动均为
+「新增字段 + 新增渲染块」，未改既有字段语义与既有渲染逻辑，重放时应能机械合入。
+`AccountLedgers` 是 `Accounts.tsx` 内新增的顶层函数（未拆新文件，避免为一个小块再添
+一个模块；若上游同时改了该文件尾部需手工拼接）。
+
+**已知差异**：`acctRealm()` **优先取网关下发的 `realm`**，缺席才回退按 `domain` 推。
+选号是按 `realm` 过滤的，展示口径必须与之一致——两者不一致时（凭证被手工改过等）
+不能给出与选号矛盾的结论。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
@@ -207,6 +237,7 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 | `internal/ops/aliasfile.go` | 见第 8 条。 |
 | `internal/api/alias_test.go` | 见第 8 条。 |
 | `internal/api/models_test.go` | 见第 8 条（`realms` 透传回归）。 |
+| `internal/api/account_ledger_test.go` | 见第 9 条（账号台账透传回归）。 |
 | `web/src/pages/ModelAliases.tsx` | 见第 8 条。 |
 | `web/src/SuggestInput.tsx` | 见第 8 条（自绘候选下拉，替代被密码管理器抢占的 `<datalist>`）。 |
 | `HOST-PATCHES.md` | 本文件。 |

@@ -15,8 +15,17 @@ import (
 )
 
 // ServicesStatusList 是网关 /status 返回的账号条目（字段与 pool.Status 对齐）。
+//
+// 声明纪律：网关 /status 下发的每个运维字段都必须在这里显式声明，否则
+// encoding/json 会**静默丢弃**——不报错、不告警，面板上只表现为「这栏一直是空的」。
+// `realms`（见 Model.Realms）与本节的三处台账都踩过同一个坑，新增网关字段时
+// 务必回来补声明。
 type AccountStatus struct {
-	UID             string    `json:"uid"`
+	UID string `json:"uid"`
+	// Realm 该账号所属域（cn / global）。统一调度后裸名会跨域选号，账号列表若不
+	// 标出域，运维就看不出「这次请求落在国内号还是国际号上」——而两域的出站模型名
+	// 可能不同（别名映射），是排查的第一分叉点。
+	Realm           string    `json:"realm,omitempty"`
 	Nickname        string    `json:"nickname,omitempty"`
 	Credits         int64     `json:"credits"`
 	Cooling         bool      `json:"cooling"`
@@ -33,6 +42,36 @@ type AccountStatus struct {
 	InFlight        int       `json:"in_flight"`
 	BreakerFails    int       `json:"breaker_fails"`
 	BreakerUntil    time.Time `json:"breaker_until,omitempty"`
+
+	// RateLimitedModels 该账号当前仍在限额的模型（6004 带解析时间的模型级独立冷却）。
+	// 到期条目网关侧即消失，故这里恒为「此刻仍受限」的集合。
+	RateLimitedModels []RateLimitedModel `json:"rate_limited_models,omitempty"`
+	// ModelCosts 该账号每模型的实测成本台账（(账号, 模型) 维度的扣费观测）。
+	// 这是「按号分账」在面板上唯一的可见处：统一调度后裸名会跨域选中账号，
+	// /v1/stats 只按模型字符串聚合、不区分账号，域维度只能从这里看。
+	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
+}
+
+// RateLimitedModel 单个被限流模型的台账行（与 pool.RateLimitedModel 对齐）。
+type RateLimitedModel struct {
+	Model string `json:"model"`
+	// Until 该模型独立冷却的截止（可能已被 soft_rate_max 截断，此时 ≠ ResetAt）。
+	Until time.Time `json:"until,omitempty"`
+	// ResetAt 上游「将在 … 重置」的原始墙钟（未经截断），未截断时与 Until 同值。
+	ResetAt time.Time `json:"reset_at,omitempty"`
+	Reason  string    `json:"reason,omitempty"`
+}
+
+// ModelCostStatus 单个 (账号, 模型) 的成本台账行（与 pool.ModelCostStatus 对齐）。
+//
+// tier 不单独下发，由 CostPer1k 推出：≤0 = tier 0（实测免费，选号优先），
+// >0 = tier 2（按单价排序），无观测 = tier 1（未知）。面板沿用同一口径，
+// 避免两处各存一份 tier 表示后漂移。
+type ModelCostStatus struct {
+	Model     string    `json:"model"`
+	CostPer1k float64   `json:"cost_per_1k"`
+	LastSeen  time.Time `json:"last_seen"`
+	Samples   int       `json:"samples,omitempty"`
 }
 
 // Status 网关 /status 响应。

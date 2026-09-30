@@ -19,8 +19,21 @@ import {
   statusBadge,
 } from '../ui'
 import TaskProgress from './TaskProgress'
+import { accountRealm, realmLabel, type Realm } from '../realm'
 
 type Filter = 'all' | 'healthy' | 'cooling' | 'problem' | 'expiring'
+
+/**
+ * 账号域判定：**网关下发的 realm 优先**（那是运行池里该账号的实际归属，也是选号
+ * 过滤用的值），缺席时回退按 domain 推（老网关不下发该字段）。
+ *
+ * 为什么不能只用 domain 推：domain 是凭证里的静态字符串，而 realm 是网关侧的
+ * 权威归属——两者理应一致，但一旦不一致（凭证被手工改过、新域上线），选号按 realm、
+ * 展示按 domain 就会给出矛盾的结论。展示口径必须跟选号口径走。
+ */
+function acctRealm(a: Account): Realm {
+  return a.realm === 'cn' || a.realm === 'global' ? a.realm : accountRealm(a)
+}
 
 export default function Accounts({ session }: { session: SessionInfo }) {
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -336,8 +349,21 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                         </button>
                         <div className="mono text-faint" style={{ fontSize: 11 }}>
                           {a.uid.slice(0, 8)}
+                          <span
+                            className="text-dim"
+                            title={`网关判定该账号属于「${realmLabel(acctRealm(a))}」；统一调度下裸名会在这两域的号之间选`}
+                          >
+                            {' '}
+                            · {realmLabel(acctRealm(a))}
+                          </span>
                           {a.in_gateway && a.in_flight > 0 && (
                             <span className="text-accent"> · 在途 {a.in_flight}</span>
+                          )}
+                          {a.rate_limited_models && a.rate_limited_models.length > 0 && (
+                            <span className="text-warn" title={a.rate_limited_models.map((m) => m.model).join('、')}>
+                              {' '}
+                              · 限流 {a.rate_limited_models.length} 模型
+                            </span>
                           )}
                         </div>
                       </td>
@@ -573,6 +599,14 @@ function AccountDetail({ uid, onClose }: { uid: string; onClose: () => void }) {
             <dd className="mono">{a.enterprise_id || '—'}</dd>
             <dt>Domain</dt>
             <dd className="mono">{a.domain || '—'}</dd>
+            <dt>所属域</dt>
+            <dd>
+              {realmLabel(acctRealm(a))}
+              <span className="text-faint" style={{ fontSize: 11.5 }}>
+                {' '}
+                · 选号时按此域过滤（裸名不限域，cn:/global: 前缀钉域）
+              </span>
+            </dd>
             <dt>凭证文件</dt>
             <dd className="mono">{a.file_name || '（无文件，仅网关内存）'}</dd>
             <dt>Token 过期</dt>
@@ -600,6 +634,8 @@ function AccountDetail({ uid, onClose }: { uid: string; onClose: () => void }) {
             <dt>最近失败</dt>
             <dd>{fmtISO(a.last_err)}</dd>
           </dl>
+
+          <AccountLedgers a={a} />
         </>
       )}
 
@@ -609,6 +645,92 @@ function AccountDetail({ uid, onClose }: { uid: string; onClose: () => void }) {
         </button>
       </div>
     </Modal>
+  )
+}
+
+/**
+ * AccountLedgers 账号详情里的两块网关侧台账（限流模型 + 每模型实测成本）。
+ *
+ * 为什么值得单独一块 UI：这两份数据是「按号分账」在面板上唯一的出口。
+ * /v1/stats 只按请求体的模型字符串聚合、不区分账号，统一调度后裸名又会在两域
+ * 账号间调度，于是「同一个裸名，国内号花了多少、国际号花了多少」在统计页上
+ * 根本看不见——只能从这里（或容器日志）看。
+ *
+ * 缺省语义：字段缺席 = 网关没有这条记录（无观测/已过期），不是查询失败。
+ * 网关对空台账直接 omitempty，所以这里空数组与 undefined 等价处理。
+ */
+function AccountLedgers({ a }: { a: Account }) {
+  const limited = a.rate_limited_models ?? []
+  const costs = a.model_costs ?? []
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <h3 style={{ fontSize: 13.5, margin: '0 0 8px' }}>模型限流台账</h3>
+      {limited.length === 0 ? (
+        <div className="desc">当前没有被模型级限流的条目（6004 带重置时间才会记在这里）。</div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th>冷却截止</th>
+              <th>上游重置</th>
+              <th>原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            {limited.map((m) => (
+              <tr key={m.model}>
+                <td className="mono">{m.model}</td>
+                <td>{m.until ? fmtTime(Date.parse(m.until) / 1000) : '—'}</td>
+                <td className="text-dim">
+                  {/* 与 until 同值 = 未被 soft_rate_max 截断，两列一致即可，不必额外标注。 */}
+                  {m.reset_at ? fmtTime(Date.parse(m.reset_at) / 1000) : '—'}
+                </td>
+                <td className="text-dim">{m.reason || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h3 style={{ fontSize: 13.5, margin: '18px 0 8px' }}>每模型实测成本</h3>
+      {costs.length === 0 ? (
+        <div className="desc">
+          暂无成本观测（该号近期没跑过模型，或观测已过期）。选号据此把免费/便宜的号排前面。
+        </div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th className="num">实测单价 /1k</th>
+              <th className="num">样本数</th>
+              <th>最近观测</th>
+            </tr>
+          </thead>
+          <tbody>
+            {costs.map((c) => (
+              <tr key={c.model}>
+                <td className="mono">{c.model}</td>
+                <td className="num">
+                  {/* ≤0 即 tier 0（实测免费）——这是「为什么总选它」最常见的原因，故高亮。 */}
+                  {c.cost_per_1k > 0 ? (
+                    c.cost_per_1k.toFixed(4)
+                  ) : (
+                    <span className="text-ok" title="实测免费（tier 0），选号时优先">
+                      免费
+                    </span>
+                  )}
+                </td>
+                <td className="num text-dim">{c.samples ?? '—'}</td>
+                <td className="text-dim">{fmtISO(c.last_seen)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   )
 }
 
