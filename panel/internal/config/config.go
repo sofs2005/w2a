@@ -42,6 +42,16 @@ type Config struct {
 	// UpstreamConfigFile 网关配置文件（config.json），供「配置」页在线读写。
 	UpstreamConfigFile string `json:"config_file"`
 
+	// UpstreamAliasFile 网关模型别名映射文件（model_aliases.json）。
+	//
+	// 与 config.json 的关键差别：这份文件**热生效**（网关每 5s 轮询签名后重载），
+	// 所以它必须独立成文件——放 config.json 里就得重启才能改。
+	//
+	// 留空 = 自动推导（与网关 state_file 同目录，规则见 ops.Service.AliasFilePath），
+	// 这是零配置部署的正确取值：面板与网关必须算出同一个路径，否则改完不生效。
+	// 仅当部署布局特殊（state_file 目录与别名文件不同）时才需要显式指定。
+	UpstreamAliasFile string `json:"alias_file"`
+
 	// BackupDir 配置备份目录。默认 ./data/backups。
 	//
 	// 为什么需要它：Docker 单文件挂载 config.json 时，容器内它的父目录属于容器
@@ -220,6 +230,7 @@ func applyEnv(c *Config) {
 	str("WBGUI_GATEWAY_API_KEY", &c.GatewayAPIKey)
 	str("WBGUI_AUTH_DIR", &c.UpstreamAuthDir)
 	str("WBGUI_CONFIG_FILE", &c.UpstreamConfigFile)
+	str("WBGUI_ALIAS_FILE", &c.UpstreamAliasFile)
 	str("WBGUI_BACKUP_DIR", &c.BackupDir)
 	str("WBGUI_CONTAINER", &c.DockerContainer)
 	str("WBGUI_CREDENTIALS_FILE", &c.CredentialsFile)

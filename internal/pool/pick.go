@@ -25,17 +25,24 @@ func (p *Pool) Pick(model string) *auth.Auth {
 	return p.pick(nil, model, "")
 }
 
-// pick 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
+// pick 单域形态：realm=="" 即全池（历史语义）。集合形态见 pickInRealms；
+// 本包装保留给测试与既有调用（DeptestOnly 意义同 Pick）。
+func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+	return p.pickInRealms(tried, reqModel, SingleRealm(realm))
+}
+
+// pickInRealms 在 healthy 候选集中按三因子权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // 候选集是 top5 近似：先按三因子权重（weightOf）降序取前 5（credits 只是权重的一个因子，
 // 闲置补偿与成功率同样决定谁进短名单），再在 top5 内做防撞号过滤。
 // 并发防雪崩：跳过 lastUsed 距今 < minPickGap 的账号（除非 top5 全部刚被用过，
 // 此时退回最近最少使用 LRU 账号），迫使高并发请求发散，而不是全部撞同一高分账号。
 // minPickGap=0（测试用）时过滤恒通过，退化为纯加权随机。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效；PickExcluding 传 ""）。
-// realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域；PickExcluding 传 ""）。
+// realms 为**域集合**：nil/空 = 全池（不限域）；{"cn"} = 钉 CN；{"global"} = 钉 global；
+// {"cn","global"} = 两域并集（语义等价全池，但成本探索 timer 键不同，见 RealmSet.Key）。
 // 注意：模型豁免只进 normal 选号（候选 healthy 判定）；全冷却兜底不参与模型豁免——
 // 兜底本来就是在"无任何 direct 可用"时的降级，切模型可用性已在 normal 阶段体现。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms RealmSet) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -45,7 +52,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		e.pruneExpiredModelCooldowns(now)
 		e.pruneExpiredModelCosts(now)
 	}
-	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
+	realmOK := func(e *entry) bool { return realms.Allows(e.a.Realm()) }
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
 	if reqModel != "" {
 		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
@@ -66,7 +73,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm)
+		return p.pickEarliestExpiryLocked(tried, now, realms)
 	}
 	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「72 小时内到期」的
 	// 账号时，按真实到期时刻硬优先（最早优先），已实测免费的临期号排在最前。
@@ -127,8 +134,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// hasTier1 复用本循环上方 costTier 的预计算口径（每候选一次的契约不变）——
 	// 下方 ws 构建循环顺带置位，不在判定处再算一遍。timer 同锁写入：并发 pick
 	// 串行进入写锁，只有一个进入者能通过窗口判定（天然防重复探索）。
-	// key = realm + "\x1f" + reqModel：同模型名可跨域，探索节奏按 (域, 模型)
-	// 独立；realm==""（Pick 老语义）单独成键。
+	// key = realmSet + "\x1f" + reqModel：同模型名可跨域，探索节奏按 (域集合, 模型)
+	// 独立；全池（nil/空集）Key()=="" 单独成键（与改造前的 realm=="" 键零漂移）。
 	if p.costExploreInterval > 0 && bestTier == 0 && reqModel != "" {
 		for _, e := range cands {
 			if ti, _ := costTier(e); ti == 1 {
@@ -136,7 +143,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 				break
 			}
 		}
-		key := realm + "\x1f" + reqModel
+		key := realms.Key() + "\x1f" + reqModel
 		if hasTier1 && now.Sub(p.exploreLast[key]) >= p.costExploreInterval {
 			p.exploreLast[key] = now
 			p.costExploreEvents++
@@ -224,7 +231,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// 毕业结果由相邻的既有日志闭环（免费号无日志、收费号走 NoteModelCost
 		// 常规路径）。
 		log.Printf("[pool] cost explore model=%s realm=%q acct=%s window=%s",
-			reqModel, realm, logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
+			reqModel, realms.Key(), logfmt.Label(e.a.UID, e.a.Nickname), p.costExploreInterval)
 	}
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
@@ -288,14 +295,15 @@ func betterExpiryPick(
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string) *auth.Auth {
+// realms 为域集合（nil/空 = 全池）：池内域外账号不参与本集合的兜底。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realms RealmSet) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
 		}
-		if realm != "" && e.a.Realm() != realm {
-			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底
+		if !realms.Allows(e.a.Realm()) {
+			continue // 域过滤：池内集合外 realm 的冷却账号不参与本集合兜底
 		}
 		if e.disabled || e.manualDisabled {
 			continue // 禁用/手动停用的账号永不参与兜底

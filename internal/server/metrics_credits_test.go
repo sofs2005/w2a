@@ -21,12 +21,12 @@ func warmCNCatalog(t *testing.T, h *Handler) {
 	got := h.modelList()
 	found := false
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && id == "cn:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("预热失败：modelList 无 cn:hy3：%v", got)
+		t.Fatalf("预热失败：modelList 无 hy3：%v", got)
 	}
 }
 
@@ -42,7 +42,7 @@ func findModelRow(t *testing.T, snap MetricsSnapshot, model string) ModelStatPay
 	return ModelStatPayload{}
 }
 
-// TestStatsCreditsEnrichedFromCNCatalog CN 目录命中：cn:hy3 行透出倍率原文
+// TestStatsCreditsEnrichedFromCNCatalog CN 目录命中：hy3 裸名行透出倍率原文
 // "x0.05"；目录外模型 / total 行保持空（S1/S4）。
 func TestStatsCreditsEnrichedFromCNCatalog(t *testing.T) {
 	resetModelsCache()
@@ -55,17 +55,17 @@ func TestStatsCreditsEnrichedFromCNCatalog(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 	warmCNCatalog(t, h)
 
-	recordChatMetric(&chatStat{model: "cn:hy3", mode: "sync", status: 200}, time.Second)
-	recordChatMetric(&chatStat{model: "cn:not-in-catalog", mode: "sync", status: 200}, time.Second)
+	recordChatMetric(&chatStat{model: "hy3", mode: "sync", status: 200}, time.Second)
+	recordChatMetric(&chatStat{model: "not-in-catalog", mode: "sync", status: 200}, time.Second)
 
 	snap := MetricsSnapshotOf()
 	h.enrichCredits(&snap)
 
-	if got := findModelRow(t, snap, "cn:hy3").Credits; got != "x0.05" {
-		t.Errorf("cn:hy3 credits = %q, want x0.05（目录命中，原文透出）", got)
+	if got := findModelRow(t, snap, "hy3").Credits; got != "x0.05" {
+		t.Errorf("hy3 credits = %q, want x0.05（目录命中，原文透出）", got)
 	}
-	if got := findModelRow(t, snap, "cn:not-in-catalog").Credits; got != "" {
-		t.Errorf("cn:not-in-catalog credits = %q, want 空串（目录外模型省略）", got)
+	if got := findModelRow(t, snap, "not-in-catalog").Credits; got != "" {
+		t.Errorf("not-in-catalog credits = %q, want 空串（目录外模型省略）", got)
 	}
 	if snap.Total.Credits != "" {
 		t.Errorf("total credits = %q, want 空串（跨倍率聚合无意义）", snap.Total.Credits)
@@ -86,7 +86,7 @@ func TestStatsCreditsOmittedWhenCacheCold(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 
-	recordChatMetric(&chatStat{model: "cn:hy3", mode: "sync", status: 200}, time.Second)
+	recordChatMetric(&chatStat{model: "hy3", mode: "sync", status: 200}, time.Second)
 
 	snap := MetricsSnapshotOf()
 	h.enrichCredits(&snap)
@@ -103,8 +103,9 @@ func TestStatsCreditsOmittedWhenCacheCold(t *testing.T) {
 	}
 }
 
-// TestStatsCreditsGlobalRealm global realm：global: 前缀键查 global 目录
-// （v2 探测对象形态，fake 透传 fullFieldsModelsBody）→ 倍率命中（S5 global 路径）。
+// TestStatsCreditsGlobalRealm global 域倍率：前缀键 global:hy3 走 global 目录分支；
+// 裸名 hy3（统一调度口径）在同配置下也命中——CN 无账号 → CN 目录空 → 回落 global。
+// （v2 探测对象形态，fake 透传 fullFieldsModelsBody）
 func TestStatsCreditsGlobalRealm(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -117,18 +118,20 @@ func TestStatsCreditsGlobalRealm(t *testing.T) {
 	)
 	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
 	// 预热 global 目录：一次 modelList 触发探测并落 Client 缓存。
+	// 并集目录下条目为裸名（无 global: 前缀条目）。
 	got := h.modelList()
 	found := false
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && id == "global:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("预热失败：modelList 无 global:hy3：%v", got)
+		t.Fatalf("预热失败：modelList 无 hy3：%v", got)
 	}
 
 	recordChatMetric(&chatStat{model: "global:hy3", mode: "sync", status: 200}, time.Second)
+	recordChatMetric(&chatStat{model: "hy3", mode: "sync", status: 200}, time.Second)
 
 	snap := MetricsSnapshotOf()
 	h.enrichCredits(&snap)
@@ -136,9 +139,12 @@ func TestStatsCreditsGlobalRealm(t *testing.T) {
 	if got := findModelRow(t, snap, "global:hy3").Credits; got != "x0.05" {
 		t.Errorf("global:hy3 credits = %q, want x0.05（global 目录命中）", got)
 	}
+	if got := findModelRow(t, snap, "hy3").Credits; got != "x0.05" {
+		t.Errorf("裸名 hy3 credits = %q, want x0.05（CN 空 → 回落 global 目录）", got)
+	}
 }
 
-// TestStatsCreditsKeyNormalization 键归一：裸名（→cn realm）与 cn: 前缀同获倍率；
+// TestStatsCreditsKeyNormalization 键归一：裸名与 cn: 前缀同获倍率（目录键已是裸名）；
 // "-" 与未知前缀查不到 → 空串（S5 边界形态）。
 func TestStatsCreditsKeyNormalization(t *testing.T) {
 	resetModelsCache()
@@ -151,7 +157,7 @@ func TestStatsCreditsKeyNormalization(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 	warmCNCatalog(t, h)
 
-	for _, key := range []string{"hy3", "cn:hy3", "-", "weird:hy3"} {
+	for _, key := range []string{"hy3", "hy3", "-", "weird:hy3"} {
 		recordChatMetric(&chatStat{model: key, mode: "sync", status: 200}, time.Second)
 	}
 
@@ -161,8 +167,8 @@ func TestStatsCreditsKeyNormalization(t *testing.T) {
 	if got := findModelRow(t, snap, "hy3").Credits; got != "x0.05" {
 		t.Errorf("裸名 hy3 credits = %q, want x0.05（裸名 → cn realm）", got)
 	}
-	if got := findModelRow(t, snap, "cn:hy3").Credits; got != "x0.05" {
-		t.Errorf("cn:hy3 credits = %q, want x0.05", got)
+	if got := findModelRow(t, snap, "hy3").Credits; got != "x0.05" {
+		t.Errorf("hy3 credits = %q, want x0.05", got)
 	}
 	if got := findModelRow(t, snap, "-").Credits; got != "" {
 		t.Errorf("\"-\" credits = %q, want 空串（不查目录）", got)

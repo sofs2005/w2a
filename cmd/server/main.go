@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"workbuddy2api/internal/aliases"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/redisstore"
@@ -29,6 +30,20 @@ func modelJSONPath(stateFile string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(stateFile), "model.json")
+}
+
+// aliasFilePath 由 state.json 路径推导别名文件路径（同目录固定名 model_aliases.json）。
+//
+// 为什么放数据目录而不是 config.json：网关只在启动时读 config.json，别名是高频调整的
+// 运维参数，必须热生效（面板改完数秒内生效，见 reload.go 的 startAliasWatcher）。
+// 为什么与 state.json 同目录：同属"运行期数据"（Docker ./data volume 持久化），
+// 面板写它不需要额外配置项，部署形态与 state.json 完全一致。
+// state 路径为空（纯内存测试形态）→ 空 = 别名功能关闭（无别名，一切透传）。
+func aliasFilePath(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(stateFile), "model_aliases.json")
 }
 
 func main() {
@@ -56,6 +71,12 @@ func main() {
 	// global realm 路由开关（config global.enabled，缺省 true）：注入 auth 包全局闸。
 	// Realm()/IsGlobal() 先过此闸——显式 false 时恒 cn（逃生门：纯 CN 锁定的第一道闸）。
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
+
+	// 统一调度开关（config pool.unified_routing，缺省 true）：注入 server 包全局闸。
+	// 裸模型名（无 cn:/global: 前缀）是否进全池调度（CN+global 共用粘性/加权/分层）。
+	// 显式 false 退回旧语义（裸名只打 CN），是路由层逃生门；钉域前缀不受影响。
+	// 纯 CN 部署（global.enabled=false）时本开关无实际作用：账号已被第一道闸锁成 cn。
+	server.SetUnifiedRouting(cfg.Pool.UnifiedRouting)
 
 	// model.json 本地缓存接线（context_length 四级查找链第 3 级）：数据目录与
 	// state.json 同风格（Docker volume 持久化路径 ./data）。首次缺失/损坏自动回落
@@ -87,6 +108,20 @@ func main() {
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetFlushInterval(cfg.StateFlushDur)                // 池状态落盘周期（pool.state_flush，默认 30m；0 = 关闭后台落盘）
 
+	// 模型别名映射表：统一对外名 → 各域真实上游名（见 internal/aliases）。
+	// 启动即加载一次（缺失/空文件 = 空表，一切透传），之后由 startAliasWatcher 热加载。
+	// 解析失败只打 WARN 并退回空表：别名是可选增强，绝不能因为它起不来。
+	aliasPath := aliasFilePath(cfg.StateFile)
+	aliasStore := aliases.NewStore()
+	if tbl, err := aliases.Load(aliasPath); err != nil {
+		log.Printf("WARN: [aliases] 别名文件加载失败（按无别名运行）: %v", err)
+	} else {
+		aliasStore.Set(tbl)
+		if tbl.Len() > 0 {
+			log.Printf("已加载 %d 条模型别名映射（%s）", tbl.Len(), aliasPath)
+		}
+	}
+
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
 	redisMode := "noop"
@@ -101,11 +136,11 @@ func main() {
 			Available:  p.AvailableUIDs,
 			// 按模型的可用性口径：绑定号在当前模型被 6004 限额时重分配，
 			// 而不是被钉在这个号上反复失败。
-			// realm 感知闭包：带前缀模型名按 realm 过滤可用账号（跨 realm 不泄漏，
-			// 见 wiring.go）；裸名走 cn（现状零回归）。
-			AvailableForModel: realmAwareAvailableForModel(p),
+			// realm/别名感知闭包：经 ResolveRoute 得出对外名 + 候选域集合，按域过滤
+			// 可用账号（跨 realm 不泄漏、单域别名不误选另一域，见 wiring.go）。
+			AvailableForModel: realmAwareAvailableForModel(p, aliasStore),
 			// 紧急到期优先候选集：仅新建/失效重绑时生效（见 session.Config.UrgentForModel）。
-			UrgentForModel: realmAwareUrgentForModel(p),
+			UrgentForModel: realmAwareUrgentForModel(p, aliasStore),
 		})
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
@@ -220,6 +255,8 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 		// 运维管理端点开关（config admin.enabled，默认 false）。
 		AdminEnabled: cfg.Admin.Enabled,
+		// 模型别名表（热加载；nil 时 handler 按无别名运行）。
+		Aliases: aliasStore,
 	})
 
 	// 单端口对外：网关 handler 与面板 handler 合成一个 mux（见 panel.go）。
@@ -249,6 +286,11 @@ func main() {
 	// 面板扫码落盘后数秒自动进池，无需重启、零停机，也不必挂 docker.sock。
 	stopAuthWatch := startAuthWatcher(ctx, cfg.AuthDir, p)
 	defer stopAuthWatch()
+
+	// 别名映射热加载：面板/手工改 data/model_aliases.json 数秒内生效（见 reload.go）。
+	// 与账号目录热加载同模式；解析失败保持旧表（绝不清空别名）。
+	stopAliasWatch := startAliasWatcher(ctx, aliasPath, aliasStore)
+	defer stopAliasWatch()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

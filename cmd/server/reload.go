@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"workbuddy2api/internal/aliases"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
 )
@@ -25,6 +26,10 @@ import (
 // 5s 是「用户感知为即时」与「文件系统开销可忽略」的折中：一次轮询只是 ReadDir
 // 加文件名比对，没有解析开销（仅当集合变化才真正 LoadDir）。
 const authWatchInterval = 5 * time.Second
+
+// aliasWatchInterval 别名文件轮询周期（与 authWatchInterval 同值同理由：一次轮询只是
+// Stat + 签名比对，只有内容真变了才解析 JSON）。
+const aliasWatchInterval = 5 * time.Second
 
 // authDirSignature 计算凭证目录的「文件集合 + 大小 + 修改时间」指纹。
 //
@@ -121,4 +126,64 @@ func startAuthWatcher(ctx context.Context, authDir string, p *pool.Pool) func() 
 	}()
 
 	return func() { close(stop) }
+}
+
+// startAliasWatcher 启动别名文件监听，返回停止函数（与 startAuthWatcher 同模式）。
+//
+// 为什么需要：别名映射是**高频调整**的运维参数（"这个模型两域名不一样"、"隐藏模型
+// 只在一域有"），而网关只在启动时读 config.json——放 config 就得每次重启。独立文件 +
+// 5s 轮询让面板改完数秒内生效，与账号目录热加载的体验一致。
+//
+// 失败语义（关键）：签名读不到（文件不存在 → "missing"）或解析失败时**保持旧表**
+// 并打 WARN，绝不把别名清空。面板写坏文件、编辑器保存到一半、权限抖动等都不该
+// 影响线上正在跑的映射。仅当解析成功才发布新快照。
+//
+// 首次调用发布基线（store 由调用方在启动时先 Load 一次，此处只对齐指纹，避免重复
+// 加载；若调用方未加载，本函数首轮签名变化时也会兜底加载）。
+func startAliasWatcher(ctx context.Context, path string, store *aliases.Store) func() {
+	stop := make(chan struct{})
+	last := aliases.Signature(path)
+
+	go func() {
+		t := time.NewTicker(aliasWatchInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			case <-t.C:
+			}
+
+			last = reloadAliasesOnce(path, store, last)
+		}
+	}()
+
+	return func() { close(stop) }
+}
+
+// reloadAliasesOnce 执行一轮别名热加载，返回新的基线指纹。
+//
+// 从轮询 goroutine 里提出来是为了可测：等待 5s ticker 的测试既慢又脆，
+// 而"签名变了才解析、解析失败保持旧表"这条契约正是本功能的全部要害。
+//
+// 返回旧指纹的两种情况（都表示"这次没生效"）：
+//   - 签名未变（无操作）；
+//   - 解析失败（保持旧表 + WARN，**不推进基线**——文件修好后签名会再变，届时正常重载；
+//     若在此推进基线，坏文件修好后若大小/mtime 恰好回到旧值就会被漏掉）。
+func reloadAliasesOnce(path string, store *aliases.Store, last string) string {
+	sig := aliases.Signature(path)
+	if sig == last {
+		return last
+	}
+	tbl, err := aliases.Load(path)
+	if err != nil {
+		// 非法 JSON / 校验不过：保持旧表（不清空），下轮再试。
+		log.Printf("WARN: [aliases] 别名热加载失败（保持现有映射）: %v", err)
+		return last
+	}
+	store.Set(tbl)
+	log.Printf("别名映射已热加载：%d 条（无需重启）", tbl.Len())
+	return sig
 }

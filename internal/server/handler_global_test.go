@@ -60,8 +60,8 @@ func newRealmFake(t *testing.T) *realmFake {
 // global: 前缀 → 全局号 + 出站 body 剥前缀 + /v2 路径（#119 固定单路径） + ensureConsoleSystem 补 system；
 // 裸名 → CN 号 + /v2 路径 + body 原样（零回归）。
 // TestModelsGlobalListGating 断言 GlobalEnabled 逃生门仍生效：true 时 global 域探测名单
-// 可列出（带 global: 前缀）、false 时 global 名单不出现（纯动态，两侧均无静态兜底——
-// 无可上游时列表为空，不再断言具体模型名）。
+// 可列出（并集目录下表现为 realms 含 global 的裸名条目）、false 时 global 条目不出现
+// （纯动态，两侧均无静态兜底——无可上游时列表为空，不再断言具体模型名）。
 func TestModelsGlobalListGating(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -76,7 +76,7 @@ func TestModelsGlobalListGating(t *testing.T) {
 	}
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: true})
 	for _, m := range h.modelList() {
-		if strings.HasPrefix(m["id"].(string), "global:") {
+		if hasRealm(m, "global") {
 			t.Fatalf("pure-dynamic: unreachable upstream must not list global models: %q", m["id"])
 		}
 	}
@@ -84,12 +84,60 @@ func TestModelsGlobalListGating(t *testing.T) {
 	// 缺省（GlobalEnabled=false）不列 global 名单（逃生门）。
 	h2 := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 	for _, m := range h2.modelList() {
-		if strings.HasPrefix(m["id"].(string), "global:") {
-			t.Fatalf("GlobalEnabled=false: global: model %q should not be listed", m["id"])
+		if hasRealm(m, "global") {
+			t.Fatalf("GlobalEnabled=false: global model %q should not be listed", m["id"])
 		}
 	}
 }
 
+// TestChatBareNameUsesGlobalAccount 裸名跨域调度（本改造核心语义）：池里只有 global
+// 账号时裸名请求由 global 号承接（出站走 /v2 + global 鉴权头）；改造前裸名恒路由 CN
+// 号集合，此处必然 503。同时验证前缀钉域不受影响：cn:glm-5.2 仍无号可承接 → 503。
+func TestChatBareNameUsesGlobalAccount(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	cf := newRealmFake(t)
+	p := testPoolWith(&auth.Auth{UID: "g1", AccessToken: "at_gl", Domain: "www.workbuddy.ai", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("bare name with global-only pool code=%d body=%s", rec.Code, rec.Body)
+	}
+	cf.mu.Lock()
+	gotAuthz, gotModel, gotPath := cf.authz, cf.model, cf.path
+	cf.mu.Unlock()
+	if gotAuthz != "Bearer at_gl" {
+		t.Errorf("裸名应由 global 号承接：authz=%q want Bearer at_gl", gotAuthz)
+	}
+	if gotModel != "glm-5.2" {
+		t.Errorf("裸名出站 model=%q want glm-5.2（无别名时原样）", gotModel)
+	}
+	if gotPath != "/v2/chat/completions" {
+		t.Errorf("裸名选 global 号后应走 global 出站路径：path=%q want /v2/chat/completions", gotPath)
+	}
+
+	// 前缀钉域仍然生效：钉 CN 而池里无 CN 号 → 503（不跨域顶替）。
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"cn:glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 503 {
+		t.Fatalf("cn: prefix with global-only pool code=%d want 503 body=%s", rec.Code, rec.Body)
+	}
+}
+
+// hasRealm 报告目录条目是否标注了某可用域。
+func hasRealm(m map[string]any, realm string) bool {
+	rs, _ := m["realms"].([]string)
+	for _, r := range rs {
+		if r == realm {
+			return true
+		}
+	}
+	return false
+}
 func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"workbuddy2api/internal/aliases"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
@@ -51,6 +52,11 @@ type Config struct {
 	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
 	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
 	AdminEnabled bool
+
+	// Aliases 模型别名映射表（可选；nil = 无别名，一切模型名原样透传）。
+	// 统一对外名 → 各域真实上游名，见 internal/aliases。热加载由 cmd/server 的
+	// 别名文件监听负责，handler 只读当前快照（Store 内部 atomic 发布，读路径无锁）。
+	Aliases *aliases.Store
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -309,14 +315,37 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 }
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
-// CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel 对称）。
+//
+// 统一调度改造后的目录语义：**只输出裸名**（id 不带 "cn:"/"global:" 前缀），
+// 同名模型在 CN 与 global 两侧只出现一条——这是"一套调度"的对外一致性：
+// 客户端看到的名字就是可以直接请求的名字，且该名字由全池账号承接。
+//
+// 合并规则（并集去重）：
+//   - CN 动态目录优先（字段更全：credits/tags/能力旗标）；
+//   - global 探测目录补缺：同名条目只补 CN 侧没有的字段，不覆盖 CN 值；
+//   - 别名表条目无条件进目录（隐藏模型只在一域存在时也要能被客户端发现）；
+//   - 每条输出 "realms" 字段标注该模型可承接的域（客户端/面板可据此判断）。
+//
+// 前缀请求（"cn:x"/"global:x"）仍然有效（钉域逃生门），只是不再作为目录条目出现。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底；
 // global.enabled=false（显式逃生门）时只列 CN（global 名单不出现）。
 func (h *Handler) modelList() []map[string]any {
+	// realms 记录每个裸名可承接的域（并集去重时累计，最后统一写出）。
+	realms := map[string]map[string]bool{}
+	noteRealm := func(id, realm string) {
+		if realms[id] == nil {
+			realms[id] = map[string]bool{}
+		}
+		realms[id][realm] = true
+	}
+
+	// CN 动态目录先入（字段最全，作为合并基底）。
 	out := make([]map[string]any, 0)
+	index := map[string]int{} // 裸名 → out 下标（合并同名 global/别名条目）
 	for _, mi := range h.fetchDynamicModels() {
+		id := mi.ID
 		entry := map[string]any{
-			"id":       "cn:" + mi.ID,
+			"id":       id,
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": "workbuddy",
@@ -327,21 +356,23 @@ func (h *Handler) modelList() []map[string]any {
 		// 拉到后写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+		entry["context_length"] = upstream.ContextWindowListingV4(id, mi.ContextWindow, h.cfg.Upstream.HTTP)
+		if mo, ok := upstream.MaxOutputTokensListingV4(id, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
 			entry["max_output_tokens"] = mo
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
 		entry = applyModelInfoFields(entry, mi)
 		// P0：effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （issue #84 客户端可发现档位，不再盲传）。无档位→省略字段（非空数组）。
-		if efforts, def := upstream.EffortListing("cn", mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		if efforts, def := upstream.EffortListing("cn", id, mi.Efforts, mi.DefaultEffort); efforts != nil {
 			entry["reasoning_supported_efforts"] = efforts
 			if def != "" {
 				entry["reasoning_default_effort"] = def
 			}
 		}
+		index[id] = len(out)
 		out = append(out, entry)
+		noteRealm(id, "cn")
 	}
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 探测结果（fetchGlobalModels 纯动态，失败/无号 → 空）；无 global 账号时
@@ -359,8 +390,9 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
+			noteRealm(id, "global")
 			entry := map[string]any{
-				"id":       "global:" + id,
+				"id":       id,
 				"object":   "model",
 				"created":  1753600000,
 				"owned_by": "workbuddy",
@@ -384,10 +416,84 @@ func (h *Handler) modelList() []map[string]any {
 					entry["reasoning_default_effort"] = def
 				}
 			}
+			// 同名条目已在 CN 侧存在 → 只补 CN 缺的字段（CN 值优先，不覆盖）。
+			if i, dup := index[id]; dup {
+				mergeMissingFields(out[i], entry)
+				continue
+			}
+			index[id] = len(out)
 			out = append(out, entry)
 		}
 	}
+	// 别名表条目：对外名无条件进目录（隐藏模型/两域名不同的模型必须可被客户端发现）。
+	// 域标注按映射非空侧；条目已存在（同名裸模型在目录里）时只补 realms、不动字段
+	// ——别名不改变模型本身的能力元数据。
+	if h.cfg.Aliases != nil {
+		for _, e := range h.cfg.Aliases.Get().Entries() {
+			if e.CN != "" {
+				noteRealm(e.Name, "cn")
+			}
+			if e.Global != "" {
+				noteRealm(e.Name, "global")
+			}
+			if _, exists := index[e.Name]; exists {
+				continue
+			}
+			index[e.Name] = len(out)
+			out = append(out, map[string]any{
+				"id":             e.Name,
+				"object":         "model",
+				"created":        1753600000,
+				"owned_by":       "workbuddy",
+				"aliased":        true,
+				"context_length": upstream.ContextWindowListingV4(e.Name, 0, h.cfg.Upstream.HTTP),
+			})
+		}
+	}
+	// realms 统一写出（固定顺序 cn, global：目录输出要稳定可比对）。
+	for _, entry := range out {
+		id, _ := entry["id"].(string)
+		rs := realms[id]
+		if len(rs) == 0 {
+			continue
+		}
+		list := make([]string, 0, len(rs))
+		if rs["cn"] {
+			list = append(list, "cn")
+		}
+		if rs["global"] {
+			list = append(list, "global")
+		}
+		entry["realms"] = list
+	}
 	return out
+}
+
+// mergeMissingFields 把 src 里 dst 尚未设置（或为空值）的字段补进 dst。
+// 用于目录并集去重：CN 条目为基底（字段最全），global 同名条目只补缺、不覆盖——
+// 否则 global 侧空值会抹掉 CN 侧已有的 credits/tags/能力旗标。
+// id/object/created/owned_by 等身份字段一律不参与（同名即同一对外条目）。
+func mergeMissingFields(dst, src map[string]any) {
+	for k, v := range src {
+		switch k {
+		case "id", "object", "created", "owned_by":
+			continue
+		}
+		switch cur := dst[k].(type) {
+		case nil:
+			dst[k] = v // 缺字段 → 补
+		case string:
+			if cur == "" { // 空串视为缺（上游空值省略规则下不应出现，防御）
+				dst[k] = v
+			}
+		case []any:
+			if len(cur) == 0 {
+				dst[k] = v
+			}
+		default:
+			// 有值（含数字/bool/map）→ 保留 dst（CN 优先）
+		}
+	}
 }
 
 // fetchGlobalModels 返回 global 模型名单（纯动态探测结果）及被探测账号。
@@ -494,10 +600,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
-	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
-	// bareModel 用于选号/粘性/账本/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	// 模型名路由裁决（D6 前缀协议 + 别名映射）：route 携带钉域（Realm）、对外名
+	// （Name，选号/粘性/成本账本/6004/11102 键统一用它）与别名收紧后的候选域集合
+	// （CandidateRealms，单域别名排除另一域账号）。
+	// 出站 body 的 model 字段**不在此处改写**——别名映射按选中账号的 realm 取值，
+	// 必须在轮转循环内逐号改写（见下方循环）。
+	route, routeErr := ResolveRoute(h.cfg.Aliases, peek.Model)
+	if routeErr != nil {
+		// 单域别名被显式钉到不存在的那一域：无任何账号能承接，直接 400 不浪费轮转。
+		writeOpenAIError(w, http.StatusBadRequest, "model_not_available", routeErr.Error())
+		return
+	}
+	bareModel := route.Name
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
@@ -592,11 +706,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		degradedApplied = true
 	}
 
-	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
-	}
+	// outbound model 改写**不在循环外做**（统一调度改造）：别名映射按选中账号的
+	// realm 决定出站名，必须逐号改写（见下方轮转循环内）。非别名请求的前缀剥离同样
+	// 挪到那里——原实现在此处一次性改写为 bareModel，别名请求会因剥完就定型而无法
+	// 按域分发。
+	//
+	// origBody 是「系统提示词改写之后、model 改写之前」的基准，循环内每轮由它重算
+	// outbound body（见循环首行）。这样既保证换号时基于**干净**基准重写 model，
+	// 又保留 prompt.Rewrite/Append 与错误降级重试对 body 的改写（降级分支会改写
+	// origBody 本身，见 ErrContentBlocked 处理）。
+	origBody := body
 
 	// 会话头族（issue #35 / #170）：后台按 X-Conversation-Request-ID 聚合请求，官方
 	// 客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。**统一轮级**
@@ -637,24 +756,38 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		// 出站 body 以 origBody（prompt 改写后、model 改写前）为基准逐号重算：
+		// 别名映射按账号域取值，换号必须重新改写（在已改写 body 上再改会叠加；
+		// 非别名请求由 rewriteModel 的等值短路保持零开销）。
+		body = origBody
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。
+			if acct == nil || !route.AllowsRealm(acct.Realm()) {
+				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额），或不在本请求
+				// 允许的域内（钉域不符 / 别名收紧到另一域）→ 解绑。
 				unbindSticky()
 			}
 		}
 		if acct == nil {
-			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// 模型感知 + 域集合感知选号：模型非空时启用 6004 模型级冷却豁免
+			// （healthyForModel）；CandidateRealms 把 Realm（钉域/全池）与别名收紧
+			// 合并为候选域集合（nil = 全池）。
+			acct = h.cfg.Pool.PickExcludingForRealms(tried, bareModel, route.CandidateRealms())
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
 			break
 		}
+		// 出站模型名按选中账号的域取值（别名）或剥前缀（钉域）；该域无此模型时
+		// 跳过本号（防御路径：候选集已由 CandidateRealms 排除，正常不触发）。
+		outModel, okOut := route.Outbound(acct.Realm())
+		if !okOut {
+			tried[acct.UID] = true
+			continue
+		}
+		body = rewriteModel(origBody, outModel)
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
@@ -748,6 +881,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
 				h.degrade.Trigger()
 				body = prompt.Rewrite(body, prompt.Degraded)
+				// origBody 同步为降级后的 body：循环首行以它为基准重算 model 改写，
+				// 不同步会把降级提示词丢掉（退回带指纹的原文重试 = 确定性再撞墙）。
+				origBody = body
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
@@ -759,7 +895,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 审核，轮转纯属浪费时间。不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError）。
 				// error-passthrough：message 装上游 body 原文（code/msg/requestId 原样，
 				// 任务书授权上游错误码/账号语义对客户端可见），不再改写成网关固定文案。
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -779,7 +915,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// （code/msg/requestId 原样，含真实 token 数与上限值——上游原文是最有价值
 			// 的错误信息，客户端必须看到，禁止固定词覆盖）。
 			if kind == upstream.ErrPromptTooLong {
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
 				fail(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "prompt_too_long", promptTooLongMessage(string(respBody)),
 					h.hintOf(upstream.ErrPromptTooLong, string(respBody), bareModel, reqHasImage, uerr))
@@ -789,7 +925,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 图片格式/数据无效：立即透传上游原文回客户端，不罚号不轮转。
 			// 同一 body 换账号仍是同样的解析结果，轮转只会放大无效请求。
 			if kind == upstream.ErrImageInvalid {
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
 				fail(acct.UID)
 				msg := string(respBody)
 				if strings.TrimSpace(msg) == "" {
@@ -803,7 +939,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义，
 			// 任务书设计纪律）：该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，
@@ -821,7 +957,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
-		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+		h.cfg.Pool.BlockModelClear(acct.UID, bareModel, outModel)
 		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
 		if stickyKey != "" && h.cfg.Session != nil {
@@ -1009,9 +1145,14 @@ func rotateBackoff(i int, ctx context.Context) bool {
 // 携带的模型名（触发 6004 时记录以便后续切模型豁免）。uerr 是 ChatStreamContext 返回的
 // 分类信封（可携带 RetryAfter，P1-2）；零值/防御路径下为 nil，冷却时长回落既有计算。
 //
+// alsoOut（别名改造）是本次出站实际使用的物理模型名：与 model（对外名）不同时，
+// 模型级台账（6004/11102）把两个键一并登记同一条 Until，使「直接请求该物理名」的
+// 流量也吃到本次限流——同一账号换个入口再撞一次没有意义。可变参数使既有调用
+// （测试与无别名路径）零改动。
+//
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error) {
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error, alsoOut ...string) {
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
@@ -1027,7 +1168,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     （普通账号级限流不该因切模型绕过）。
 		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			if upstream.IsModelRateLimit(body) {
-				h.cfg.Pool.CooldownSoftForModel(uid, h.cfg.SoftCooldown, resetAt, model, "6004 model rate limit")
+				h.cfg.Pool.CooldownSoftForModel(uid, h.cfg.SoftCooldown, resetAt, model, "6004 model rate limit", alsoOut...)
 				return
 			}
 			h.cfg.Pool.CooldownSoftRate(uid, h.cfg.SoftCooldown, resetAt, "429 rate limit")
@@ -1099,7 +1240,7 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
 		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
-		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
+		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason, alsoOut...)
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

@@ -2,6 +2,8 @@
 import type {
   AccountProfile,
   AccountsResponse,
+  AliasEntry,
+  AliasesResponse,
   ChatDelta,
   ChatMessage,
   ConfigResponse,
@@ -166,6 +168,12 @@ export const api = {
   config: () => get<ConfigResponse>('/api/config'),
   saveConfig: (doc: Record<string, unknown>) => put<{ ok: boolean; message: string }>('/api/config', doc),
   resetConfig: () => post<{ ok: boolean; message: string }>('/api/config/reset'),
+
+  // 模型别名映射（独立文件，网关数秒内热加载，无需重启）
+  aliases: () => get<AliasesResponse>('/api/model-aliases'),
+  saveAliases: (aliases: AliasEntry[]) =>
+    put<{ ok: boolean; message: string }>('/api/model-aliases', { aliases }),
+  resetAliases: () => post<{ ok: boolean; message: string }>('/api/model-aliases/reset'),
 
   // 系统
   system: () => get<SystemInfo>('/api/system'),

@@ -133,6 +133,13 @@ type Config struct {
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
 		// 的积分被标记为"快过期"，选号优先消耗（issue:积分过期）。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// UnifiedRouting 统一调度开关（缺省 true）：裸模型名（无 cn:/global: 前缀）
+		// 是否进入**全池**调度（CN 与 global 账号共用同一套粘性/加权/分层/紧急逻辑）。
+		//
+		// 关闭（false）恢复旧语义：裸名只路由 CN 账号（老客户端零回归契约）。
+		// 这是路由层逃生门，与 global.enabled（账号层纯 CN 锁定）正交；显式钉域
+		// 仍可用 cn:/global: 前缀，与此开关无关。默认 true 是本次改造的目标形态。
+		UnifiedRouting bool `json:"unified_routing"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
 		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
@@ -215,6 +222,9 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// UnifiedRouting 缺省 true：裸名全池调度（本改造目标形态）。显式 false 退回
+	// 「裸名只打 CN」旧语义（路由层逃生门，见字段注释）。
+	c.Pool.UnifiedRouting = true
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
 	c.SessionSticky.Enabled = true

@@ -6,6 +6,7 @@
   "auth_owner_uid": -1,
   "auth_owner_gid": -1,
   "config_file": "/root/workbuddy2api/config.json",
+  "alias_file": "",
   "backup_dir": "./data/backups",
   "credentials_file": "./data/credentials.json",
   "pricing_file": "./data/pricing.json",

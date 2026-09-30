@@ -3,6 +3,7 @@ package server
 import (
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -34,31 +35,31 @@ func TestModelListContextLengthThreeLevelLookup(t *testing.T) {
 		}
 	}
 	// 1) 动态值优先：远端 65536/8192 权威透出（知识表无 dyn-full，但远端有值即最优先）。
-	if c := byID["cn:dyn-full"]["context_length"]; c != int64(65536) {
+	if c := byID["dyn-full"]["context_length"]; c != int64(65536) {
 		t.Errorf("dyn-full context_length=%v want 65536 (remote wins)", c)
 	}
-	if o := byID["cn:dyn-full"]["max_output_tokens"]; o != int64(8192) {
+	if o := byID["dyn-full"]["max_output_tokens"]; o != int64(8192) {
 		t.Errorf("dyn-full max_output_tokens=%v want 8192 (remote wins)", o)
 	}
 	// 2) 知识表命中：glm-5.2 上游零值 → 表值 1M/131072（fork 实测）。
-	if c := byID["cn:glm-5.2"]["context_length"]; c != int64(1000000) {
+	if c := byID["glm-5.2"]["context_length"]; c != int64(1000000) {
 		t.Errorf("glm-5.2 context_length=%v want 1000000 (knowledge table)", c)
 	}
-	if o := byID["cn:glm-5.2"]["max_output_tokens"]; o != int64(131072) {
+	if o := byID["glm-5.2"]["max_output_tokens"]; o != int64(131072) {
 		t.Errorf("glm-5.2 max_output_tokens=%v want 131072 (knowledge table)", o)
 	}
 	// 3) 未知 → 1M 兜底；max_output_tokens 未知省略。
-	if c := byID["cn:never-seen-model"]["context_length"]; c != int64(1000000) {
+	if c := byID["never-seen-model"]["context_length"]; c != int64(1000000) {
 		t.Errorf("unknown context_length=%v want 1000000 (1M fallback)", c)
 	}
-	if _, ok := byID["cn:never-seen-model"]["max_output_tokens"]; ok {
+	if _, ok := byID["never-seen-model"]["max_output_tokens"]; ok {
 		t.Error("unknown model max_output_tokens must be omitted")
 	}
 	// 4) 知识表条目但输出上限未知（auto）→ context 走表 168000，输出省略。
-	if c := byID["cn:auto"]["context_length"]; c != int64(168000) {
+	if c := byID["auto"]["context_length"]; c != int64(168000) {
 		t.Errorf("auto context_length=%v want 168000 (knowledge table)", c)
 	}
-	if _, ok := byID["cn:auto"]["max_output_tokens"]; ok {
+	if _, ok := byID["auto"]["max_output_tokens"]; ok {
 		t.Error("auto max_output_tokens must be omitted (output unknown)")
 	}
 	// 全表扫描：任何条目都不得再出现 131072 假兜底充当 context_length
@@ -88,20 +89,24 @@ func TestModelListGlobalContextLengthLookup(t *testing.T) {
 
 	byID := map[string]map[string]any{}
 	for _, m := range h.modelList() {
-		if id, ok := m["id"].(string); ok && len(id) > 7 && id[:7] == "global:" {
+		if id, ok := m["id"].(string); ok {
 			byID[id] = m
 		}
 	}
 	// CN fake 自带 cn-dyn-model（65536 真实值），global 探测产出 gpt-5.4。
-	if len(byID) == 0 {
-		t.Fatal("no global entries from probe")
+	if _, ok := byID["gpt-5.4"]; !ok {
+		t.Fatalf("no global entries from probe: %v", byID)
 	}
 	// 富条目真实值权威（400000/100000 远端下发，覆盖知识表 1050000/128000）。
-	if c := byID["global:gpt-5.4"]["context_length"]; c != int64(400000) {
+	if c := byID["gpt-5.4"]["context_length"]; c != int64(400000) {
 		t.Errorf("gpt-5.4 context_length=%v want 400000 (probe value wins)", c)
 	}
-	if o := byID["global:gpt-5.4"]["max_output_tokens"]; o != int64(100000) {
+	if o := byID["gpt-5.4"]["max_output_tokens"]; o != int64(100000) {
 		t.Errorf("gpt-5.4 max_output_tokens=%v want 100000 (probe value wins)", o)
+	}
+	// 目录域标注：该模型只在 global 探测里出现 → realms 只含 global。
+	if rs, ok := byID["gpt-5.4"]["realms"].([]string); !ok || !reflect.DeepEqual(rs, []string{"global"}) {
+		t.Errorf("gpt-5.4 realms=%v want [global]", byID["gpt-5.4"]["realms"])
 	}
 }
 
@@ -121,17 +126,17 @@ func TestModelListGlobalNarrowContextLookup(t *testing.T) {
 
 	byID := map[string]map[string]any{}
 	for _, m := range h.modelList() {
-		if id, ok := m["id"].(string); ok && len(id) > 7 && id[:7] == "global:" {
+		if id, ok := m["id"].(string); ok {
 			byID[id] = m
 		}
 	}
-	if c := byID["global:gpt-5.6-luna"]["context_length"]; c != int64(1050000) {
+	if c := byID["gpt-5.6-luna"]["context_length"]; c != int64(1050000) {
 		t.Errorf("narrow gpt-5.6-luna context_length=%v want 1050000 (knowledge table, not 131072)", c)
 	}
-	if c := byID["global:narrow-unknown"]["context_length"]; c != int64(1000000) {
+	if c := byID["narrow-unknown"]["context_length"]; c != int64(1000000) {
 		t.Errorf("narrow-unknown context_length=%v want 1000000 (unknown → 1M fallback)", c)
 	}
-	if _, ok := byID["global:narrow-unknown"]["max_output_tokens"]; ok {
+	if _, ok := byID["narrow-unknown"]["max_output_tokens"]; ok {
 		t.Error("narrow-unknown max_output_tokens must be omitted")
 	}
 }
@@ -169,7 +174,7 @@ func TestModelListContextLengthLevel4Fetch(t *testing.T) {
 	// 第一次：全链 miss → 1M 兜底（异步拉取已触发）。
 	var first int64
 	for _, m := range h.modelList() {
-		if m["id"] == "cn:future-model-x" {
+		if m["id"] == "future-model-x" {
 			first, _ = m["context_length"].(int64)
 		}
 	}
@@ -182,7 +187,7 @@ func TestModelListContextLengthLevel4Fetch(t *testing.T) {
 	second := int64(0)
 	for time.Now().Before(deadline) {
 		for _, m := range h.modelList() {
-			if m["id"] == "cn:future-model-x" {
+			if m["id"] == "future-model-x" {
 				second, _ = m["context_length"].(int64)
 			}
 		}
@@ -197,7 +202,7 @@ func TestModelListContextLengthLevel4Fetch(t *testing.T) {
 	// max_output_tokens 同步回流（999000 而非省略）。
 	var out any
 	for _, m := range h.modelList() {
-		if m["id"] == "cn:future-model-x" {
+		if m["id"] == "future-model-x" {
 			out = m["max_output_tokens"]
 		}
 	}

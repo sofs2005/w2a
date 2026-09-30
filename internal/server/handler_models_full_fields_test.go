@@ -26,13 +26,13 @@ func TestModelListFullFieldsDynamicCN(t *testing.T) {
 	got := h.modelList()
 	var entry map[string]any
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && id == "cn:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			entry = m
 			break
 		}
 	}
 	if entry == nil {
-		t.Fatalf("cn:hy3 not found in %v", got)
+		t.Fatalf("hy3 not found in %v", got)
 	}
 	if entry["description"] != "[x0.05 credit] 混元思考模型，具有增强的推理能力" {
 		t.Errorf("description=%v want [x0.05 credit] 混元思考模型，具有增强的推理能力", entry["description"])
@@ -88,7 +88,7 @@ func TestModelListFullFieldsDynamicCNOmitted(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up, GlobalEnabled: false})
 
 	for _, m := range h.modelList() {
-		if id, ok := m["id"].(string); ok && id != "cn:bare-model" {
+		if id, ok := m["id"].(string); ok && id != "bare-model" {
 			continue
 		}
 		for _, field := range []string{"name", "description", "credits", "tags", "vendor", "is_default",
@@ -102,7 +102,7 @@ func TestModelListFullFieldsDynamicCNOmitted(t *testing.T) {
 }
 
 // TestModelListFullFieldsGlobalRich global 分支：/v2 探测对象形态全字段命中 →
-// global: 条目透出富字段；探测 200 与名单共用同一次探测（零额外上游请求）。
+// 裸名条目透出富字段；探测 200 与名单共用同一次探测（零额外上游请求）。
 func TestModelListFullFieldsGlobalRich(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -116,13 +116,13 @@ func TestModelListFullFieldsGlobalRich(t *testing.T) {
 
 	var entry map[string]any
 	for _, m := range h.modelList() {
-		if id, ok := m["id"].(string); ok && id == "global:hy3" {
+		if id, ok := m["id"].(string); ok && id == "hy3" {
 			entry = m
 			break
 		}
 	}
 	if entry == nil {
-		t.Fatal("global:hy3 not found in modelList output")
+		t.Fatal("hy3 not found in modelList output")
 	}
 	if entry["name"] != "Hy3" {
 		t.Errorf("name=%v want Hy3", entry["name"])
@@ -177,7 +177,13 @@ func TestModelListFullFieldsGlobalNarrowOmitted(t *testing.T) {
 	entries := 0
 	for _, m := range h.modelList() {
 		id, ok := m["id"].(string)
-		if !ok || len(id) < 7 || id[:7] != "global:" {
+		if !ok {
+			continue
+		}
+		// 本 fixture 无 CN 账号 → CN 面为空，目录条目全部来自 global 探测。
+		rs, _ := m["realms"].([]string)
+		if len(rs) != 1 || rs[0] != "global" {
+			t.Errorf("entry %v realms=%v want [global]", id, m["realms"])
 			continue
 		}
 		entries++

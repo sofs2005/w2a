@@ -123,7 +123,12 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 // 与旧实现的差异：有上游重置时间时绝对不做指数堆加（旧实现 softStreak 计数含
 // 死逻辑，纯属库房麻痹）；无重置时间时，「冷却中兜底探测再 429」不再 softStreak++
 // 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
-func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
+//
+// also 可选附加键（别名改造）：6004 台账键是选号用的**对外名**，而出站物理名可能
+// 与之不同；把出站名一并登记同一条 Until，使「直接请求该物理名」的流量也吃到本次
+// 限流（同一账号换个入口再撞一次没有意义）。无 resetAt 的分支是**账号级**退避，
+// 没有模型键，附加键自然忽略。
+func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string, also ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
@@ -133,10 +138,17 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			if e.modelCooldowns == nil {
 				e.modelCooldowns = map[string]modelCooldown{}
 			}
-			e.modelCooldowns[model] = modelCooldown{
+			mc := modelCooldown{
 				Until:   p.cappedSoftUntilLocked(now, resetAt),
 				ResetAt: resetAt,
 				Reason:  reason,
+			}
+			e.modelCooldowns[model] = mc
+			for _, m := range also {
+				if m == "" || m == model {
+					continue
+				}
+				e.modelCooldowns[m] = mc // 同一 Until/ResetAt：与物理名共享同一次限流窗口
 			}
 		} else {
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
@@ -168,7 +180,12 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 //
 // resetAt 无需传（11102 无重置文案），ResetAt 保持零值，与 6004 台账（rateLimitedModelsLocked）
 // 共用 Until 判定——11102 条目会以 11102 reason 出现在 /status 台账，运维可见。
-func (p *Pool) BlockModelBackoff(uid, model, reason string) {
+//
+// also 可选附加键（别名改造）：别名请求的选号键是**对外名**（primary model），而
+// 出站物理名可能与它不同；把出站名一并写入同一条 TTL，使「直接请求该物理名」的流量
+// 也吃到本次负缓存（否则同一账号会用另一个入口再撞一次 11102）。hits 计数只按
+// primary 键累计，别名键跟随同一 TTL——不引入第二条退避曲线。
+func (p *Pool) BlockModelBackoff(uid, model, reason string, also ...string) {
 	if uid == "" || model == "" {
 		return
 	}
@@ -198,6 +215,16 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 		Reason: reason,
 		Hits:   hits,
 	}
+	for _, m := range also {
+		if m == "" || m == model {
+			continue
+		}
+		e.modelCooldowns[m] = modelCooldown{
+			Until:  now.Add(ttl),
+			Reason: reason,
+			Hits:   hits,
+		}
+	}
 	p.dirty.Store(true)
 }
 
@@ -205,7 +232,8 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 // 请求对该模型成功后调用（handler 成功路径）。只清 11102 条目、不碰 6004 独立冷却表——
 // 6004 有自身上游重置墙钟语义，成功不该抹掉（见 NoteSuccess 注释）。reason 前缀判定区分两者：
 // 11102 条目的 reason 恒以 "11102" 开头（见上游 BlockModelReason）。
-func (p *Pool) BlockModelClear(uid, model string) {
+// also 可选附加键（别名改造）：与 BlockModelBackoff 写入的附加键对称，成功时一并清除。
+func (p *Pool) BlockModelClear(uid, model string, also ...string) {
 	if uid == "" || model == "" {
 		return
 	}
@@ -215,11 +243,21 @@ func (p *Pool) BlockModelClear(uid, model string) {
 	if !ok || len(e.modelCooldowns) == 0 {
 		return
 	}
-	mc, exists := e.modelCooldowns[model]
-	if !exists || !strings.HasPrefix(mc.Reason, "11102") {
+	cleared := false
+	for _, m := range append([]string{model}, also...) {
+		if m == "" {
+			continue
+		}
+		mc, exists := e.modelCooldowns[m]
+		if !exists || !strings.HasPrefix(mc.Reason, "11102") {
+			continue // 不存在的键，或 6004 条目（reason 前缀非 11102）
+		}
+		delete(e.modelCooldowns, m)
+		cleared = true
+	}
+	if !cleared {
 		return
 	}
-	delete(e.modelCooldowns, model)
 	if len(e.modelCooldowns) == 0 {
 		e.modelCooldowns = nil
 	}

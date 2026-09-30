@@ -287,6 +287,10 @@ func logMetricsCapWarn(model string) {
 // 键归一：stats 键是请求体 model 原文（含 realm 前缀），目录 id 是裸名——
 // resolveModel 剥前缀后按 realm 查表；未知前缀/裸名含冒号/"-" 查不到 → 省略。
 // total 行不参与（跨倍率聚合无意义）。
+//
+// 裸名（RealmUnified）两域目录都查，CN 优先：与 /v1/models 的目录合并口径一致
+// （同名条目 CN 值优先、global 补缺），否则同一模型在目录里显示一个倍率、
+// 在 stats 里显示另一个。global 表在无 upstream 时为 nil（读 nil map 安全）。
 func (h *Handler) enrichCredits(snap *MetricsSnapshot) {
 	cn := make(map[string]string) // bare id -> credits 原文
 	for _, mi := range cachedModelsSnapshot() {
@@ -308,9 +312,16 @@ func (h *Handler) enrichCredits(snap *MetricsSnapshot) {
 		if bare == "" || bare == "-" {
 			continue
 		}
-		if realm == "global" {
+		switch realm {
+		case "global":
 			snap.Models[i].Credits = global[bare]
-		} else {
+		case RealmUnified:
+			if c := cn[bare]; c != "" {
+				snap.Models[i].Credits = c
+			} else {
+				snap.Models[i].Credits = global[bare]
+			}
+		default:
 			snap.Models[i].Credits = cn[bare]
 		}
 	}

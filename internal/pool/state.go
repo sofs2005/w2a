@@ -294,7 +294,7 @@ func (p *Pool) AuthByUID(uid string) *auth.Auth {
 // AvailableUIDs 返回当前 healthy 且未占满在途名额的账号 UID 列表（按 UID 排序，稳定输出）。
 // 供会话粘性路由（internal/session）做快路径命中校验 + 双段分配；无可用返回空切片。
 func (p *Pool) AvailableUIDs() []string {
-	return p.availableUIDsLocked("", func(e *entry, now time.Time) bool { return e.healthy(now) })
+	return p.availableUIDsLocked(nil, func(e *entry, now time.Time) bool { return e.healthy(now) })
 }
 
 // AvailableUIDsForModel 同 AvailableUIDs，但把健康口径换成 healthyForModel：
@@ -305,20 +305,21 @@ func (p *Pool) AvailableUIDs() []string {
 // realm=="" 退化语义锚点测试。
 // 供会话粘性按模型分配与命中校验；model 为空时等价于 AvailableUIDs。
 func (p *Pool) AvailableUIDsForModel(model string) []string {
-	return p.availableUIDsLocked("",
+	return p.availableUIDsLocked(nil,
 		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) })
 }
 
-// availableUIDsLocked 是 AvailableUIDs 四变体（AvailableUIDs/ForModel/ForRealm/
-// ForModelRealm）共用的遍历实现：realm 过滤（""=全池）+ 可替换健康口径（healthy /
-// healthyForModel）+ 在途占满过滤，输出按 UID 排序（稳定）。调用方必须不持锁。
-func (p *Pool) availableUIDsLocked(realm string, health func(e *entry, now time.Time) bool) []string {
+// availableUIDsLocked 是 AvailableUIDs 各变体（AvailableUIDs/ForModel/ForRealm/
+// ForModelRealm/ForModelRealms）共用的遍历实现：域集合过滤（nil/空 = 全池）+ 可替换
+// 健康口径（healthy / healthyForModel）+ 在途占满过滤，输出按 UID 排序（稳定）。
+// 调用方必须不持锁。
+func (p *Pool) availableUIDsLocked(realms RealmSet, health func(e *entry, now time.Time) bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if realm != "" && e.a.Realm() != realm {
+		if !realms.Allows(e.a.Realm()) {
 			continue
 		}
 		if !health(e, now) {

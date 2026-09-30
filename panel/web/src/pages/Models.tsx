@@ -12,7 +12,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import type { Model, ModelPromotion } from '../types'
 import { Alert, Badge, Empty, Spinner, fmtNum, upstreamSec } from '../ui'
-import { REALMS, bareID, modelRealm, type Realm } from '../realm'
+import { REALMS, bareID, modelRealms, type Realm } from '../realm'
 
 type SortKey = 'rate-asc' | 'rate-desc' | 'promo' | 'name' | 'context'
 
@@ -170,9 +170,10 @@ export default function Models() {
   }, [load])
 
   // 按域统计，供 tab 显示数量。
+  // 双域模型（realms 含 cn+global）在两侧各计一次——它确实在两个 tab 里都会出现。
   const countByRealm = useMemo(() => {
     const out: Record<Realm, number> = { global: 0, cn: 0 }
-    for (const m of models) out[modelRealm(m.id)]++
+    for (const m of models) for (const r of modelRealms(m)) out[r]++
     return out
   }, [models])
 
@@ -192,14 +193,14 @@ export default function Models() {
   // 每个域里有优惠的模型数（含时段型），tab 上提示用。
   const promoByRealm = useMemo(() => {
     const out: Record<Realm, number> = { global: 0, cn: 0 }
-    for (const m of models) if (modelPromo(m)) out[modelRealm(m.id)]++
+    for (const m of models) if (modelPromo(m)) for (const r of modelRealms(m)) out[r]++
     return out
   }, [models])
 
   // 过滤 + 排序。
   const rows = useMemo(() => {
     const kw = q.trim().toLowerCase()
-    let list = models.filter((m) => modelRealm(m.id) === realm)
+    let list = models.filter((m) => modelRealms(m).includes(realm))
     if (kw) {
       list = list.filter((m) =>
         `${m.id} ${m.name ?? ''} ${m.description ?? ''} ${m.vendor ?? ''} ${(m.tags ?? []).join(' ')}`
@@ -369,6 +370,7 @@ export default function Models() {
                 {rows.map((m) => {
                   const rate = parseRate(m.credits)
                   const bare = bareID(m.id)
+                  const realms = modelRealms(m)
                   const promo = modelPromo(m)
                   const soon =
                     promo?.until !== undefined && promo.until - Date.now() / 1000 < 3 * 86400
@@ -385,6 +387,7 @@ export default function Models() {
                         </div>
                         <div className="mono text-faint" style={{ fontSize: 11 }}>
                           {m.id}
+                          {realms.length === 2 && <span> · 双域</span>}
                         </div>
                       </td>
                       <td className="num mono">
@@ -453,7 +456,13 @@ export default function Models() {
           <span className="text-faint">已结束的活动不展示（上游会把它们继续挂在配置里）。</span>
           调用时<strong>直接填第一列的模型 ID</strong>（如{' '}
           <span className="mono">glm-5.3</span>）—— 网关按账号所属域自动路由，
-          <span className="text-faint">不要加「域前缀」，上游不认这种写法。</span>
+          <span className="text-faint">
+            不要加「域前缀」，上游不认这种写法（加 <span className="mono">cn:</span> /{' '}
+            <span className="mono">global:</span> 前缀可把请求钉死在指定域，属网关侧扩展）。
+          </span>
+          <br />
+          副行标注「双域」的模型国内版与国际版都可承接；若两域名不同，在
+          <strong>「模型别名」</strong>页登记映射即可用同一个名字调用。
           <br />
           能力列只列<span className="mono">工具</span>与<span className="mono">推理</span>：
           <span className="text-faint">图片能力不展示</span> —— 上游的{' '}

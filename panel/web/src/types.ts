@@ -224,6 +224,14 @@ export interface Model {
 
   /** 命中的上游促销（限时免费 / 折扣）。按优先级降序，可能同时有多条。 */
   promotions?: ModelPromotion[] | null
+
+  /**
+   * 该模型可用的账号域（裸名目录专用）。
+   *
+   * 统一调度后 /v1/models 只输出裸名，同一模型若两域都有就只出现一次，靠这个字段
+   * 区分「仅国内」「仅国际」「两域都有」。缺省（undefined）= 老网关未透出该字段。
+   */
+  realms?: string[]
 }
 
 /** 促销的每日时段（如夜间折扣）。 */
@@ -295,6 +303,30 @@ export interface ConfigMeta {
 export interface ConfigResponse {
   config: Record<string, unknown>
   meta: ConfigMeta
+}
+
+/** 单条模型别名：对外名 → 各域真实上游模型名（某一域可为空 = 该域无此模型）。 */
+export interface AliasEntry {
+  name: string
+  cn: string
+  global: string
+}
+
+export interface AliasMeta {
+  path: string
+  exists: boolean
+  size: number
+  mod_time?: string
+  backup_path?: string
+  backup_at?: string
+  parse_error?: string
+  /** 提示语：与 config.json 不同，本文件热生效（无需重启）。 */
+  restart_note: string
+}
+
+export interface AliasesResponse {
+  aliases: AliasEntry[] | null
+  meta: AliasMeta
 }
 
 export interface ContainerInfo {

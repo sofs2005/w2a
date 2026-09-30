@@ -4,12 +4,14 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5–7 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5–8 条；第 4 条已撤销（原前提失效，见该节）。
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
 三处补丁均按原样重放，`App.tsx` 与上游逐字一致。另见文末「已知差异」一节。
 **第 6 条例外**：积分到期判据与上游 `a26cd0f` 相反，是按本 fork 的实测改的（见该节）。
+**第 8 条之后**：因新增「模型别名」页，`App.tsx` 重新出现差异（导航项 + 路由），
+上游若再改此文件需一并重放。
 
 为了让它与网关**同进程、同端口**运行，合并时改动了下面几处面板源码。
 这些文件上游也会改，因此**每次 `git subtree pull` 后都需要重新确认**。
@@ -129,6 +131,44 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 
 `panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
 
+### 8. `web/src/pages/ModelAliases.tsx` + 别名端点（**新增页面**）
+
+配合根网关的「统一 cn/global 调度 + 别名映射」改造（`internal/aliases/`、
+`cmd/server/reload.go` 的 `startAliasWatcher`），面板新增「模型别名」页维护
+`model_aliases.json`。
+
+**为什么独立成文件、独立成页**：别名是**高频调整**的运维参数（"这个模型两域名不一样"、
+"隐藏模型只在一域有"），而网关只在启动时读 `config.json`（无 SIGHUP / 文件监听）。
+放 config 里就得每次重启容器；独立文件 + 5s 轮询让它数秒内生效。因此本页的提示语
+与「网关配置」页**刻意不同**：那句「修改后需要重启网关才生效」在这里是错的。
+
+**改动点**：
+
+- `internal/config/config.go`：新增 `alias_file`（`WBGUI_ALIAS_FILE`）。
+  **留空是正确取值**——`ops.Service.AliasFilePath` 从网关 `config.json` 的
+  `state_file` 推导同目录的 `model_aliases.json`，与网关 `cmd/server/main.go` 的
+  `aliasFilePath` 同一规则。两边必须算出同一个路径，否则表现为"保存成功但没生效"。
+  显式配置只在部署布局特殊时才需要。
+- `internal/ops/aliasfile.go`（纯新增）：`ReadAliases`/`WriteAliases`/`ResetAliases`，
+  复刻 `configfile.go` 的 `.gui.bak` 备份 + `fsutil.WriteFileAtomic` 原子替换。
+  **额外做面板侧校验**（与 `internal/aliases.Parse` 同口径）：网关对非法表是
+  「静默保持旧表 + WARN」，用户从界面看不出自己刚保存的东西没生效，故在这里
+  前置拦下并给出带行号的原因。
+- `internal/api/server.go`：`GET/PUT /api/model-aliases` + `POST …/reset`
+  （reset 走 `ensureDangerous`，与 config reset 一致）。
+- `web/src/pages/ModelAliases.tsx`、`App.tsx`（导航项 + 路由）、`api.ts`、`types.ts`。
+- `web/src/realm.ts` + `web/src/pages/Models.tsx`（**上游文件，需重放**）：模型按域分栏
+  原先靠 id 前缀（`global:` = 国际版）。统一调度后 `/v1/models` 只输出裸名，前缀没了，
+  分栏会全部落到「国内版」。改为 `modelRealms(m)`：优先读服务端下发的 `realms` 字段，
+  缺席（老网关）时回退按前缀推断——两个版本的网关都能正确分栏。`Models.tsx` 的三处
+  `modelRealm(m.id)` 调用点、`realms.length === 2` 的「双域」副行标注，以及页脚文案
+  同步更新（说明前缀现为网关侧「钉域」扩展）。
+
+**回归测试**：`internal/api/alias_test.go`（含「推导路径必须与网关一致」
+「非法输入不得改动磁盘文件」两条要害断言）。
+
+`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
@@ -136,6 +176,9 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 | `host/host.go` | 面板装配包。**刻意不含 `internal` 段**，宿主导入合法（Go 的 internal 规则不允许根 module 直接 import `workbuddy2api-gui/internal/*`）。 |
 | `internal/authstore/preserve.go` | 见上。 |
 | `internal/authstore/preserve_test.go` | 见上。 |
+| `internal/ops/aliasfile.go` | 见第 8 条。 |
+| `internal/api/alias_test.go` | 见第 8 条。 |
+| `web/src/pages/ModelAliases.tsx` | 见第 8 条。 |
 | `HOST-PATCHES.md` | 本文件。 |
 
 宿主的对应文件在仓库根：`cmd/server/panel.go`（路由合并）、`cmd/server/reload.go`
@@ -152,21 +195,24 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 
 该结论来自面板作者对**上游官方网关**的实测（带前缀调用被拒：
 `{"code":11102,"msg":"model [cn:glm-5.1] service info not found"}`）。但**本 fork
-的网关是加前缀的**，两处口径不同：
+的网关语义已经改变**（统一调度改造，见 `internal/aliases/` 与
+`internal/server/resolve_model.go`），两处口径现在**恰好一致**：
 
-- `internal/server/handler.go` 的 `modelList` 对 CN 模型输出 `"id": "cn:" + mi.ID`
-  （global 为 `"global:" + id`），故第一列小字副行展示的是**带前缀**的 id；
-  相关断言见 `internal/server/handler_context_length_test.go`（如 `byID["cn:glm-5.2"]`）。
-- `internal/server/resolve_model.go` 的 `resolveModel`：裸名一律判为 `realm=cn`；
-  而 `realm` 参与选号（`handler.go` 中 `acct.Realm() != realm` 的过滤），
-  **不剥离前缀、也不是「按账号所属域自动路由」**。
+- `internal/server/handler.go` 的 `modelList` 已改为输出**裸名**（并集去重，
+  同名条目只出现一次并带 `realms: ["cn","global"]` 标注可用域），不再输出
+  `cn:` / `global:` 前缀条目。
+- `internal/server/resolve_model.go` 的 `resolveModel`：裸名判为
+  `RealmUnified`（全池），**按账号所属域自动路由**——正是上游文案描述的语义。
+  `cn:` / `global:` 前缀仍然可用，作用改为「钉域」（只在该域账号中选号）。
+  逃生门：`pool.unified_routing=false` 可让裸名退回旧语义（只路由 CN）。
 
 因此在本 fork 上：
 
-- 填**裸名**（`glm-5.3`）等价于 `cn:glm-5.3`，走国内版号；国内版模型这样写没问题。
-- 填**带前缀名**（照抄副行 `global:xxx`）是**可用**的，与本页文案相反。
-- 只有国际版账号时，填裸名会按 CN 域筛号而选不到号——需填 `global:` 前缀。
+- 填**裸名**（`glm-5.3`）走全池调度：国内号与国际号都可能承接，按选中账号的域
+  决定出站路径与鉴权头。这正是面板文案的说法。
+- 填**带前缀名**（`global:xxx`）仍然**可用**，且比裸名更严格（钉死在 global 域）。
+- 仅当两域模型名不一致时才需要「模型别名」页登记映射；否则裸名即可。
 
-未改动面板源码：该文案对上游是准确的，属两套网关的语义差异，不宜把面板改成
-与本 fork 强绑定。**若今后要让本 fork 的 `/v1/models` 返回裸 ID**（与上游对齐），
-那是一次网关侧的行为变更，需同步改上述测试与 `resolveModel` 的默认域语义。
+`web/src/pages/Models.tsx` 的说明文字无需改动其结论——它现在与本 fork 的行为一致了；
+本次只补了两笔：说明 `cn:` / `global:` 前缀的作用已变为「钉域」（网关侧扩展），以及
+提示「模型别名」页的用途（见第 8 条）。

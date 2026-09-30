@@ -1,7 +1,6 @@
 package server
 
 import (
-	"strings"
 	"testing"
 
 	"workbuddy2api/internal/auth"
@@ -28,10 +27,10 @@ func TestModelListNameFieldDynamicCN(t *testing.T) {
 			byID[id] = m
 		}
 	}
-	if name := byID["cn:dyn-named"]["name"]; name != "Hunyuan T1" {
+	if name := byID["dyn-named"]["name"]; name != "Hunyuan T1" {
 		t.Errorf("dyn-named name=%v want Hunyuan T1", name)
 	}
-	if _, ok := byID["cn:dyn-unnamed"]["name"]; ok {
+	if _, ok := byID["dyn-unnamed"]["name"]; ok {
 		t.Error("dyn-unnamed should omit name field (upstream omitted)")
 	}
 }
@@ -58,10 +57,13 @@ func TestModelListNameFieldGlobalNarrow(t *testing.T) {
 		t.Fatal("narrow probe should yield global entries")
 	}
 	for _, m := range got {
-		if id, _ := m["id"].(string); strings.HasPrefix(id, "global:") {
-			if _, ok := m["name"]; ok {
-				t.Errorf("global narrow entry should not carry name (no data source): %v", id)
-			}
+		// 无 CN 账号 → 目录条目全部来自 global 探测（裸名 + realms=[global]）。
+		if rs, ok := m["realms"].([]string); !ok || len(rs) != 1 || rs[0] != "global" {
+			t.Errorf("entry %v realms=%v want [global]", m["id"], m["realms"])
+			continue
+		}
+		if _, ok := m["name"]; ok {
+			t.Errorf("global narrow entry should not carry name (no data source): %v", m["id"])
 		}
 	}
 }

@@ -12,6 +12,7 @@ import Credits from './pages/Credits'
 import Accounts from './pages/Accounts'
 import LoginWizard from './pages/LoginWizard'
 import Playground from './pages/Playground'
+import ModelAliases from './pages/ModelAliases'
 import ConfigPage from './pages/ConfigPage'
 import System from './pages/System'
 
@@ -23,6 +24,7 @@ const NAV = [
   { to: '/credits', label: '积分到期', icon: '💎' },
   { to: '/login', label: '添加账号', icon: '➕' },
   { to: '/playground', label: '聊天测试', icon: '💬' },
+  { to: '/aliases', label: '模型别名', icon: '🔀' },
   { to: '/config', label: '网关配置', icon: '⚙️' },
   { to: '/system', label: '系统', icon: '🔧' },
 ]
@@ -151,6 +153,7 @@ function Shell({
           <Route path="/credits" element={<Credits />} />
           <Route path="/login" element={<LoginWizard session={session} onDone={onSessionRefresh} />} />
           <Route path="/playground" element={<Playground />} />
+          <Route path="/aliases" element={<ModelAliases session={session} />} />
           <Route path="/config" element={<ConfigPage session={session} />} />
           <Route path="/system" element={<System session={session} onSessionRefresh={onSessionRefresh} />} />
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -92,6 +92,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/config", s.handleConfigPut)
 	mux.HandleFunc("POST /api/config/reset", s.handleConfigReset)
 
+	// 模型别名映射（独立文件，网关 5s 轮询热生效，无需重启）。
+	mux.HandleFunc("GET /api/model-aliases", s.handleAliasesGet)
+	mux.HandleFunc("PUT /api/model-aliases", s.handleAliasesPut)
+	mux.HandleFunc("POST /api/model-aliases/reset", s.handleAliasesReset)
+
 	// ── 系统 ──────────────────────────────────────────────
 	mux.HandleFunc("GET /api/system", s.handleSystem)
 	mux.HandleFunc("POST /api/system/restart", s.handleSystemRestart)
@@ -760,6 +765,52 @@ func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已从备份恢复初始配置"})
+}
+
+// ---------------------------------------------------------------------------
+// 模型别名映射
+// ---------------------------------------------------------------------------
+
+// handleAliasesGet 返回别名表 + 元信息。
+//
+// 文件不存在（默认部署就是如此）不算错误：返回空表 + exists=false，
+// 让前端从空白表格开始编辑。真正的错误只有两种：推导不出路径（网关未配 state_file）、
+// 文件存在但不是合法 JSON（此时 meta.parse_error 有值，前端应提示修正而非覆盖）。
+func (s *Server) handleAliasesGet(w http.ResponseWriter, r *http.Request) {
+	entries, meta, err := s.svc.ReadAliases()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aliases": entries, "meta": meta})
+}
+
+func (s *Server) handleAliasesPut(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Aliases []ops.AliasEntry `json:"aliases"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	fallback, err := s.svc.WriteAliases(req.Aliases)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// 提示语与 config.json 刻意不同：本文件热生效。
+	msg := fmt.Sprintf("已保存 %d 条别名映射，网关数秒内自动热加载（无需重启）", len(req.Aliases))
+	if fallback {
+		msg += "。注意：该文件在当前部署下无法原子替换，本次为原地写入"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": msg})
+}
+
+func (s *Server) handleAliasesReset(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.ResetAliases(); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已从备份恢复别名映射"})
 }
 
 // ---------------------------------------------------------------------------

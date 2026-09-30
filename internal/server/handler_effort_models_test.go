@@ -44,21 +44,21 @@ func TestModelListEffortFieldsDynamicCN(t *testing.T) {
 			byID[id] = m
 		}
 	}
-	if eff := byID["cn:dyn-effort"]["reasoning_supported_efforts"]; !reflect.DeepEqual(eff, []string{"low", "high"}) {
+	if eff := byID["dyn-effort"]["reasoning_supported_efforts"]; !reflect.DeepEqual(eff, []string{"low", "high"}) {
 		t.Errorf("dyn-effort supported=%v want [low high]", eff)
 	}
-	if def := byID["cn:dyn-effort"]["reasoning_default_effort"]; def != "high" {
+	if def := byID["dyn-effort"]["reasoning_default_effort"]; def != "high" {
 		t.Errorf("dyn-effort default=%v want high", def)
 	}
 	// 有档位但无 defaultEffort → 只带 supported，不带 default。
-	if byID["cn:dyn-nodefault"]["reasoning_supported_efforts"] == nil {
+	if byID["dyn-nodefault"]["reasoning_supported_efforts"] == nil {
 		t.Error("dyn-nodefault should carry supported efforts")
 	}
-	if _, ok := byID["cn:dyn-nodefault"]["reasoning_default_effort"]; ok {
+	if _, ok := byID["dyn-nodefault"]["reasoning_default_effort"]; ok {
 		t.Error("dyn-nodefault should NOT carry default effort (upstream omitted)")
 	}
 	// 无档位 → 字段整体省略（非空数组）。
-	if _, ok := byID["cn:dyn-none"]["reasoning_supported_efforts"]; ok {
+	if _, ok := byID["dyn-none"]["reasoning_supported_efforts"]; ok {
 		t.Error("dyn-none should omit reasoning_supported_efforts")
 	}
 }
@@ -75,13 +75,13 @@ func TestModelListEffortFieldsGlobalProbeFailEmpty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
 
 	for _, m := range h.modelList() {
-		if id, _ := m["id"].(string); id == "global:deepseek-v4.1-flash" {
-			t.Fatalf("global:deepseek-v4.1-flash must not appear on probe failure (pure dynamic): %v", m)
+		if id, _ := m["id"].(string); id == "deepseek-v4.1-flash" {
+			t.Fatalf("deepseek-v4.1-flash must not appear on probe failure (pure dynamic): %v", m)
 		}
 	}
 }
 
-// TestModelListEffortFieldsGlobalRemote 探测下发档位 → /v1/models global 面用远端桶（权威）；
+// TestModelListEffortFieldsGlobalRemote 探测下发档位 → /v1/models 用远端桶（权威，裸名条目）；
 // 探测未覆盖的模型不出现（纯动态，无静态兜底）。
 func TestModelListEffortFieldsGlobalRemote(t *testing.T) {
 	auth.SetGlobalEnabled(true)
@@ -103,19 +103,19 @@ func TestModelListEffortFieldsGlobalRemote(t *testing.T) {
 		}
 	}
 	// 远端下发的 gpt-5.4 effort 权威透出。
-	if !reflect.DeepEqual(byID["global:gpt-5.4"]["reasoning_supported_efforts"], []string{"low", "medium", "high", "xhigh"}) {
-		t.Errorf("gpt-5.4 remote efforts=%v want [low medium high xhigh]", byID["global:gpt-5.4"]["reasoning_supported_efforts"])
+	if !reflect.DeepEqual(byID["gpt-5.4"]["reasoning_supported_efforts"], []string{"low", "medium", "high", "xhigh"}) {
+		t.Errorf("gpt-5.4 remote efforts=%v want [low medium high xhigh]", byID["gpt-5.4"]["reasoning_supported_efforts"])
 	}
-	if byID["global:gpt-5.4"]["reasoning_default_effort"] != "high" {
-		t.Errorf("gpt-5.4 remote default=%v want high", byID["global:gpt-5.4"]["reasoning_default_effort"])
+	if byID["gpt-5.4"]["reasoning_default_effort"] != "high" {
+		t.Errorf("gpt-5.4 remote default=%v want high", byID["gpt-5.4"]["reasoning_default_effort"])
 	}
 	// 探测独有的 probe-only-x 也透出远程档位。
-	if !reflect.DeepEqual(byID["global:probe-only-x"]["reasoning_supported_efforts"], []string{"low"}) {
-		t.Errorf("probe-only-x remote efforts=%v want [low]", byID["global:probe-only-x"]["reasoning_supported_efforts"])
+	if !reflect.DeepEqual(byID["probe-only-x"]["reasoning_supported_efforts"], []string{"low"}) {
+		t.Errorf("probe-only-x remote efforts=%v want [low]", byID["probe-only-x"]["reasoning_supported_efforts"])
 	}
 	// 纯动态：探测未覆盖的静态历史名单成员（deepseek-v4.1-flash）不出现。
-	if _, ok := byID["global:deepseek-v4.1-flash"]; ok {
-		t.Error("global:deepseek-v4.1-flash must not appear (not probed, no static fallback)")
+	if _, ok := byID["deepseek-v4.1-flash"]; ok {
+		t.Error("deepseek-v4.1-flash must not appear (not probed, no static fallback)")
 	}
 }
 

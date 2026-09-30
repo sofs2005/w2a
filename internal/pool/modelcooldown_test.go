@@ -780,3 +780,155 @@ func TestBlockModelBackoffPickSkips(t *testing.T) {
 		t.Fatalf("其他模型应豁免 u1, got %+v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 别名改造：also 附加键（对外名 + 出站物理名双键登记）
+// ---------------------------------------------------------------------------
+
+// TestBlockModelBackoffAlsoKeys 11102 的附加键：对外名与出站物理名共享同一条
+// TTL/Reason/Hits，使「直接请求物理名」的流量同样被避让（否则同一账号换个入口
+// 再撞一次 11102）。hits 只按 primary 累计，附加键不引入第二条退避曲线。
+func TestBlockModelBackoffAlsoKeys(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BlockModelBackoff("u1", "对外名", "11102 model not available", "physical-name")
+
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	primary, okP := e.modelCooldowns["对外名"]
+	alias, okA := e.modelCooldowns["physical-name"]
+	p.mu.RUnlock()
+	if !okP || !okA {
+		t.Fatalf("双键都应写入: primary ok=%v alias ok=%v", okP, okA)
+	}
+	if !primary.Until.Equal(alias.Until) {
+		t.Errorf("附加键 Until=%v want 与 primary %v 相同（共享同一次负缓存窗口）", alias.Until, primary.Until)
+	}
+	if alias.Reason != primary.Reason || alias.Hits != primary.Hits {
+		t.Errorf("附加键 reason/hits=%q/%d want 与 primary %q/%d 一致", alias.Reason, alias.Hits, primary.Reason, primary.Hits)
+	}
+	// 两键都被 healthyForModel 拦截（选号侧自动避让）。
+	now := time.Now()
+	if e.healthyForModel(now, "对外名") || e.healthyForModel(now, "physical-name") {
+		t.Error("双键都应被 healthyForModel 拦截")
+	}
+	if !e.healthyForModel(now, "其他模型") {
+		t.Error("无关模型应豁免（账号级 healthy 不受影响）")
+	}
+
+	// 再次触发：hits 只按 primary 累计（附加键不参与计数）。
+	p.BlockModelBackoff("u1", "对外名", "11102 model not available", "physical-name")
+	p.mu.RLock()
+	hits := p.byUID["u1"].modelCooldowns["对外名"].Hits
+	aliasHits := p.byUID["u1"].modelCooldowns["physical-name"].Hits
+	p.mu.RUnlock()
+	if hits != 2 {
+		t.Errorf("primary hits=%d want 2", hits)
+	}
+	if aliasHits != hits {
+		t.Errorf("附加键 hits=%d want 跟随 primary %d", aliasHits, hits)
+	}
+}
+
+// TestBlockModelBackoffAlsoIgnoresEmptyAndSelf 附加键的边界：空串与 primary 同名
+// 被跳过（不写重复键、不覆盖成空键）。
+func TestBlockModelBackoffAlsoIgnoresEmptyAndSelf(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BlockModelBackoff("u1", "m", "11102 x", "", "m")
+	p.mu.RLock()
+	n := len(p.byUID["u1"].modelCooldowns)
+	_, empty := p.byUID["u1"].modelCooldowns[""]
+	p.mu.RUnlock()
+	if n != 1 {
+		t.Errorf("modelCooldowns 条目数=%d want 1（空串与自身键应跳过）", n)
+	}
+	if empty {
+		t.Error("不得写入空键")
+	}
+}
+
+// TestBlockModelClearAlsoKeys 成功的附加键清除与写入对称：双键同清；
+// 且只清 11102 条目，同账号的 6004 冷却（无论落在哪个键）保持不动。
+func TestBlockModelClearAlsoKeys(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BlockModelBackoff("u1", "对外名", "11102 model not available", "physical-name")
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(30*time.Minute), "physical-name-6004", "6004 model rate limit")
+
+	p.BlockModelClear("u1", "对外名", "physical-name")
+	p.mu.RLock()
+	_, primaryGone := p.byUID["u1"].modelCooldowns["对外名"]
+	_, aliasGone := p.byUID["u1"].modelCooldowns["physical-name"]
+	_, sixOK := p.byUID["u1"].modelCooldowns["physical-name-6004"]
+	p.mu.RUnlock()
+	if primaryGone || aliasGone {
+		t.Errorf("双键都应被清除: primary gone=%v alias gone=%v", primaryGone, aliasGone)
+	}
+	if !sixOK {
+		t.Error("6004 条目不得被 BlockModelClear 误删")
+	}
+}
+
+// TestBlockModelClearAlsoKeysOnlyMatching 附加键里混入 6004 条目时只清 11102 的那个：
+// reason 前缀判定逐键独立，不因 primary 命中就顺手删掉附加键里的 6004 台账。
+func TestBlockModelClearAlsoKeysOnlyMatching(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.BlockModelBackoff("u1", "对外名", "11102 model not available")
+	p.CooldownSoftForModel("u1", time.Minute, time.Now().Add(30*time.Minute), "physical-name", "6004 model rate limit")
+
+	p.BlockModelClear("u1", "对外名", "physical-name")
+	p.mu.RLock()
+	_, primaryGone := p.byUID["u1"].modelCooldowns["对外名"]
+	_, sixOK := p.byUID["u1"].modelCooldowns["physical-name"]
+	p.mu.RUnlock()
+	if primaryGone {
+		t.Error("11102 主键应被清除")
+	}
+	if !sixOK {
+		t.Error("附加键位置的 6004 条目不得被清除（逐键按 reason 前缀判定）")
+	}
+}
+
+// TestCooldownSoftForModelAlsoKeys 6004 的附加键：同一 Until/ResetAt 双键登记，
+// 使直接请求出站物理名的流量也吃到本次限流；无 resetAt 的账号级退避分支忽略附加键
+// （账号级冷却没有模型键，语义上不该伪造）。
+func TestCooldownSoftForModelAlsoKeys(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	reset := time.Now().Add(2 * time.Hour)
+	p.CooldownSoftForModel("u1", time.Minute, reset, "对外名", "6004 model rate limit", "physical-name")
+
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	primary, okP := e.modelCooldowns["对外名"]
+	alias, okA := e.modelCooldowns["physical-name"]
+	until := e.until
+	p.mu.RUnlock()
+	if !okP || !okA {
+		t.Fatalf("双键都应写入: primary ok=%v alias ok=%v", okP, okA)
+	}
+	if !alias.Until.Equal(primary.Until) || !alias.ResetAt.Equal(primary.ResetAt) {
+		t.Errorf("附加键 until/resetAt=%v/%v want 与 primary %v/%v 一致", alias.Until, alias.ResetAt, primary.Until, primary.ResetAt)
+	}
+	if !until.IsZero() {
+		t.Errorf("6004 分支不写账号级 until，got %v", until)
+	}
+
+	// 无 resetAt 分支（账号级退避）：附加键被忽略，且不产生模型键。
+	p2 := New("")
+	p2.Add(&auth.Auth{UID: "u2"})
+	p2.CooldownSoftForModel("u2", time.Minute, time.Time{}, "对外名", "6004 model rate limit", "physical-name")
+	p2.mu.RLock()
+	e2 := p2.byUID["u2"]
+	n := len(e2.modelCooldowns)
+	u2until := e2.until
+	p2.mu.RUnlock()
+	if n != 0 {
+		t.Errorf("账号级退避分支不应写模型键，got %d 条", n)
+	}
+	if u2until.IsZero() {
+		t.Error("账号级退避分支应写 until")
+	}
+}

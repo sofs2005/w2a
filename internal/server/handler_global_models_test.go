@@ -5,10 +5,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	"workbuddy2api/internal/aliases"
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/upstream"
 )
@@ -26,6 +28,9 @@ type globalModelsHandlerFake struct {
 
 	status int
 	body   string
+	// cnBody 覆盖 CN 动态拉取响应（空 = 默认的 cn-dyn-model 单模型表）。
+	// 供并集去重测试构造"同一模型两域都有"的目录。
+	cnBody string
 }
 
 func newGlobalModelsHandlerFake(t *testing.T, status int, body string) *globalModelsHandlerFake {
@@ -49,10 +54,14 @@ func newGlobalModelsHandlerFake(t *testing.T, status int, body string) *globalMo
 			// CN 动态拉取：返回含 cli agent 的动态模型表，让 CN 面在纯动态下有产出
 			//（无静态兜底后需要真实数据源）。console 路径与 global 探测家族的
 			// /console fallback 同名，故按鉴权头而非路径分流。
-			w.WriteHeader(200)
-			_, _ = io.WriteString(w, `{"code":0,"data":{"models":[
+			cnBody := cf.cnBody
+			if cnBody == "" {
+				cnBody = `{"code":0,"data":{"models":[
 				{"id":"cn-dyn-model","maxInputTokens":65536,"maxOutputTokens":8192}
-			],"agents":[{"name":"cli","models":["cn-dyn-model"]}]}}`)
+			],"agents":[{"name":"cli","models":["cn-dyn-model"]}]}}`
+			}
+			w.WriteHeader(200)
+			_, _ = io.WriteString(w, cnBody)
 			return
 		}
 		w.WriteHeader(cf.status)
@@ -87,7 +96,8 @@ func modelsProbeBody(ids ...string) string {
 	return b.String()
 }
 
-// TestModelListTwoFamilies 断言 /v1/models 同时含 cn:* 与 global:* 两族；
+// TestModelListTwoFamilies 断言 /v1/models 是两域**裸名并集**：CN 动态目录与
+// global 探测目录同表输出、同名去重、无前缀条目、realms 标注各自可用域；
 // global 名单 = 纯探测结果（不合并静态）；探测走 global base（httptest host）。
 func TestModelListTwoFamilies(t *testing.T) {
 	auth.SetGlobalEnabled(true)
@@ -113,31 +123,43 @@ func TestModelListTwoFamilies(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	var cnIDs, globIDs []string
+	// 并集目录：id 一律裸名（无 cn:/global: 前缀条目），两域条目同表。
+	allIDs := make([]string, 0, len(resp.Data))
+	realmsOf := map[string][]string{}
 	for _, m := range resp.Data {
 		id, _ := m["id"].(string)
-		switch {
-		case strings.HasPrefix(id, "global:"):
-			globIDs = append(globIDs, strings.TrimPrefix(id, "global:"))
-		case strings.HasPrefix(id, "cn:"):
-			cnIDs = append(cnIDs, strings.TrimPrefix(id, "cn:"))
+		if strings.HasPrefix(id, "cn:") || strings.HasPrefix(id, "global:") {
+			t.Errorf("目录不得再有前缀条目: %q", id)
+			continue
+		}
+		allIDs = append(allIDs, id)
+		if rs, ok := m["realms"].([]any); ok {
+			for _, r := range rs {
+				if s, ok := r.(string); ok {
+					realmsOf[id] = append(realmsOf[id], s)
+				}
+			}
 		}
 	}
-	if len(cnIDs) == 0 {
-		t.Error("no cn:* models in /v1/models")
+	if !contains(allIDs, "cn-dyn-model") {
+		t.Errorf("no CN entries in /v1/models: %v", allIDs)
 	}
-	if len(globIDs) == 0 {
-		t.Fatal("no global:* models in /v1/models")
+	if !contains(allIDs, "probe-only-x") {
+		t.Fatal("no global entries in /v1/models")
 	}
-	// global 名单 = 纯探测结果：探测独有/下发全在；静态历史名单成员不出现。
-	if !contains(globIDs, "probe-only-x") {
-		t.Errorf("global models missing probe-only-x: %v", globIDs)
+	// global 名单 = 纯探测结果：探测独有在下发名单内；静态历史名单成员不出现。
+	if contains(allIDs, "default-model") || contains(allIDs, "kimi-k2.6") {
+		t.Errorf("global models must not contain unprobed static names: %v", allIDs)
 	}
-	if contains(globIDs, "default-model") || contains(globIDs, "kimi-k2.6") {
-		t.Errorf("global models must not contain unprobed static names: %v", globIDs)
+	if countOf(allIDs, "gpt-5.4") != 1 {
+		t.Errorf("union dedupe failed: gpt-5.4 count=%d", countOf(allIDs, "gpt-5.4"))
 	}
-	if countOf(globIDs, "gpt-5.4") != 1 {
-		t.Errorf("global models dedupe failed: gpt-5.4 count=%d", countOf(globIDs, "gpt-5.4"))
+	// realms 标注：探测独有的模型只属于 global；CN 动态独有的只属于 cn。
+	if got := realmsOf["probe-only-x"]; len(got) != 1 || got[0] != "global" {
+		t.Errorf("probe-only-x realms=%v want [global]", got)
+	}
+	if got := realmsOf["cn-dyn-model"]; len(got) != 1 || got[0] != "cn" {
+		t.Errorf("cn-dyn-model realms=%v want [cn]", got)
 	}
 
 	// 探测走 global base（httptest Host）+ Bearer 鉴权头；v3-config-merge 后单次探测
@@ -156,7 +178,7 @@ func TestModelListTwoFamilies(t *testing.T) {
 		t.Errorf("probe host=%q want global base (httptest)", host)
 	}
 	// CN 动态拉取走同一 fake（ChatBaseCN 同 host，console 路径分流返回动态模型表），
-	// cn-dyn-model 已在上面 cnIDs 断言覆盖——不断言 CN 请求计数，避免耦合 CN 缓存重置时序。
+	// cn-dyn-model 已在上面 allIDs 断言覆盖——不断言 CN 请求计数，避免耦合 CN 缓存重置时序。
 }
 
 // TestModelListNoGlobalAccountEmpty 无 global 账号：global 名单为空（纯动态，无静态兜底），探测零调用。
@@ -172,14 +194,10 @@ func TestModelListNoGlobalAccountEmpty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
 
 	got := h.modelList()
-	var globIDs []string
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && strings.HasPrefix(id, "global:") {
-			globIDs = append(globIDs, strings.TrimPrefix(id, "global:"))
+		if rs, ok := m["realms"].([]string); ok && len(rs) == 1 && rs[0] == "global" {
+			t.Fatalf("no-global-account: global entry %v want none (pure dynamic)", m["id"])
 		}
-	}
-	if len(globIDs) != 0 {
-		t.Fatalf("no-global-account: global ids=%v want empty (pure dynamic)", globIDs)
 	}
 	cnt, _, _, _ := cf.snapshot()
 	if cnt != 0 {
@@ -200,14 +218,10 @@ func TestModelListProbeFailureEmpty(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
 
 	got := h.modelList()
-	var globIDs []string
 	for _, m := range got {
-		if id, ok := m["id"].(string); ok && strings.HasPrefix(id, "global:") {
-			globIDs = append(globIDs, strings.TrimPrefix(id, "global:"))
+		if rs, ok := m["realms"].([]string); ok && len(rs) == 1 && rs[0] == "global" {
+			t.Errorf("probe-failure: global entry %v want none (no static fallback)", m["id"])
 		}
-	}
-	if len(globIDs) != 0 {
-		t.Errorf("probe-failure: global ids=%v want empty (no static fallback)", globIDs)
 	}
 }
 
@@ -241,6 +255,7 @@ func jsonUnmarshal(s string, v any) error {
 	return json.Unmarshal([]byte(s), v)
 }
 
+// contains 名单成员判定（顺序无关）。
 func contains(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -248,6 +263,143 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// aliasStoreForTest 由 JSON 字面量构造别名 Store（解析失败直接 Fatal）。
+func aliasStoreForTest(t *testing.T, raw string) *aliases.Store {
+	t.Helper()
+	tbl, err := aliases.Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("解析测试别名表: %v", err)
+	}
+	s := aliases.NewStore()
+	s.Set(tbl)
+	return s
+}
+
+// catalogRows 把目录输出索引成 id → 条目。
+func catalogRows(t *testing.T, h *Handler) map[string]map[string]any {
+	t.Helper()
+	byID := map[string]map[string]any{}
+	for _, m := range h.modelList() {
+		id, ok := m["id"].(string)
+		if !ok {
+			t.Fatalf("目录条目无 id: %v", m)
+		}
+		byID[id] = m
+	}
+	return byID
+}
+
+// TestModelListUnionDedupAndRealms 并集去重：同名模型两域都有 → 只出一条，
+// CN 富字段优先（credits 不被 global 空值抹掉），realms 标注 [cn global]；
+// 单域独有条目 realms 只含所属域。
+func TestModelListUnionDedupAndRealms(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	resetModelsCache()
+
+	cf := newGlobalModelsHandlerFake(t, 200, `{"code":0,"data":{"models":[
+		{"id":"glm-5.2"},
+		{"id":"gpt-5.4"}
+	],"agents":[{"name":"cli","models":["glm-5.2","gpt-5.4"]}]}}`)
+	// CN 侧同名模型带富字段（credits/name），global 侧只有裸 id。
+	cf.cnBody = `{"code":0,"data":{"models":[
+		{"id":"glm-5.2","name":"GLM 5.2","credits":"x0.06","maxInputTokens":200000,"maxOutputTokens":131072},
+		{"id":"cn-only-x","maxInputTokens":65536,"maxOutputTokens":8192}
+	],"agents":[{"name":"cli","models":["glm-5.2","cn-only-x"]}]}}`
+	p := testPoolWith(
+		&auth.Auth{UID: "cn1", AccessToken: "at_cn", Domain: "www.codebuddy.cn", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "g1", AccessToken: "at_gl", Domain: "www.workbuddy.ai", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true})
+
+	byID := catalogRows(t, h)
+	// 同名去重：glm-5.2 只出一条。
+	if _, ok := byID["glm-5.2"]; !ok {
+		t.Fatalf("缺 glm-5.2: %v", byID)
+	}
+	if got := realmsOf(t, byID["glm-5.2"]); !reflect.DeepEqual(got, []string{"cn", "global"}) {
+		t.Errorf("glm-5.2 realms=%v want [cn global]", got)
+	}
+	// CN 富字段优先：global 裸条目不得覆盖 CN 的 credits/name。
+	if byID["glm-5.2"]["credits"] != "x0.06" {
+		t.Errorf("glm-5.2 credits=%v want x0.06（CN 优先，global 不覆盖）", byID["glm-5.2"]["credits"])
+	}
+	if byID["glm-5.2"]["name"] != "GLM 5.2" {
+		t.Errorf("glm-5.2 name=%v want GLM 5.2", byID["glm-5.2"]["name"])
+	}
+	// 单域独有条目：realms 只含所属域。
+	if got := realmsOf(t, byID["gpt-5.4"]); !reflect.DeepEqual(got, []string{"global"}) {
+		t.Errorf("gpt-5.4 realms=%v want [global]", got)
+	}
+	if got := realmsOf(t, byID["cn-only-x"]); !reflect.DeepEqual(got, []string{"cn"}) {
+		t.Errorf("cn-only-x realms=%v want [cn]", got)
+	}
+	// 目录不得残留前缀条目（并集不靠加前缀去重）。
+	for id := range byID {
+		if strings.HasPrefix(id, "cn:") || strings.HasPrefix(id, "global:") {
+			t.Errorf("目录残留前缀条目: %q", id)
+		}
+	}
+}
+
+// TestModelListAliasEntries 别名条目进目录：隐藏模型（目录里不存在）按对外名出现，
+// 带 aliased 标记；realms 按映射非空侧标注（单域别名只标该域）。
+func TestModelListAliasEntries(t *testing.T) {
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	resetModelsCache()
+
+	cf := newGlobalModelsHandlerFake(t, 200, modelsProbeBody("glm-5.2"))
+	p := testPoolWith(
+		&auth.Auth{UID: "cn1", AccessToken: "at_cn", Domain: "www.codebuddy.cn", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "g1", AccessToken: "at_gl", Domain: "www.workbuddy.ai", ExpiresAt: 9999999999},
+	)
+	store := aliasStoreForTest(t, `{"aliases":[
+		{"name":"my-hidden","global":"deepseek:hidden-v9"},
+		{"name":"my-dual","cn":"cn-secret-a","global":"gl-secret-b"},
+		{"name":"glm-5.2","cn":"glm-5.2","global":"glm-5.2"}
+	]}`)
+	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true, Aliases: store})
+
+	byID := catalogRows(t, h)
+	// 隐藏模型按对外名进目录，带 aliased 标记 + 域标注（单域别名只标 global）。
+	hid, ok := byID["my-hidden"]
+	if !ok {
+		t.Fatalf("别名条目 my-hidden 未进目录: %v", byID)
+	}
+	if hid["aliased"] != true {
+		t.Errorf("my-hidden aliased=%v want true", hid["aliased"])
+	}
+	if got := realmsOf(t, hid); !reflect.DeepEqual(got, []string{"global"}) {
+		t.Errorf("my-hidden realms=%v want [global]", got)
+	}
+	// 双域别名：realms 两域都标。
+	if got := realmsOf(t, byID["my-dual"]); !reflect.DeepEqual(got, []string{"cn", "global"}) {
+		t.Errorf("my-dual realms=%v want [cn global]", got)
+	}
+	// 别名名与目录既有条目同名 → 只并入域标注，不重复输出、不标 aliased
+	//（它本来就是真实模型，别名的存在不改变其元数据）。
+	if _, ok := byID["glm-5.2"]; !ok {
+		t.Fatal("glm-5.2 应仍在目录中")
+	}
+	if byID["glm-5.2"]["aliased"] != nil {
+		t.Errorf("glm-5.2 不得标 aliased（目录既有条目）: %v", byID["glm-5.2"]["aliased"])
+	}
+	if got := realmsOf(t, byID["glm-5.2"]); !reflect.DeepEqual(got, []string{"cn", "global"}) {
+		t.Errorf("glm-5.2 realms=%v want [cn global]（别名并入域标注）", got)
+	}
+}
+
+// realmsOf 取条目的 realms 列表。
+func realmsOf(t *testing.T, m map[string]any) []string {
+	t.Helper()
+	rs, ok := m["realms"].([]string)
+	if !ok {
+		return nil
+	}
+	return rs
 }
 
 func countOf(list []string, s string) int {
