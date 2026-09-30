@@ -2,11 +2,15 @@
 //
 // 数据源是网关的 /v1/stats —— 网关是所有流量的必经点，因此这里看到的**包含**
 // 绕过本面板的其他客户端（比如你自己的工具/脚本）的调用。
+//
+// 本 fork 的网关**只实现了 /v1/stats 的累计快照**，时间维度查询未实现，故
+// 「时间趋势」卡片与其时间维度 state 目前整体注释掉（详见该处说明与 HOST-PATCHES.md 第 4 条）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ModelCost, ModelStat, ModelPrice, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Modal, Spinner } from '../ui'
-import TrendChart, { type TrendMetric } from './TrendChart'
+// 时间趋势启用时需一并恢复（见下方注释块）：
+// import TrendChart, { type TrendMetric } from './TrendChart'
 
 /** 数值格式化：大数用千分位，小数保留位数。 */
 function fmtMs(v: number): string {
@@ -51,16 +55,22 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
   // 价格编辑弹窗：null = 关闭；否则为正在编辑的模型名
   const [editingModel, setEditingModel] = useState<string | null>(null)
 
-  // ── 时间维度 ──
+  // ── 时间维度：网关尚未实现，暂时整体注释 ──
+  // 这组 state 与下方「时间趋势」卡片是一体的。保留注释而非删除，是为了网关补齐
+  // 时间序列后能整块恢复（恢复步骤见卡片处说明）。
+  //
   // 快捷区间：today / yesterday / 7d / 30d / 90d / all / custom
-  const [range, setRange] = useState('all')
-  const [interval, setInterval] = useState<'hour' | 'day' | 'week'>('day')
-  const [metric, setMetric] = useState<TrendMetric>('requests')
-  // 自定义区间（range=custom 时生效）
-  const [customFrom, setCustomFrom] = useState('')
-  const [customTo, setCustomTo] = useState('')
-  // 模型筛选（空 = 全部）
-  const [modelFilter, setModelFilter] = useState('')
+  // const [range, setRange] = useState('all')
+  // const [interval, setInterval] = useState<'hour' | 'day' | 'week'>('day')
+  // const [metric, setMetric] = useState<TrendMetric>('requests')
+  // // 自定义区间（range=custom 时生效）
+  // const [customFrom, setCustomFrom] = useState('')
+  // const [customTo, setCustomTo] = useState('')
+  // // 模型筛选（空 = 全部）
+  // //
+  // // 注意：这个筛选**即使恢复渲染也不生效** —— 它只是把 model 参数发给网关，而网关的
+  // // /v1/stats 不解析该参数，「按模型明细」表格用的也是未过滤的 resp.stats.models。
+  // const [modelFilter, setModelFilter] = useState('')
 
   const stats = resp?.stats ?? null
 
@@ -68,14 +78,9 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
     async (silent = false) => {
       if (!silent) setLoading(true)
       try {
-        const s = await api.stats({
-          mode: timeMode,
-          range: range === 'custom' ? undefined : range,
-          from: range === 'custom' && customFrom ? new Date(customFrom).toISOString() : undefined,
-          to: range === 'custom' && customTo ? new Date(customTo).toISOString() : undefined,
-          interval,
-          model: modelFilter || undefined,
-        })
+        // 时间维度参数已随「时间趋势」一并停发（网关不解析它们）。
+        // 恢复趋势卡片时，把 range/from/to/interval/model 加回来。
+        const s = await api.stats({ mode: timeMode })
         setResp(s)
         setError(null)
       } catch (err) {
@@ -84,7 +89,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         setLoading(false)
       }
     },
-    [timeMode, range, interval, customFrom, customTo, modelFilter],
+    [timeMode],
   )
 
   useEffect(() => {
@@ -315,12 +320,51 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         </div>
       )}
 
-      {/* 时间趋势 */}
+      {/* 时间趋势：网关未实现时间序列，暂时隐藏 */}
+      {/*
+        以下整块依赖网关 /v1/stats 的**时间维度**能力，而本 fork 的网关尚未实现：
+        internal/server/metrics.go 的 stats handler 只调 MetricsSnapshotOf()，既不解析
+        range/from/to/interval/model 参数，MetricsSnapshot 结构体里也没有 Range 字段，
+        故响应恒无 range 键 → 面板恒走「正在加载趋势数据…」降级分支，趋势图永远空白。
+        （注意区分：/v1/stats 的**累计快照**是已实现的，本页其余部分正常。）
+
+        另有两条与事实不符的旧文案一并去掉：`series_buckets` 网关从未赋值（那句
+        「可回溯 N 个时间桶」永远不显示），且它宣称的「按小时落盘、保留 30 天、重启不清零」
+        与实现相反 —— 统计纯内存累加，进程重启即清零。
+
+        网关补齐后，取消下面整块注释、并恢复上方 TrendChart import 与时间维度 state 即可。
+      */}
+      <div className="card">
+        <div className="card-head">
+          <h2>时间趋势</h2>
+          <span className="hint">网关暂不支持</span>
+        </div>
+        <Alert kind="info">
+          按时间聚合的趋势图<strong>暂时隐藏</strong>：网关的 <span className="mono">/v1/stats</span> 目前只返回
+          进程内的累计值，不支持时间维度查询。
+          <div style={{ marginTop: 6 }}>
+            它不解析 <span className="mono">range / from / to / interval / model</span> 参数，响应里也没有
+            <span className="mono">range</span> 字段，因此区间统计与趋势图拿不到任何数据。
+            <strong>模型筛选</strong>一并移除，原因相同 —— 它只是把参数发给网关，同样不生效。
+          </div>
+          <div style={{ marginTop: 6 }}>
+            另需注意：累计统计<strong>只存在内存，网关进程重启即清零</strong>，也不按小时落盘，
+            无法回溯历史区间。
+          </div>
+          <div style={{ marginTop: 6 }} className="text-faint">
+            网关侧补齐后取消本文件中的注释即可恢复：需增加按小时分桶的滚动存储（含落盘以支持重启后回溯）、
+            在 <span className="mono">recordChatMetric</span> 之外同步写入当前桶、以及
+            <span className="mono">stats</span> handler 解析时间参数并聚合返回 <span className="mono">range</span>。
+          </div>
+        </Alert>
+      </div>
+
+      {/*
       <div className="card">
         <div className="card-head">
           <h2>时间趋势</h2>
           <span className="hint">
-            {stats?.series_buckets !== undefined && `可回溯 ${stats.series_buckets} 个时间桶（按小时落盘，保留 30 天）`}
+            {stats?.series_buckets !== undefined && `可回溯 ${stats.series_buckets} 个时间桶`}
           </span>
         </div>
 
@@ -429,6 +473,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           </Empty>
         )}
       </div>
+      */}
 
       {/* 按模型明细 */}
       <div className="card">
@@ -592,7 +637,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <dt>统计范围</dt>
           <dd>
             网关是所有流量的必经点，因此这里<strong>包含其他客户端</strong>（脚本、第三方工具）的调用，
-            不限于本面板发起的请求。统计持久化在网关的 data 目录，重启不丢。
+            不限于本面板发起的请求。统计为<strong>进程内累计</strong>，网关重启即清零。
           </dd>
           <dt>统计起点</dt>
           <dd>{stats ? fmtISO(stats.since) : '—'}</dd>
