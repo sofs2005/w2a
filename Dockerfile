@@ -12,6 +12,10 @@ COPY panel/web ./panel/web
 COPY panel/internal/webui/dist ./panel/internal/webui/dist
 RUN cd panel/web && npm run build
 
+# 版本必须与 go.mod 的 go 指令**保持一致**：CI 的 Go 版本由 go-version-file 从
+# go.mod 推得，Dockerfile 这里是硬编码的第二个来源。两者一旦错开就会出现
+# 「CI 校验用旧版、镜像编译用新版」——新版 API 能过构建却挂 CI（或反之）。
+# 升级时两处一起改。
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./

@@ -1,6 +1,6 @@
 module workbuddy2api
 
-go 1.22.5
+go 1.26
 
 require (
 	github.com/redis/go-redis/v9 v9.18.0

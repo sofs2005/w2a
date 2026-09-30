@@ -1,3 +1,3 @@
 module workbuddy2api-gui
 
-go 1.22
+go 1.26
