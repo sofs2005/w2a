@@ -199,7 +199,8 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           <h2>别名映射表</h2>
           <span className="hint">
             共 {stats.total} 条 · 双域 {stats.dual} · 仅国内 {stats.cn} · 仅国际 {stats.global}
-          </span>        </div>
+          </span>
+        </div>
 
         <table className="table">
           <thead>
