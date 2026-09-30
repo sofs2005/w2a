@@ -320,9 +320,9 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         </div>
       )}
 
-      {/* 时间趋势：网关未实现时间序列，暂时隐藏 */}
+      {/* 时间趋势：网关未实现时间维度查询，整块隐藏（含卡片本身，不留占位） */}
       {/*
-        以下整块依赖网关 /v1/stats 的**时间维度**能力，而本 fork 的网关尚未实现：
+        本模块依赖网关 /v1/stats 的**时间维度**能力，而本 fork 的网关尚未实现：
         internal/server/metrics.go 的 stats handler 只调 MetricsSnapshotOf()，既不解析
         range/from/to/interval/model 参数，MetricsSnapshot 结构体里也没有 Range 字段，
         故响应恒无 range 键 → 面板恒走「正在加载趋势数据…」降级分支，趋势图永远空白。
@@ -333,33 +333,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         与实现相反 —— 统计纯内存累加，进程重启即清零。
 
         网关补齐后，取消下面整块注释、并恢复上方 TrendChart import 与时间维度 state 即可。
-      */}
-      <div className="card">
-        <div className="card-head">
-          <h2>时间趋势</h2>
-          <span className="hint">网关暂不支持</span>
-        </div>
-        <Alert kind="info">
-          按时间聚合的趋势图<strong>暂时隐藏</strong>：网关的 <span className="mono">/v1/stats</span> 目前只返回
-          进程内的累计值，不支持时间维度查询。
-          <div style={{ marginTop: 6 }}>
-            它不解析 <span className="mono">range / from / to / interval / model</span> 参数，响应里也没有
-            <span className="mono">range</span> 字段，因此区间统计与趋势图拿不到任何数据。
-            <strong>模型筛选</strong>一并移除，原因相同 —— 它只是把参数发给网关，同样不生效。
-          </div>
-          <div style={{ marginTop: 6 }}>
-            另需注意：累计统计<strong>只存在内存，网关进程重启即清零</strong>，也不按小时落盘，
-            无法回溯历史区间。
-          </div>
-          <div style={{ marginTop: 6 }} className="text-faint">
-            网关侧补齐后取消本文件中的注释即可恢复：需增加按小时分桶的滚动存储（含落盘以支持重启后回溯）、
-            在 <span className="mono">recordChatMetric</span> 之外同步写入当前桶、以及
-            <span className="mono">stats</span> handler 解析时间参数并聚合返回 <span className="mono">range</span>。
-          </div>
-        </Alert>
-      </div>
 
-      {/*
       <div className="card">
         <div className="card-head">
           <h2>时间趋势</h2>
