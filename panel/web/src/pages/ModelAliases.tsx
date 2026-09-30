@@ -8,11 +8,40 @@
 //  2. 校验在面板侧前置完成：网关对非法表是"静默保持旧表"，从界面看不出没生效。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { AliasEntry, AliasMeta, SessionInfo } from '../types'
+import type { AliasEntry, AliasMeta, Model, SessionInfo } from '../types'
 import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import { modelRealms, type Realm } from '../realm'
 
 /** 空行模板：新加的行默认只有对外名待填。 */
 const emptyRow = (): AliasEntry => ({ name: '', cn: '', global: '' })
+
+/**
+ * 模型目录按域切分，供三列下拉各自取候选。
+ *
+ * 为什么要分列而不是三列共用一份并集：**候选列表本身就是"哪个名字属于哪个域"的说明书**。
+ * 共用一份并集时，用户在「国际真实名」格里也会看到只在 CN 存在的模型，选它等于配置了
+ * 一条永远走不通的映射（该域账号被选中后吃一次 11102）。分列后每格只列该域真实存在的名字。
+ *
+ * 域判定走 `modelRealms`（服务端 `realms` 优先，缺席回退按前缀推断），与「模型与倍率」
+ * 页同一口径——两页对同一个模型必须给出相同的域结论。
+ *
+ * 老网关不下发 `realms` 时 `modelRealms` 恒返回单域，候选会退化，故调用方须据
+ * `realmsKnown` 提示"无法按域区分"而不是假装列表是准的。
+ */
+function splitCatalog(models: Model[]) {
+  const all: string[] = []
+  const byRealm: Record<Realm, string[]> = { cn: [], global: [] }
+  let realmsKnown = false
+  for (const m of models) {
+    const id = (m.id || '').trim()
+    if (!id) continue
+    if (m.realms && m.realms.length > 0) realmsKnown = true
+    all.push(id)
+    for (const r of modelRealms(m)) byRealm[r].push(id)
+  }
+  const uniq = (xs: string[]) => Array.from(new Set(xs)).sort()
+  return { all: uniq(all), byRealm: { cn: uniq(byRealm.cn), global: uniq(byRealm.global) }, realmsKnown }
+}
 
 export default function ModelAliases({ session }: { session: SessionInfo }) {
   const [rows, setRows] = useState<AliasEntry[]>([])
@@ -24,7 +53,11 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
   const [confirmReset, setConfirmReset] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [dirty, setDirty] = useState(false)
-  const [catalog, setCatalog] = useState<string[]>([])
+  const [catalog, setCatalog] = useState<{ all: string[]; byRealm: Record<Realm, string[]>; realmsKnown: boolean }>({
+    all: [],
+    byRealm: { cn: [], global: [] },
+    realmsKnown: false,
+  })
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -52,8 +85,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
       .models()
       .then((res) => {
         if (!alive) return
-        const ids = (res.data ?? []).map((m) => m.id).filter(Boolean)
-        setCatalog(Array.from(new Set(ids)).sort())
+        setCatalog(splitCatalog(res.data ?? []))
       })
       .catch(() => undefined)
     return () => {
@@ -130,6 +162,39 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
     return { cn, global, dual, total }
   }, [rows])
 
+  /**
+   * 两域同名的模型：**无需登记别名**。
+   *
+   * 裸名本来就跨域通用（统一调度的核心语义），所以给同名模型写一条
+   * `{name: x, cn: x, global: x}` 在路由上是彻底的 no-op —— 只是让文件变长。
+   * 别名表的唯一用途是「两域名不同」与「只在一域存在」这两类。
+   *
+   * 因此这里只做**只读展示**（让运维确信这批已经能用），并提供「从目录导入」按钮
+   * 供确有需要时一键补齐；绝不自动写文件（那会把用户的手工条目淹没在几十行噪声里）。
+   */
+  const identical = useMemo(() => {
+    if (!catalog.realmsKnown) return []
+    return catalog.byRealm.cn.filter((id) => catalog.byRealm.global.includes(id))
+  }, [catalog])
+
+  /** 已在表格里登记过的对外名（导入时跳过，避免重复行）。 */
+  const existingNames = useMemo(() => new Set(rows.map((r) => r.name.trim()).filter(Boolean)), [rows])
+
+  /** 把「两域同名」的模型补成显式行（no-op 条目，仅为可见性）。 */
+  const importIdentical = () => {
+    const add = identical.filter((id) => !existingNames.has(id)).map((id) => ({ name: id, cn: id, global: id }))
+    if (add.length === 0) {
+      setNotice('没有需要导入的同名模型（可能已全部登记，或网关未下发 realms 字段）')
+      return
+    }
+    setRows((prev) => {
+      const kept = prev.filter((r) => r.name.trim() || r.cn.trim() || r.global.trim())
+      return [...kept, ...add]
+    })
+    setDirty(true)
+    setNotice(`已填入 ${add.length} 条同名条目，确认后点「保存」才会落盘。`)
+  }
+
   if (loading && !meta) return <Spinner label="正在读取别名映射…" />
 
   const writeDisabled = session.read_only
@@ -175,7 +240,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
       )}
       {meta?.parse_error && (
         <Alert kind="error">
-          磁盘上的别名文件不是合法 JSON（{meta.parse_error}）。网关此刻**仍在用上一份可用映射**
+          磁盘上的别名文件不是合法 JSON（{meta.parse_error}）。网关此刻<b>仍在用上一份可用映射</b>
           （解析失败时保持旧表），修好并保存即可恢复。
         </Alert>
       )}
@@ -205,9 +270,18 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
         <table className="table">
           <thead>
             <tr>
-              <th style={{ width: '30%' }}>对外模型名</th>
-              <th style={{ width: '28%' }}>国内（cn）真实名</th>
-              <th style={{ width: '28%' }}>国际（global）真实名</th>
+              <th style={{ width: '30%' }}>
+                对外模型名
+                <span className="hint">（共 {catalog.all.length} 个）</span>
+              </th>
+              <th style={{ width: '28%' }}>
+                国内（cn）真实名
+                <span className="hint">（共 {catalog.byRealm.cn.length} 个）</span>
+              </th>
+              <th style={{ width: '28%' }}>
+                国际（global）真实名
+                <span className="hint">（共 {catalog.byRealm.global.length} 个）</span>
+              </th>
               <th style={{ width: 70 }} />
             </tr>
           </thead>
@@ -217,7 +291,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
                 <td>
                   <input
                     type="text"
-                    list="alias-catalog"
+                    list="alias-catalog-all"
                     value={row.name}
                     placeholder="my-model"
                     onChange={(e) => update(idx, { name: e.target.value })}
@@ -226,7 +300,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
                 <td>
                   <input
                     type="text"
-                    list="alias-catalog"
+                    list="alias-catalog-cn"
                     value={row.cn}
                     placeholder="留空 = 国内无此模型"
                     onChange={(e) => update(idx, { cn: e.target.value })}
@@ -235,7 +309,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
                 <td>
                   <input
                     type="text"
-                    list="alias-catalog"
+                    list="alias-catalog-global"
                     value={row.global}
                     placeholder="留空 = 国际无此模型"
                     onChange={(e) => update(idx, { global: e.target.value })}
@@ -256,9 +330,20 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           </tbody>
         </table>
 
-        {/* 现有模型名建议：datalist 让输入框自带下拉，但不强制取值（允许填任意名）。 */}
-        <datalist id="alias-catalog">
-          {catalog.map((id) => (
+        {/* 按列的候选：对外名 = 全部裸名；cn/global 列 = 只在该域存在的名字。
+            datalist 不强制取值（可填任意名），也不随行变化——故三份挂在表格外。 */}
+        <datalist id="alias-catalog-all">
+          {catalog.all.map((id) => (
+            <option key={id} value={id} />
+          ))}
+        </datalist>
+        <datalist id="alias-catalog-cn">
+          {catalog.byRealm.cn.map((id) => (
+            <option key={id} value={id} />
+          ))}
+        </datalist>
+        <datalist id="alias-catalog-global">
+          {catalog.byRealm.global.map((id) => (
             <option key={id} value={id} />
           ))}
         </datalist>
@@ -280,6 +365,43 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           两域名不能同时为空（否则没有任何域能出站）。
         </div>
       </div>
+
+      {/* 两域同名的模型：只读展示。给它们登记别名在路由上是 no-op（裸名本就跨域通用），
+          所以默认不写文件；确有需要时用「导入」按钮一键补进表格。 */}
+      {catalog.realmsKnown && identical.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <h2>两域同名，无需配置</h2>
+            <span className="hint">共 {identical.length} 个</span>
+          </div>
+          <div className="desc" style={{ marginBottom: 10 }}>
+            下列模型在国内外<b>名字完全一致</b>，裸名已经可以两域通用，别名表不必登记它们。
+            只有「两域名不同」或「只在一域存在」的模型才需要在上表里手工配置。
+          </div>
+          <div className="alias-chips">
+            {identical.map((id) => (
+              <span key={id} className="badge badge-dim mono">
+                {id}
+              </span>
+            ))}
+          </div>
+          <div className="page-actions" style={{ marginTop: 13 }}>
+            <button className="btn btn-sm" onClick={importIdentical} disabled={writeDisabled}>
+              ⤵ 从目录导入这 {identical.length} 条
+            </button>
+            <span className="hint">
+              导入后仍需点「保存」才会落盘；这些条目在路由上与不配置等价。
+            </span>
+          </div>
+        </div>
+      )}
+
+      {!catalog.realmsKnown && (
+        <Alert kind="warn">
+          网关未下发 <span className="mono">realms</span> 字段，无法判断模型属于哪个域，
+          三列的下拉候选退化为同一份列表。升级网关后此页会自动按域区分。
+        </Alert>
+      )}
 
       {meta && !meta.exists && (
         <Alert kind="warn">

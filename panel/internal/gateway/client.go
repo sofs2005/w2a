@@ -78,6 +78,14 @@ type Model struct {
 	MaxAllowedSize    int64    `json:"max_allowed_size,omitempty"`
 	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
 	ReasoningSummary  string   `json:"reasoning_summary,omitempty"`
+
+	// Realms 该裸名可承接的域（网关统一调度改造后 /v1/models 下发，如 ["cn","global"]）。
+	//
+	// 必须显式声明：网关按裸名并集去重输出目录，同名模型只出现一次，「它到底能在哪些域跑」
+	// 只能靠这个字段判断。此前未声明 → encoding/json 静默丢弃 → 面板的域分栏只能退回
+	// 按 id 前缀猜（而前缀在裸名化后已不存在，结果全部落进「国内版」）。
+	// 缺省（老网关未下发）= nil，调用方须按「未知」处理，不可当作空集合。
+	Realms []string `json:"realms,omitempty"`
 }
 
 // Client 网关客户端。每次请求都携带当前 api_key，因此支持运行期改配置。

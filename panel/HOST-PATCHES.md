@@ -163,6 +163,26 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
   缺席（老网关）时回退按前缀推断——两个版本的网关都能正确分栏。`Models.tsx` 的三处
   `modelRealm(m.id)` 调用点、`realms.length === 2` 的「双域」副行标注，以及页脚文案
   同步更新（说明前缀现为网关侧「钉域」扩展）。
+- `internal/gateway/client.go`（**上游文件，需重放**）：`Model` 结构体补 `Realms` 字段。
+  **这是上面那条前端改动的必要前提**——`gateway.Model` 是白名单式结构体，
+  `encoding/json` 对未声明字段**静默丢弃**，网关下发的 `realms` 到不了前端；
+  `modelRealms` 于是永远走前缀回退分支，域分栏全部落进「国内版」，且没有任何报错
+  可循（前端那个"回退"反而把问题盖住了）。回归测试 `internal/api/models_test.go`
+  的 `TestModelRealmsPassthrough` 钉住该字段的解码与再编码两段链路。
+
+**后续修订（同日，用户实测反馈）**：
+
+1. **三列下拉候选按域切分**。原实现三列共用一份 `datalist`（两域并集），后果是
+   「国际真实名」格里也会列出只在 CN 存在的模型，选它等于配了一条永远走不通的映射。
+   改为 `alias-catalog-all` / `-cn` / `-global` 三份，表头标注各列候选数量
+   （`共 N 个`）。域判定复用 `modelRealms`，与「模型与倍率」页同一口径。
+2. **`color-scheme: dark`**。`styles.css` 从未声明它，于是原生 `<datalist>` 弹层
+   按浅色渲染（白底黑字），与整站深色主题格格不入。声明在 `:root`（可继承，覆盖
+   全部原生控件）。
+3. **新增「两域同名，无需配置」只读卡片**。同名模型写进别名表在路由上是 **no-op**
+   （裸名本就跨域通用），自动写入只会把用户的手工条目淹没在几十行噪声里。故只做
+   只读展示 + 一个「从目录导入这 N 条」按钮（点了才填表格，保存才落盘）。
+   `realms` 缺席（老网关）时不显示该卡片，改提示"无法按域区分"。
 
 **回归测试**：`internal/api/alias_test.go`（含「推导路径必须与网关一致」
 「非法输入不得改动磁盘文件」两条要害断言）。
@@ -178,6 +198,7 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 | `internal/authstore/preserve_test.go` | 见上。 |
 | `internal/ops/aliasfile.go` | 见第 8 条。 |
 | `internal/api/alias_test.go` | 见第 8 条。 |
+| `internal/api/models_test.go` | 见第 8 条（`realms` 透传回归）。 |
 | `web/src/pages/ModelAliases.tsx` | 见第 8 条。 |
 | `HOST-PATCHES.md` | 本文件。 |
 
