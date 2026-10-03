@@ -1,10 +1,12 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -198,7 +200,7 @@ func TestUIDPrefix(t *testing.T) {
 func TestLogChatRowFormat(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234)
+		logChatRow(1, 412*time.Millisecond, 27100*time.Millisecond, "deepseek-v4.1-flash", "stream", "00e26541abcdef", "sample", http.StatusOK, 1234)
 	})
 	for _, want := range []string{
 		"| #", "deepseek-v4.1-flash", "| stream |", "| 200 |", "sample(00e26541)", "TTFB=412ms", "tok=1234", "tok/s", "total=",
@@ -219,7 +221,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 	withChatLog(t)
 	for _, model := range []string{"cn:deepseek-v4.1-flash", "global:deepseek-v4.1-flash"} {
 		out := captureStdout(t, func() {
-			logChatRow(0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1)
+			logChatRow(1, 0, time.Second, model, "stream", "00e26541abcdef", "sample", http.StatusOK, 1)
 		})
 		if !strings.Contains(out, model) {
 			t.Errorf("model %q truncated to something else:\n%s", model, out)
@@ -231,7 +233,7 @@ func TestLogChatRowModelNotTruncated(t *testing.T) {
 func TestLogChatRowNicknameFallback(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1)
+		logChatRow(1, 0, time.Second, "glm-5.2", "sync", "00e26541abcdef", "", http.StatusOK, 1)
 	})
 	if !strings.Contains(out, "00e26541 ") && !strings.Contains(out, "00e26541|") {
 		t.Errorf("want bare uid8 label without nickname:\n%s", out)
@@ -244,7 +246,7 @@ func TestLogChatRowNicknameFallback(t *testing.T) {
 func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
+		logChatRow(1, 0, time.Second, "glm-5.2", "sync", "s1", "", http.StatusServiceUnavailable, -1)
 	})
 	for _, want := range []string{"TTFB=-", "tok=-", "| 503 |"} {
 		if !strings.Contains(out, want) {
@@ -257,23 +259,59 @@ func TestLogChatRowNoUsageShowsDash(t *testing.T) {
 	}
 }
 
-func TestLogChatRowSeqIncrements(t *testing.T) {
+// TestChatStatSeqAllocatedAtEntry 序号在请求进入（newChatStat）时分配且单调递增，
+// 而不是落日志时才分配——响应头 X-Request-Id 需要在响应体写出前就拿到它。
+func TestChatStatSeqAllocatedAtEntry(t *testing.T) {
+	a := newChatStat(time.Now(), []byte(`{"model":"m"}`), false)
+	b := newChatStat(time.Now(), []byte(`{"model":"m"}`), false)
+	if a.seq <= 0 || b.seq <= 0 {
+		t.Fatalf("seq not allocated at entry: %d, %d", a.seq, b.seq)
+	}
+	if b.seq <= a.seq {
+		t.Errorf("seq not monotonic: %d then %d", a.seq, b.seq)
+	}
+}
+
+// TestLogChatRowUsesGivenSeq 日志行的 #seq 取自传入值（与响应头同源），不再自行分配。
+func TestLogChatRowUsesGivenSeq(t *testing.T) {
 	withChatLog(t)
 	out := captureStdout(t, func() {
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
-		logChatRow(0, time.Second, "m", "sync", "u", "", 200, 1)
+		logChatRow(7, 0, time.Second, "m", "sync", "u", "", 200, 1)
 	})
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 lines, got %d:\n%s", len(lines), out)
+	if !strings.Contains(out, "| #007 |") {
+		t.Errorf("row must render passed-in seq as #007:\n%s", out)
 	}
-	first := strings.Fields(lines[0])[1]
-	second := strings.Fields(lines[1])[1]
-	if !strings.HasPrefix(first, "#") || !strings.HasPrefix(second, "#") {
-		t.Fatalf("seq columns missing: %q %q", first, second)
+}
+
+// TestChatCompletionsSetsRequestID 端到端守护 X-Request-Id 响应头：
+// 与同一次请求日志行的 #seq 是同一个号。
+func TestChatCompletionsSetsRequestID(t *testing.T) {
+	withChatLog(t)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	var rec *httptest.ResponseRecorder
+	out := captureStdout(t, func() {
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`))
+		h.ServeHTTP(rec, req)
+	})
+	got := rec.Header().Get("X-Request-Id")
+	if got == "" {
+		t.Fatalf("X-Request-Id header missing:\n%s", out)
 	}
-	if first == second {
-		t.Errorf("seq not incremented: %q == %q", first, second)
+	// 日志行里的 #NNN 去零后应与响应头一致。
+	n, err := strconv.Atoi(got)
+	if err != nil {
+		t.Fatalf("X-Request-Id not an integer: %q", got)
+	}
+	want := fmt.Sprintf("#%03d", n)
+	if !strings.Contains(out, "| "+want+" |") {
+		t.Errorf("log row seq does not match X-Request-Id %q (want %s):\n%s", got, want, out)
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 	"workbuddy2api/internal/logfmt"
 )
 
-// chatSeq 进程级请求序号。
+// chatSeq 进程级请求序号。在请求**进入** handler 时分配（见 newChatStat），而非落日志时：
+// 响应头 X-Request-Id 必须在响应体写出前就绪，且要与日志行的 #seq 是同一个号——
+// 客户端报障时可直接拿该号在网关日志里定位整条请求链路。
 var chatSeq atomic.Int64
 
 // chatLogEnabled 聊天表格日志总开关。生产恒 true；
@@ -23,6 +25,7 @@ var chatLogEnabled = true
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
+	seq    int64 // 进程级请求序号，进入 handler 时分配；同时作为响应头 X-Request-Id
 	start  time.Time
 	model  string
 	mode   string // "stream" | "sync"
@@ -46,12 +49,13 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
+// 序号在此分配（而非落日志时）：请求入口就需要它来设置 X-Request-Id 响应头。
 func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{seq: chatSeq.Add(1), start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志，并把本次请求记入 metrics 聚合（/v1/stats 数据源）。
@@ -64,7 +68,7 @@ func (s *chatStat) done() {
 	}
 	s.logged = true
 	total := time.Since(s.start)
-	logChatRow(s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
+	logChatRow(s.seq, s.ttfb, total, s.model, s.mode, s.uid, s.nick, s.status, s.toks)
 	recordChatMetric(s, total)
 }
 
@@ -237,15 +241,15 @@ const (
 // logChatRow 打印一行请求级表格日志（直接输出 stdout，无 log 时间戳前缀）。
 //
 // 参数：
+//   - seq：请求进入时分配的进程级序号（chatStat.seq），与响应头 X-Request-Id 同源；
 //   - model：模型名（含 realm 前缀），超 chatModelWidth 截断（模型名是 ASCII，字节截即列宽）；
 //   - uid/nick：完整 uid 与账号昵称，经 logfmt.Label 拼成 "昵称(uid8)" 展示——只有
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
-func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
+func logChatRow(seq int64, ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
 	if !chatLogEnabled {
 		return
 	}
-	seq := chatSeq.Add(1)
 	model = logfmt.Pad(logfmt.Truncate(model, chatModelWidth), chatModelWidth)
 	// 账号标签只补不截：超宽时宁可让该行变宽，也不丢昵称信息（昵称是排查的主线索）。
 	acct := logfmt.Pad(logfmt.Label(uid, nick), chatAcctWidth)
