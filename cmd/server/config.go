@@ -2,9 +2,12 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +255,44 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// WriteDefault 在 path 落一份推荐配置（首次运行自动生成，免去「手工复制 config.example.json
+// 再改 key」这一步）。api_key 用 crypto/rand 随机生成，**不留示例占位符**：
+// listen 默认绑 :7863（0.0.0.0），空 key 或 "test_key" 等于把网关连同全部账号裸暴露。
+// 已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。返回生成的 key 供启动日志透出。
+func WriteDefault(path string) (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("gen api_key: %w", err)
+	}
+	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
+	c := Default()
+	c.APIKey = key
+	if err := c.normalize(); err != nil {
+		// Default() 全合法，normalize 只为补齐 header/idle 超时的展示值；
+		// 真出错说明默认值被改坏了，落盘前就暴露，不要写一份带病配置。
+		return "", fmt.Errorf("normalize default config: %w", err)
+	}
+	out, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal config: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("mkdir config dir: %w", err)
+		}
+	}
+	// O_EXCL 原子拒绝覆盖：即使调用方漏判「不存在」，也绝不悄悄改写用户已有配置。
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("write config: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(out); err != nil {
+		return "", fmt.Errorf("write config: %w", err)
+	}
+	return key, nil
 }
 
 func applyEnv(c *Config) {

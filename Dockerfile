@@ -60,11 +60,12 @@ COPY scripts/task_runner.py /app/scripts/task_runner.py
 COPY scripts/school_open_day_2026.py /app/scripts/school_open_day_2026.py
 RUN sed -i 's/\r$//' /app/*.sh && chmod 755 /app/*.sh
 RUN sed -i 's/\r$//' /app/scripts/*.py && chmod 755 /app/scripts/*.py
-# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）。
-# config.json 含密钥不入库，CI 从仓库构建时用它兜底。
-COPY config.example.json /app/config.json
+# 镜像**不带**配置：首启由网关自动生成一份推荐配置（随机 api_key + 0600，见
+# cmd/server/config.go WriteDefault）。刻意不 COPY config.example.json 当默认——
+# 它带着 "test_key" 占位符，用户没挂载 config.json 时网关会静默跑在弱密钥上，
+# 而 listen 绑的是 0.0.0.0。示例文件仍留在仓库里供对照，只是不进镜像。
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
-ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]
+ENTRYPOINT ["/app/wb2api", "-config", "/app/config/config.json"]

@@ -202,13 +202,12 @@ flowchart LR
 ```bash
 git clone https://github.com/sofs2005/workbuddy2api.git
 cd workbuddy2api
-cp config.example.json config.json
 
 # 面板登录口令（必填 —— 未设置时 compose 会直接报错退出）
 echo 'WBGUI_PASSWORD=你的强口令' > .env
 ```
 
-编辑 `config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
+**配置无需手工准备**：首次启动时网关会自动生成 `config/config.json`（含随机 `api_key`，权限 0600），并把 key 打进启动日志——`docker compose logs wb2api | grep api_key` 即可取用。想自定义则直接编辑 `config/config.json`（参考仓库里的 `config.example.json`，注意其中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥）。
 
 > `.env` 里的 `WBGUI_PASSWORD` 是**内置面板**的登录口令，与 `api_key` 是两回事：
 > `api_key` 保护 `/v1` 接口（给下游客户端用），`WBGUI_PASSWORD` 保护管理面板（给你自己用）。
@@ -305,17 +304,16 @@ docker compose up -d --build
 
 #### Windows 原生运行（无需 Docker）
 
-Windows 10/11 自带的 PowerShell 与 `curl.exe` 即可管理后台进程。先准备配置并构建：
+Windows 10/11 自带的 PowerShell 与 `curl.exe` 即可管理后台进程。先构建：
 
 ```powershell
-Copy-Item config.example.json config.json
-# 编辑 config.json；建议把 listen 设为 127.0.0.1:7863，且务必设置 api_key
-
 go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 go build -trimpath -ldflags="-s -w" -o login.exe ./cmd/login
 go build -trimpath -ldflags="-s -w" -o signin_bin.exe ./cmd/signin
 go build -trimpath -ldflags="-s -w" -o credit.exe ./cmd/credit
 ```
+
+配置无需手工准备：首次运行 `wb2api.exe` 会自动生成 `config.json`（含随机 `api_key`），key 打印在启动日志里。想自定义就编辑它（或先 `Copy-Item config.example.json config.json` 再改）；建议把 `listen` 设为 `127.0.0.1:7863`，公网部署务必自行设置 `api_key`。
 
 使用仓库自带脚本在后台启停并查看状态：
 

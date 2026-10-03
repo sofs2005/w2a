@@ -40,8 +40,10 @@ services:
       #   chown -R 10001:10001 ./data
       # 面板的配置备份与登录凭据也落在这里（data/backups、data/gui-credentials.json）。
       - ./data:/app/data
-      # 网关配置：必须是**可写**挂载 —— 面板的「网关配置」页要在线编辑它。
-      # 单文件挂载下 rename 会被拒（device or resource busy），面板会自动回退为
-      # 原地写入，功能不受影响。若希望完全原子，改为挂整个目录：
-      #   - .:/app  （并按需调整 auths/data 的相对路径）
-      - ./config.json:/app/config.json
+      # 网关配置：挂**目录**而非单文件。
+      # 为什么不是 ./config.json:/app/config.json：容器首启时该文件可能还不存在，
+      # 单文件挂载会被 Docker 当目录自动创建（进而让网关把配置写成目录、启动失败）。
+      # 挂目录后 ENTRYPOINT 读的是 /app/config/config.json：该文件不存在时网关
+      # 自动生成一份随机 api_key 的配置（0600），落在宿主机 ./config/config.json，
+      # 即开即用。需要在线编辑就改这个文件（面板「网关配置」页写的也是它）。
+      - ./config:/app/config

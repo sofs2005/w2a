@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -47,15 +49,24 @@ func aliasFilePath(stateFile string) string {
 }
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "path to config json")
+	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
 
 	cfg, err := Load(*cfgPath)
 	if err != nil {
-		// 配置文件不存在时给一次机会用纯默认 + env
-		if os.IsNotExist(err) {
-			log.Printf("config %s not found, using defaults+env", *cfgPath)
-			cfg, err = Load("")
+		// 配置文件不存在时：先自动落一份推荐配置（含随机 api_key），再加载。
+		// 用 errors.Is 而非 os.IsNotExist——后者看不穿 Load 里 fmt.Errorf("%w") 的包装，
+		// 会让这个分支永不命中、直接 log.Fatalf 退出（旧实现的实际行为）。
+		if errors.Is(err, fs.ErrNotExist) {
+			if key, werr := WriteDefault(*cfgPath); werr == nil {
+				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
+				cfg, err = Load(*cfgPath)
+			}
+			if err != nil {
+				// 生成失败（目录只读/单文件挂载不可建等）：退回纯默认 + env，不阻塞启动。
+				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", *cfgPath, err)
+				cfg, err = Load("")
+			}
 		}
 		if err != nil {
 			log.Fatalf("load config: %v", err)

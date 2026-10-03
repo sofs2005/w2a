@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -777,5 +780,80 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !c.Schedule.GrowthEnabled {
 		t.Errorf("示例的 growth_enabled 应为 true: %+v", c.Schedule)
+	}
+}
+
+// TestLoadMissingConfigIsNotExist 守护 main.go 首启分支的前提：
+// Load 的「文件不存在」错误必须能被 errors.Is(err, fs.ErrNotExist) 识别。
+// 旧实现用 os.IsNotExist，看不穿 Load 里 fmt.Errorf("%w") 的包装，
+// 导致「纯默认 + env」兜底分支永不命中（配置缺失时直接 Fatal 退出）。
+func TestLoadMissingConfigIsNotExist(t *testing.T) {
+	_, err := Load(filepath.Join(t.TempDir(), "nope.json"))
+	if err == nil {
+		t.Fatal("want error for missing config")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing config must satisfy fs.ErrNotExist: %v", err)
+	}
+	if os.IsNotExist(err) {
+		t.Log("os.IsNotExist also works here (fine, just redundant)")
+	}
+}
+
+// TestWriteDefault 首启自动生成推荐配置：随机 api_key、0600、父目录自建、
+// 拒绝覆盖已有文件（安全默认优于示例占位符——listen 绑 0.0.0.0，空 key 裸暴露）。
+func TestWriteDefault(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "sub", "config.json") // 顺带验证父目录自动创建
+	key, err := WriteDefault(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// key 形如 sk-<24 字符随机串，两次生成不重复
+	if !strings.HasPrefix(key, "sk-") || len(key) < 20 {
+		t.Errorf("key=%q want sk-<random>", key)
+	}
+	if key2, _ := WriteDefault(filepath.Join(dir, "another.json")); key2 == key {
+		t.Errorf("two generated keys identical: %q", key)
+	}
+	// 落盘文件可被 Load 正常加载，推荐值齐备且 api_key 生效
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatalf("load generated config: %v", err)
+	}
+	if c.APIKey != key {
+		t.Errorf("api_key=%q want %q", c.APIKey, key)
+	}
+	if c.Listen != ":7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
+		t.Errorf("generated defaults off: %+v", c)
+	}
+	if len(c.Schedule.CheckinHours) == 0 || !c.Schedule.CheckinEnabled {
+		t.Errorf("generated schedule off: %+v", c.Schedule)
+	}
+	// 生成的 key 绝不能是示例占位符
+	if c.APIKey == "test_key" {
+		t.Error("generated config reused the example placeholder key")
+	}
+	// 已存在的文件不覆盖：二次写入同一路径必须报错
+	if _, err := WriteDefault(fp); err == nil {
+		t.Error("WriteDefault must refuse to overwrite existing file")
+	}
+}
+
+// TestWriteDefaultFileMode 生成文件必须是 0600（含密钥，不能让同机其他用户读）。
+func TestWriteDefaultFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows 不保留 Unix 权限位")
+	}
+	fp := filepath.Join(t.TempDir(), "config.json")
+	if _, err := WriteDefault(fp); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("config perm = %o, want 600", perm)
 	}
 }
