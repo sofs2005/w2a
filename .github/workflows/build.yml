@@ -1,17 +1,16 @@
-# build.yml 定时多架构打包发布 ghcr.io + amd64 离线 tar.gz artifact。
+# build.yml 多架构打包发布 ghcr.io + amd64 离线 tar.gz artifact。
 # 解决 issue #21「建议打包现成 docker 镜像」：NAS/离线环境拉不到 ghcr 时用 artifact。
 # 参考 /tmp/wb2api-build，适配本仓库（workflow 就住在仓库里，无需双 checkout 覆盖 Dockerfile）。
+#
+# 触发：打 v* tag 发布，或手动 workflow_dispatch 补跑。
+# 原每日 cron 定时发布已于 2026-10-03 移除（master 推送由 docker.yml 负责构建，
+# 定时只会重复发布同一份代码）；如需临时跑一次，用 workflow_dispatch。
 name: Build & Publish
 
 on:
-  schedule:
-    # 每天北京时间 12:23 = UTC 04:23。
-    # 不用整点 04:00：GitHub schedule 在整点高峰排队严重（实测连续三天迟到 5h+，
-    # 2026-09-17 的 04:00 排队被静默丢弃、整天未跑），错峰 23 分降低排队延迟与丢弃率。
-    - cron: '23 4 * * *'
   workflow_dispatch:
   push:
-    tags: ['v*'] # 打 tag 也触发发布
+    tags: ['v*'] # 打 tag 触发发布
 
 permissions:
   contents: read
