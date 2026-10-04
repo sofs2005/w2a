@@ -490,9 +490,10 @@ tbody tr:hover {
 }
 
 /* 统计页按域分行：一个模型 = 一组行，首两列（裸名 / 官方价）用 rowspan 跨整组。
-   跨行单元格必须顶对齐，否则内容会垂直居中、看起来跟它管的那些行错位。 */
+   跨行单元格要垂直居中，与组内各行齐平——显式再写一遍（与基础 td 同值），
+   免得哪天有人改了 td 的 vertical-align，这两列悄悄歪到第一行上。 */
 .stat-group {
-  vertical-align: top;
+  vertical-align: middle;
 }
 /* 组与组之间加一条实线：默认行分隔是 border-soft，太淡，分组看不出来。 */
 tbody tr.stat-group-start td {
