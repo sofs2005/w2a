@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -616,6 +617,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
 	defer st.done()
+
+	// 请求序号回传客户端：与日志行的 "#seq" 同源，客户端报障时直接拿这个号
+	// 在网关日志里定位整条链路（日志行本身格式不变，仍打印 #%03d）。
+	// 此处是响应写出前的最后位置——上方 routeErr/读 body 失败的 400 不产生日志行，
+	// 也就不分配序号、不带该头（保持「有日志行 ⇔ 有 X-Request-Id」一致）。
+	w.Header().Set("X-Request-Id", strconv.FormatInt(st.seq, 10))
 
 	tried := map[string]bool{}
 	var lastErr error
