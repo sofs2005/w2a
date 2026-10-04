@@ -96,9 +96,64 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 // AvailableUIDsForModelRealms 是 AvailableUIDsForModelRealm 的集合形态：realms 为
 // nil/空 = 全池（等价 realm==""），非空 = 仅集合内域的账号（别名单域条目的可用集）。
 // 供会话粘性路由按（对外名, 允许域集合）取可用账号（见 cmd/server/wiring.go）。
+//
+// 与选号（pick）同口径：候选按成本层硬过滤，只留**最优可用层**（见 bestTierLocked）。
+// 为什么必须有这一层过滤：本集合是会话粘性**新建/失效重绑时的候选池**，session 路由
+// 直接对它做哈希分配（session.go 的 双段策略 + hashIndex），**根本不经过 pick**。
+// 少了成本分层，新会话首次分配就会在「国内收费号 + 国际免费号」里哈希抽一个——实测
+// 4 个 CN 号对 3 个 global 号，约 57% 的新会话首轮直接落到收费号上（实案：国际号在该
+// 模型上 1480 样本实测免费，国内号仍承接 77% 流量）。首轮一旦落错并成功，Bind 会把
+// 会话钉住，后续轮次走 ResolveForModel 快路径（只查 healthy）再也回不去免费号。
+//
+// 与同文件 UrgentUIDsForModelRealms 的关系：那个走 preferredCandidatesLocked 的
+// **紧急层**优先（免费临期 > 全部临期 > 常规分配）；本函数管的是紧急层之外、常规
+// 分配用的候选池，两者都读 costTierOf，口径一致（此前只有紧急那条读了成本层，
+// 常规这条漏了——同一份文件里的不对称正是本 bug 的形态）。
 func (p *Pool) AvailableUIDsForModelRealms(model string, realms RealmSet) []string {
 	return p.availableUIDsLocked(realms,
-		func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) })
+		p.bestTierLocked(model, realms)) // 与 pick 同口径：只留域内最优可用层
+}
+
+// bestTierLocked 返回「域集合内、按 pick 候选口径可用的最优成本层」谓词。
+//
+// 两轮结构与 pick 严格对齐（pick.go：先遍历 cands 求 bestTier，再按 bestTier 过滤），
+// 且**求 bestTier 的候选集与最终结果集的域集合必须同一个**——pick 里 cands 是
+// 「域过滤后的健康号」，bestTier 就在这批上取最小值。这层域收窄不能省：
+// 钉域请求（cn:xxx / 单域别名）若拿全局最优层去比，免费的国际号会把 best 压到 0，
+// 而 CN 候选全是 tier 2 → 结果集为空、粘性失效（本该回落到 CN 收费层）。
+//
+// 候选口径：健康（healthyForModel）+ 未触积分保底 + 未在途占满（pick.go 的过滤三段）。
+//
+// 语义是「只留**最优**层」而非「只留免费层」：域内免费层整体不可用（冷却/6004/在途占满/
+// 触保底）时自动回落到域内收费层，与 pick 的 bestTier 硬过滤完全一致。
+// 传了 model 才启用（model=="" 表示无模型维度，不做分层，与 pick 的 reqModel=="" 退化一致）。
+//
+// 调用方必须已持有 p.mu（读 e.modelCost / p.modelRateOf，见 costTierOf 注释）。
+func (p *Pool) bestTierLocked(model string, realms RealmSet) func(e *entry, now time.Time) bool {
+	healthy := func(e *entry, now time.Time) bool { return e.healthyForModel(now, model) }
+	if model == "" {
+		return healthy // 无模型维度：不做分层，与 pick 的 reqModel=="" 退化一致
+	}
+	inScope := func(e *entry, now time.Time) bool {
+		return realms.Allows(e.a.Realm()) &&
+			healthy(e, now) && !p.floorBlockedForModel(e, model, now) && !p.inFlightFull(e)
+	}
+	return func(e *entry, now time.Time) bool {
+		if !inScope(e, now) {
+			return false
+		}
+		best := 2
+		for _, c := range p.byUID {
+			if !inScope(c, now) {
+				continue
+			}
+			if ti, _ := p.costTierOf(c, model, now); ti < best {
+				best = ti
+			}
+		}
+		ti, _ := p.costTierOf(e, model, now)
+		return ti == best
+	}
 }
 
 // UrgentUIDsForModelRealm 返回「紧急到期优先」的可用 UID 子集（issue:积分过期 的
