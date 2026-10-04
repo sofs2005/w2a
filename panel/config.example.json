@@ -9,7 +9,6 @@
   "alias_file": "",
   "backup_dir": "./data/backups",
   "credentials_file": "./data/credentials.json",
-  "pricing_file": "./data/pricing.json",
   "allowed_origins": [],
   "docker_container": "workbuddy2api",
   "dangerous_ops": false,

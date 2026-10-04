@@ -4,7 +4,8 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5–8 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5–12 条；第 4 条已撤销（原前提失效，见该节）。
+（第 9–11 条与第 12 条均为本 fork 独有的新增能力/删除，同属「必须保留」。）
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
@@ -287,7 +288,8 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 网关 `metricsStore` 用**请求体里的模型名原文**做键（`global:x` 与裸名 `x` 各占一行），
 统一调度后同一个模型在 CN 与 global 账号之间调度，两域的单价、限免、上下文都不同，
 却混进同一个累加器——只能看到一个加权平均，既看不出哪域花了多少，也解释不了扣费
-为什么变。用户要求：官方价放裸名后面，其余列拆成国内/国际两行。
+为什么变。用户要求：其余列拆成国内/国际两行（当时还要求「官方价放裸名后面」，
+该列已在第 12 条整块移除）。
 
 **改动**：
 
@@ -308,15 +310,14 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 3. `internal/gateway/client.go`（**上游文件，需重放**）：`ModelStat` 增 `Bare` /
    `Realms`，并新增 `RealmStat` 结构体。同第 8～10 条的坑——白名单结构体，
    漏声明即**静默丢弃**整段（`realms`、`credits` 在本项目已各出过一次）。
-4. `internal/api/server.go`：官方价换算的键从 `m.Model` 改为 `statPriceKey(m)`
-   （**裸名**优先，老网关不下发 `bare` 时回退 `model`）。单价是厂商定价、与域无关，
-   用带前缀的名查表会查不到——`costs` / `priced` / `unpriced` 三处同步。
+4. ~~`internal/api/server.go`：官方价换算的键从 `m.Model` 改为 `statPriceKey(m)`~~
+   **已随第 12 条整块移除**（`statPriceKey` 与官方价换算一同删除）。
 5. `web/src/types.ts` / `web/src/pages/StatsPage.tsx`：`ModelStat` 增 `bare` / `realms`，
    新增 `RealmStat`。表格改成「每行 = 一个裸名 + 其下按域分行的明细」：抽出新组件
    `StatRow`，**父行不再渲染任何数值列**（父行数值无法归属到任何域，画出来正是这次
-   要消除的混淆），只承载裸名与官方价；域徽章复用 `realm.ts` 的 `realmLabel`
+   要消除的混淆），只承载裸名（第 12 条后又去掉了官方价单元格）；域徽章复用 `realm.ts` 的 `realmLabel`
    （国内版/国际版），空域显示「未路由」。排序仍按父条目（裸名合计）——按单域排序会
-   让模型位置随"哪个域更忙"跳变。价格编辑的模型名与 `unpriced` 建议列表统一用裸名。
+   让模型位置随"哪个域更忙"跳变。
    降级：`realms` **整段缺席**（老网关/手写载荷）时退化为一行「未标注域」，不按前缀猜域。
    **注意单域模型也会带一条 `realms`**（数组长度 1）：它确实知道自己在哪一域跑的，
    标成"未知域"是信息倒退——所以单域模型显示「国内版」/「国际版」徽章，不是「未标注域」。
@@ -334,6 +335,53 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 重写（`<tbody>` 从内联 map 改为 `<StatRow>` 组件），上游若重写该表格需整体重放本条的
 语义；`types.ts` 增字段。网关侧 `metrics.go` 是**本 fork 独有**的聚合实现（上游 `/v1/stats`
 无时间维度），`handler.go` 只加一行赋值。
+
+## 12. 移除「官方 API 价格换算」（统计页 + 面板后端）
+
+**动机**：该功能是上游面板自带的（`internal/pricing` 包 + 统计页的官方价列 / 「编辑价格」
+弹窗），把 token 用量按厂商官网单价折算成「走官方 API 要花多少钱」。但它在本部署里
+既不可用也无用：
+
+- 内置价格只有 DeepSeek（`pricing.Default()`），其余厂商定价页是 JS 渲染抓不到，
+  上游故意留空——所以表格里绝大多数模型恒显示「未配置」。
+- 「编辑价格」按钮的可用性绑在面板配置 `pricing_file` 上（`editable = cfg.PricingFile != ""`），
+  而本 fork 是**单进程部署**：面板配置只认 `WBGUI_*` 环境变量（见 `host/host.go` 的
+  `panelconfig.Load("")`），`pricing_file` 从未被设置 → `editable` 恒 false → 按钮恒灰。
+  页面上「点『编辑价格』填写后即可看到」的提示因此永远无法兑现。
+- 上游的 `host.go` 对 `BackupDir` / `CredentialsFile` 都做了「为空则推导到 DataDir」的兜底，
+  唯独漏了 `PricingFile`——这正是按钮恒灰的根因。
+
+用户判定该换算本身无用，要求整块去掉。
+
+**改动**（相对上游是**删除**，不是改写）：
+
+1. 删除整个 `internal/pricing/` 包（含 `pricing_test.go`）。
+2. `internal/api/server.go`：删 `PUT /api/pricing` 与 `DELETE /api/pricing/{model}` 两条
+   路由及 `handlePricingUpdate` / `handlePricingDelete`；`handleStats` 只回 `{"stats": st}`
+   （不再算 `costs` / `total` / `priced` / `unpriced` / `pricing`）；删 `statPriceKey` 与
+   `pricing` import。
+3. `internal/ops/ops.go`：删 `Service.pricing` 字段、`New` 里的 `pricing.New(cfg.PricingFile)`、
+   `Service.Pricing()` 方法与 import。
+4. `internal/config/config.go`：删 `PricingFile` 字段与 `WBGUI_PRICING_FILE` 环境变量；
+   `config.example.json` 删 `pricing_file` 键。
+5. `web/src/api.ts`：删 `savePrice` / `deletePrice`，以及 `stats()` 的 `mode` 参数。
+6. `web/src/types.ts`：删 `ModelPrice` / `ModelCost` / `PricingTable`；`StatsResponse`
+   只剩 `stats`。
+7. `web/src/pages/StatsPage.tsx`：删 `PriceCell` / `PriceEditor` 组件、`editingModel` /
+   `timeMode` state、「官方 API 价格换算」整张卡片、汇总卡片的「官方 API 应付」项、
+   表格的「官方价」列、以及「指标说明」里的「官方价」/「官方应付」两条。**保留**「模型」列
+   （裸名 + 合计请求数 + 最近请求时间）——它是分域行的组头，与价格无关。
+
+**不受影响**：账号页的 `model_costs`（`ModelCostStatus`）是**网关侧实测账本**
+（按 `usage.credit` 折算的每千 token 实际单价，见第 9 条），与官方价无关，保留不动。
+
+**回归测试**：`pricing_test.go` 随包删除；两个 module 的 `go test ./...` 与前端
+`tsc --noEmit` 全绿。
+
+**上游冲突面**：本条与上游对 `StatsPage.tsx` / `api.ts` / `types.ts` / `server.go` /
+`ops.go` / `config.go` 的任何改动冲突（尤其上游若增强官方价功能）。将来若想把该功能
+收回来，除恢复 pricing 包与上述后端接线外，**必须**在 `host/host.go` 里补 `PricingFile`
+的默认路径（`filepath.Join(dataDir, "pricing.json")`），否则按钮照旧恒灰。
 
 ## 纯新增、不会冲突的文件
 

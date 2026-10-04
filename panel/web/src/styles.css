@@ -489,9 +489,9 @@ tbody tr:hover {
   font-size: 12px;
 }
 
-/* 统计页按域分行：一个模型 = 一组行，首两列（裸名 / 官方价）用 rowspan 跨整组。
+/* 统计页按域分行：一个模型 = 一组行，首列（裸名）用 rowspan 跨整组。
    跨行单元格要垂直居中，与组内各行齐平——显式再写一遍（与基础 td 同值），
-   免得哪天有人改了 td 的 vertical-align，这两列悄悄歪到第一行上。 */
+   免得哪天有人改了 td 的 vertical-align，这一列悄悄歪到第一行上。 */
 .stat-group {
   vertical-align: middle;
 }

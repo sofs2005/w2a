@@ -16,7 +16,6 @@ import (
 	"workbuddy2api-gui/internal/config"
 	"workbuddy2api-gui/internal/fsutil"
 	"workbuddy2api-gui/internal/gateway"
-	"workbuddy2api-gui/internal/pricing"
 	"workbuddy2api-gui/internal/upstream"
 )
 
@@ -146,8 +145,6 @@ type Service struct {
 	up     *upstream.Client
 	tasks  *TaskManager
 	logins *LoginManager
-	// pricing 官方价格表（把 token 用量换算成"走官方 API 要花多少钱"）。
-	pricing *pricing.Table
 
 	mu      sync.RWMutex
 	credits map[string]creditCache
@@ -240,15 +237,11 @@ func New(cfg *config.Config, store *authstore.Store, gw *gateway.Client, up *ups
 		up:            up,
 		tasks:         NewTaskManager(),
 		logins:        NewLoginManager(up),
-		pricing:       pricing.New(cfg.PricingFile),
 		credits:       map[string]creditCache{},
 		promos:        map[string]promoCache{},
 		creditLoading: map[string]bool{},
 	}
 }
-
-// Pricing 返回官方价格表。
-func (s *Service) Pricing() *pricing.Table { return s.pricing }
 
 // Config 返回当前配置。
 func (s *Service) Config() *config.Config { return s.cfg }

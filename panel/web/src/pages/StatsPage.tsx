@@ -7,8 +7,8 @@
 // 「时间趋势」卡片与其时间维度 state 目前整体注释掉（详见该处说明与 HOST-PATCHES.md 第 4 条）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { ModelCost, ModelStat, ModelPrice, RealmStat, SessionInfo, StatsResponse } from '../types'
-import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Modal, Spinner } from '../ui'
+import type { ModelStat, RealmStat, SessionInfo, StatsResponse } from '../types'
+import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Spinner } from '../ui'
 import { realmLabel } from '../realm'
 // 时间趋势启用时需一并恢复（见下方注释块）：
 // import TrendChart, { type TrendMetric } from './TrendChart'
@@ -64,19 +64,7 @@ function statRealmBadge(realm: RealmStat['realm']): string {
  * 只用于排序与"哪些模型在跑"的判断。把父行数值也画出来会让每行出现一组
  * 无法归属到任何域的数字，正是这次改造要消除的混淆。
  */
-function StatRow({
-  model,
-  cost,
-  editable,
-  readOnly,
-  onEditPrice,
-}: {
-  model: ModelStat
-  cost?: ModelCost
-  editable: boolean
-  readOnly: boolean
-  onEditPrice: (m: string) => void
-}) {
+function StatRow({ model }: { model: ModelStat }) {
   const bare = model.bare || model.model
   // 分域明细恒存在（网关每个条目至少一个域子条目），缺席只发生在老网关/手写载荷：
   // 那时退化为一行「未标注域」——宁可少一行，也不要按前缀猜测把数据塞进 cn 或 global，
@@ -90,8 +78,7 @@ function StatRow({
     <>
       {rows.map(({ v, realm }, i) => {
         const first = i === 0
-        // 首行承载跨整组的两个单元格（裸名 + 官方价），行数 n → rowSpan=n。
-        // 这样"官方价"就落在裸名右边，而它只有一个值（单价与域无关）。
+        // 首行承载跨整组的单元格（裸名），行数 n → rowSpan=n。
         // 组的最后一行标 stat-group-end：底边由它画，中间行不画（见 styles.css）。
         const last = i === rows.length - 1
         const groupCls = [
@@ -103,24 +90,19 @@ function StatRow({
         return (
           <tr key={`${model.model}:${realm ?? '__self'}`} className={groupCls}>
             {first && (
-              <>
-                <td rowSpan={rows.length} className="stat-group">
-                  <div className="mono" style={{ fontSize: 12.5 }}>
-                    {bare}
-                  </div>
+              <td rowSpan={rows.length} className="stat-group">
+                <div className="mono" style={{ fontSize: 12.5 }}>
+                  {bare}
+                </div>
+                <div className="text-faint" style={{ fontSize: 11 }}>
+                  合计 {fmtNum(model.requests)} 次
+                </div>
+                {model.last_seen && (
                   <div className="text-faint" style={{ fontSize: 11 }}>
-                    合计 {fmtNum(model.requests)} 次
+                    {fmtISO(model.last_seen)}
                   </div>
-                  {model.last_seen && (
-                    <div className="text-faint" style={{ fontSize: 11 }}>
-                      {fmtISO(model.last_seen)}
-                    </div>
-                  )}
-                </td>
-                <td rowSpan={rows.length} className="num stat-group">
-                  <PriceCell cost={cost} editable={editable} readOnly={readOnly} onEdit={() => onEditPrice(bare)} />
-                </td>
-              </>
+                )}
+              </td>
             )}
             <td>
               <span className={`badge ${realm === null ? 'badge-dim' : statRealmBadge(realm)}`}>
@@ -176,47 +158,6 @@ function StatRow({
   )
 }
 
-/** PriceCell 官方价单元格：整个裸名一个值（单价与域无关），故跨组行渲染。 */
-function PriceCell({
-  cost,
-  editable,
-  readOnly,
-  onEdit,
-}: {
-  cost?: ModelCost
-  editable: boolean
-  readOnly: boolean
-  onEdit: () => void
-}) {
-  if (!cost?.priced) {
-    return (
-      <button
-        className="btn btn-sm btn-ghost"
-        onClick={onEdit}
-        disabled={!editable || readOnly}
-        title="未配置官方单价，点击填写"
-        style={{ padding: '0 6px', fontSize: 11 }}
-      >
-        未配置 ＋
-      </button>
-    )
-  }
-  return (
-    <>
-      <span className="text-warn">¥{cost.total.toFixed(4)}</span>
-      <div
-        className="text-faint"
-        style={{ fontSize: 11 }}
-        title={`命中 ¥${cost.cached_input_cost.toFixed(4)} / 未命中 ¥${cost.miss_input_cost.toFixed(4)} / 输出 ¥${cost.output_cost.toFixed(4)}`}
-      >
-        {cost.output_cost > 0 || cost.miss_input_cost > 0 || cost.cached_input_cost > 0
-          ? `出 ¥${cost.output_cost.toFixed(3)}`
-          : '—'}
-      </div>
-    </>
-  )
-}
-
 export default function StatsPage({ session }: { session: SessionInfo }) {
   const [resp, setResp] = useState<StatsResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -225,10 +166,6 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [sortKey, setSortKey] = useState<keyof ModelStat>('requests')
   const [resetting, setResetting] = useState(false)
-  // timeMode 影响官方价换算：DeepSeek 空闲时段是高峰价的一半。
-  const [timeMode, setTimeMode] = useState<'peak' | 'offpeak'>('peak')
-  // 价格编辑弹窗：null = 关闭；否则为正在编辑的模型名
-  const [editingModel, setEditingModel] = useState<string | null>(null)
 
   // ── 时间维度：网关尚未实现，暂时整体注释 ──
   // 这组 state 与下方「时间趋势」卡片是一体的。保留注释而非删除，是为了网关补齐
@@ -249,23 +186,20 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
 
   const stats = resp?.stats ?? null
 
-  const load = useCallback(
-    async (silent = false) => {
-      if (!silent) setLoading(true)
-      try {
-        // 时间维度参数已随「时间趋势」一并停发（网关不解析它们）。
-        // 恢复趋势卡片时，把 range/from/to/interval/model 加回来。
-        const s = await api.stats({ mode: timeMode })
-        setResp(s)
-        setError(null)
-      } catch (err) {
-        setError(err instanceof ApiError ? err.message : '加载统计失败')
-      } finally {
-        setLoading(false)
-      }
-    },
-    [timeMode],
-  )
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      // 时间维度参数已随「时间趋势」一并停发（网关不解析它们）。
+      // 恢复趋势卡片时，把 range/from/to/interval/model 加回来。
+      const s = await api.stats()
+      setResp(s)
+      setError(null)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '加载统计失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     void load()
@@ -402,99 +336,6 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             tone={t.cache_hit_rate >= 0.5 ? 'ok' : undefined}
           />
           <Stat label="累计扣费（积分）" value={fmtCredit(t.credit)} sub={`平均每请求 ${fmtCredit(t.credit_per_req)} 积分`} />
-          {resp?.total?.priced && (
-            <Stat
-              label={`官方 API 应付（${timeMode === 'peak' ? '高峰' : '空闲'}价）`}
-              value={`¥${resp.total.total.toFixed(4)}`}
-              sub={
-                resp.unpriced && resp.unpriced.length > 0
-                  ? `${resp.unpriced.length} 个模型未配价，未计入`
-                  : '按各模型官方单价分别换算后求和'
-              }
-              tone="warn"
-            />
-          )}
-        </div>
-      )}
-
-      {/* 官方价换算说明 */}
-      {resp && (
-        <div className="card">
-          <div className="card-head">
-            <h2>官方 API 价格换算</h2>
-            <div className="page-actions">
-              <span className="hint">计价时段</span>
-              <select
-                value={timeMode}
-                onChange={(e) => setTimeMode(e.target.value as 'peak' | 'offpeak')}
-                style={{ width: 160 }}
-                title="DeepSeek 空闲时段价为高峰价的一半（高峰：工作日 9-12、14-18 点）"
-              >
-                <option value="peak">高峰时段价</option>
-                <option value="offpeak">空闲时段价（半价）</option>
-              </select>
-              <button
-                className="btn btn-sm"
-                onClick={() => setEditingModel('__new__')}
-                disabled={!resp.pricing.editable || session.read_only}
-                title={
-                  !resp.pricing.editable
-                    ? '服务端未配置 pricing_file，无法保存价格'
-                    : session.read_only
-                      ? '只读模式'
-                      : '添加或修改模型单价'
-                }
-              >
-                ✏️ 编辑价格
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-stats" style={{ marginBottom: 14 }}>
-            <div className="stat">
-              <div className="stat-label">官方应付（合计）</div>
-              <div className="stat-value small text-warn">¥{resp.total.total.toFixed(4)}</div>
-              <div className="stat-sub">命中 ¥{resp.total.cached_input_cost.toFixed(4)} · 未命中 ¥{resp.total.miss_input_cost.toFixed(4)} · 输出 ¥{resp.total.output_cost.toFixed(4)}</div>
-            </div>
-            <div className="stat">
-              <div className="stat-label">网关累计计费</div>
-              <div className="stat-value small">{fmtCredit(t?.credit ?? 0)}</div>
-              <div className="stat-sub">上游返回的 credit（单位：账号积分，非元）</div>
-            </div>
-          </div>
-
-          <Alert kind="info">
-            两个数字<strong>单位不同，不做相减</strong>：官方应付是<strong>元</strong>（按厂商定价页），
-            网关计费是账号的<strong>积分</strong>（你的套餐是 500/1500/100 积分制）。
-            两者量纲不同，相减得出的"差额"没有意义，因此这里只并列展示。
-            想知道积分与人民币的兑换比例，请以官方充值页为准。
-          </Alert>
-
-          {resp.unpriced && resp.unpriced.length > 0 && (
-            <Alert kind="info">
-              以下模型<strong>未配置官方单价</strong>，未计入换算（点「编辑价格」填写后即可看到）：
-              <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {resp.unpriced.map((m) => (
-                  <button
-                    key={m}
-                    className="btn btn-sm"
-                    onClick={() => setEditingModel(m)}
-                    disabled={!resp.pricing.editable || session.read_only}
-                    title="点击填写该模型的单价"
-                  >
-                    {m} <span className="text-faint">＋</span>
-                  </button>
-                ))}
-              </div>
-            </Alert>
-          )}
-
-          {resp.pricing.source && (
-            <div className="desc" style={{ marginTop: 10 }}>
-              内置价格来源：<a href={resp.pricing.source} target="_blank" rel="noopener noreferrer">{resp.pricing.source}</a>
-              {resp.pricing.updated_at && <span className="text-faint">（抓取于 {resp.pricing.updated_at}，官方调价后请点「编辑价格」更新）</span>}
-            </div>
-          )}
         </div>
       )}
 
@@ -661,7 +502,6 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
               <thead>
                 <tr>
                   <th>模型</th>
-                  <th className="num">官方价</th>
                   <th>域</th>
                   <th className="num">请求</th>
                   <th className="num">首字</th>
@@ -674,14 +514,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
               </thead>
               <tbody>
                 {models.map((m) => (
-                  <StatRow
-                    key={m.model}
-                    model={m}
-                    cost={resp?.costs?.[m.bare || m.model]}
-                    editable={!!resp?.pricing.editable}
-                    readOnly={session.read_only}
-                    onEditPrice={setEditingModel}
-                  />
+                  <StatRow key={m.model} model={m} />
                 ))}
               </tbody>
             </table>
@@ -702,11 +535,6 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             前缀——前缀只说"允许打哪"，实际落在哪由选号决定）。
             「未路由」是选号失败（503）或模型名解析不出的请求，网关不猜归属。
           </dd>
-          <dt>官方价</dt>
-          <dd>
-            整个<strong>裸名</strong>的换算值（单价是厂商定价，与域无关），故只在首行显示，
-            不在各域行重复。
-          </dd>
           <dt>首字延迟</dt>
           <dd>请求发出到收到第一个 token 的时间（TTFB）。只对流式请求有意义，非流式显示为 —。</dd>
           <dt>吞吐</dt>
@@ -726,12 +554,6 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             显示<strong>裸名</strong>（不含 cn:/global: 前缀）与整个模型的合计请求数、
             最近一次请求时间。这些是跨域的量，故用跨行的单元格承载，不跟着每个域重复。
           </dd>
-          <dt>官方应付</dt>
-          <dd>
-            按厂商官网定价（元/百万 token）把本模型的 token 用量折算成"如果直接走官方 API 要花多少钱"。
-            三档分开计价：缓存命中输入、未命中输入、输出 —— 因为命中价通常远低于未命中
-            （DeepSeek 相差 50 倍），混算会严重高估。单价可在「编辑价格」里按官方定价页填写。
-          </dd>
           <dt>统计范围</dt>
           <dd>
             网关是所有流量的必经点，因此这里<strong>包含其他客户端</strong>（脚本、第三方工具）的调用，
@@ -741,171 +563,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <dd>{stats ? fmtISO(stats.since) : '—'}</dd>
         </dl>
       </div>
-
-      {editingModel && resp && (
-        <PriceEditor
-          model={editingModel === '__new__' ? '' : editingModel}
-          existing={resp.pricing.models?.[editingModel] ?? undefined}
-          suggestions={
-            // 待填模型优先给"统计里有用量但未配价"的，其次给网关模型列表里的。
-            // 用裸名：官方价按裸名索引（单价与域无关），填 "cn:xxx" 会存成永远查不到的键。
-            editingModel === '__new__'
-              ? [...new Set([...(resp.unpriced ?? []), ...(resp.stats.models ?? []).map((m) => m.bare || m.model)])]
-              : []
-          }
-          onClose={() => setEditingModel(null)}
-          onSaved={async (msg) => {
-            setEditingModel(null)
-            setNotice(msg)
-            await load(true)
-          }}
-        />
-      )}
     </>
-  )
-}
-
-/** PriceEditor 编辑单个模型的官方单价（元/百万 token）。 */
-function PriceEditor({
-  model: initialModel,
-  existing,
-  suggestions,
-  onClose,
-  onSaved,
-}: {
-  model: string
-  existing?: ModelPrice
-  suggestions: string[]
-  onClose: () => void
-  onSaved: (msg: string) => Promise<void>
-}) {
-  const [model, setModel] = useState(initialModel)
-  const [cached, setCached] = useState(existing ? String(existing.cached_input) : '')
-  const [miss, setMiss] = useState(existing ? String(existing.miss_input) : '')
-  const [output, setOutput] = useState(existing ? String(existing.output) : '')
-  const [offPeak, setOffPeak] = useState(existing?.off_peak_ratio ? String(existing.off_peak_ratio) : '')
-  const [note, setNote] = useState(existing?.note ?? '')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const submit = async () => {
-    setError(null)
-    if (!model.trim()) {
-      setError('模型名不能为空')
-      return
-    }
-    const num = (s: string) => (s.trim() === '' ? 0 : Number(s))
-    const c = num(cached)
-    const mi = num(miss)
-    const o = num(output)
-    if ([c, mi, o].some((v) => Number.isNaN(v) || v < 0)) {
-      setError('单价必须是非负数字')
-      return
-    }
-    if (c === 0 && mi === 0 && o === 0) {
-      setError('至少填写一个非零单价（全 0 会被视为未配置）')
-      return
-    }
-    setBusy(true)
-    try {
-      const r = await api.savePrice({
-        model: model.trim(),
-        cached_input: c,
-        miss_input: mi,
-        output: o,
-        off_peak_ratio: num(offPeak),
-        note: note.trim(),
-      })
-      await onSaved(r.message || '价格已保存')
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : '保存失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Modal
-      title={initialModel ? `编辑价格 · ${initialModel}` : '添加模型价格'}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose} disabled={busy}>
-            取消
-          </button>
-          <button className="btn btn-primary" onClick={() => void submit()} disabled={busy}>
-            {busy ? <Spinner /> : null}
-            保存
-          </button>
-        </>
-      }
-    >
-      {error && <Alert kind="error">{error}</Alert>}
-      <div className="field">
-        <label>模型名（填网关里的模型 ID）</label>
-        <input
-          type="text"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="例如 glm-5.3"
-          list="price-model-suggestions"
-          disabled={!!initialModel}
-        />
-        {suggestions.length > 0 && (
-          <>
-            <datalist id="price-model-suggestions">
-              {suggestions.map((s) => (
-                <option key={s} value={s} />
-              ))}
-            </datalist>
-            <div className="desc">
-              待配置：
-              {suggestions.slice(0, 8).map((s) => (
-                <button
-                  key={s}
-                  className="btn btn-sm btn-ghost"
-                  style={{ padding: '0 5px', fontSize: 11 }}
-                  onClick={() => setModel(s)}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-
-      <div className="row">
-        <div className="field" style={{ flex: 1 }}>
-          <label>缓存命中输入（元/百万）</label>
-          <input type="text" value={cached} onChange={(e) => setCached(e.target.value)} placeholder="0.04" />
-        </div>
-        <div className="field" style={{ flex: 1 }}>
-          <label>缓存未命中输入（元/百万）</label>
-          <input type="text" value={miss} onChange={(e) => setMiss(e.target.value)} placeholder="2" />
-        </div>
-        <div className="field" style={{ flex: 1 }}>
-          <label>输出（元/百万）</label>
-          <input type="text" value={output} onChange={(e) => setOutput(e.target.value)} placeholder="8" />
-        </div>
-      </div>
-
-      <div className="field">
-        <label>空闲时段价倍数（可选）</label>
-        <input type="text" value={offPeak} onChange={(e) => setOffPeak(e.target.value)} placeholder="留空 = 不区分时段；DeepSeek 填 0.5" />
-        <div className="desc">用于"空闲时段价"换算。填 0.5 表示空闲价是高峰价的一半。</div>
-      </div>
-
-      <div className="field" style={{ marginBottom: 0 }}>
-        <label>备注（可选）</label>
-        <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="价格来源 / 口径说明" />
-      </div>
-
-      <div className="desc" style={{ marginTop: 12 }}>
-        单价单位是<strong>元 / 百万 token</strong>，请以厂商官网定价页为准。
-        缓存命中价通常远低于未命中（DeepSeek 相差 50 倍），分开填写才能算准。
-      </div>
-    </Modal>
   )
 }
 

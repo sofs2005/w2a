@@ -15,7 +15,6 @@ import (
 	"workbuddy2api-gui/internal/config"
 	"workbuddy2api-gui/internal/gateway"
 	"workbuddy2api-gui/internal/ops"
-	"workbuddy2api-gui/internal/pricing"
 	"workbuddy2api-gui/internal/upstream"
 )
 
@@ -81,9 +80,6 @@ func (s *Server) Handler() http.Handler {
 	// ── 请求统计（按模型聚合，数据源为网关 /v1/stats）─────
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("POST /api/stats/reset", s.handleStatsReset)
-	// 官方价格表编辑（统计页换算用）
-	mux.HandleFunc("PUT /api/pricing", s.handlePricingUpdate)
-	mux.HandleFunc("DELETE /api/pricing/{model}", s.handlePricingDelete)
 	mux.HandleFunc("POST /api/chat", s.handleChat)
 	mux.HandleFunc("POST /api/chat/stream", s.handleChatStream)
 
@@ -375,19 +371,7 @@ func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
 // 模型 / 聊天
 // ---------------------------------------------------------------------------
 
-// statPriceKey 统计行查官方价用的键：**裸名**优先（单价是厂商定价，与 cn/global 无关），
-// 老网关不下发 bare 时退回 model 原文。
-//
-// 网关自统一调度改造后 Model 本身已是裸名，两条路等价；保留回退是为了面板与老版本
-// 网关（未带 bare 字段）混跑时不至于整张表查不到价。
-func statPriceKey(m gateway.ModelStat) string {
-	if m.Bare != "" {
-		return m.Bare
-	}
-	return m.Model
-}
-
-// handleStats 返回网关的按模型统计 + 官方价换算。
+// handleStats 返回网关的按模型统计。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	// 时间维度参数透传给网关（range/from/to/interval/model）。
 	q := r.URL.Query()
@@ -402,67 +386,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// 官方价换算：把每个模型的 token 用量折成"走官方 API 要花多少钱"。
-	// mode 由前端传（peak/offpeak）—— DeepSeek 空闲价是高峰价的一半。
-	mode := pricing.NormalizeTimeMode(r.URL.Query().Get("mode"))
-	table := s.svc.Pricing()
-
-	costs := map[string]pricing.Cost{}
-	for _, m := range st.Models {
-		costs[statPriceKey(m)] = table.Compute(statPriceKey(m), pricing.Usage{
-			PromptTokens:     m.PromptTokens,
-			CacheHitTokens:   m.CacheHitTokens,
-			CacheMissTokens:  m.CacheMissTokens,
-			CompletionTokens: m.CompletionTokens,
-		}, mode)
-	}
-
-	// 汇总必须"各模型分别计价后相加"——不同模型单价不同，
-	// 用汇总 token 直接乘单一价格是错的。
-	var (
-		officialTotal  float64
-		cachedCost     float64
-		missCost       float64
-		outputCost     float64
-		pricedModels   []string
-		unpricedModels []string
-	)
-	for _, m := range st.Models {
-		c := costs[statPriceKey(m)]
-		if !c.Priced {
-			unpricedModels = append(unpricedModels, statPriceKey(m))
-			continue
-		}
-		pricedModels = append(pricedModels, statPriceKey(m))
-		officialTotal += c.Total
-		cachedCost += c.CachedInputCost
-		missCost += c.MissInputCost
-		outputCost += c.OutputCost
-	}
-
-	total := pricing.Cost{
-		Model:           "(all)",
-		Priced:          true,
-		CachedInputCost: cachedCost,
-		MissInputCost:   missCost,
-		OutputCost:      outputCost,
-		Total:           officialTotal,
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"stats":    st,
-		"mode":     mode,
-		"costs":    costs,
-		"total":    total,
-		"priced":   pricedModels,
-		"unpriced": unpricedModels,
-		"pricing": map[string]any{
-			"models":     table.ModelsCopy(),
-			"source":     table.Source,
-			"updated_at": table.UpdatedAt,
-			"editable":   s.cfg.PricingFile != "",
-		},
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"stats": st})
 }
 
 // handleStatsReset 重置网关统计（写操作，受只读模式约束）。
@@ -476,69 +400,6 @@ func (s *Server) handleStatsReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "网关统计已重置"})
-}
-
-// handlePricingUpdate 更新/新增单个模型的官方单价。
-//
-// 为什么让用户手填而不是预置全部厂商：智谱/Kimi/混元/MiniMax 的定价页是 JS 动态
-// 渲染，抓不到权威数字。编造价格会让"省了多少钱"看起来精确但实际是错的，比不做更糟。
-func (s *Server) handlePricingUpdate(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.EnsureWritable(); err != nil {
-		writeError(w, err)
-		return
-	}
-	if s.cfg.PricingFile == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": "服务端未配置价格表路径（pricing_file），无法保存",
-			"code":  "not_supported",
-		})
-		return
-	}
-	var req struct {
-		Model        string  `json:"model"`
-		CachedInput  float64 `json:"cached_input"`
-		MissInput    float64 `json:"miss_input"`
-		Output       float64 `json:"output"`
-		OffPeakRatio float64 `json:"off_peak_ratio"`
-		Note         string  `json:"note"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	if strings.TrimSpace(req.Model) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "模型名不能为空"})
-		return
-	}
-	if req.CachedInput < 0 || req.MissInput < 0 || req.Output < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "单价不能为负数"})
-		return
-	}
-	s.svc.Pricing().Set(req.Model, pricing.ModelPrice{
-		CachedInput:  req.CachedInput,
-		MissInput:    req.MissInput,
-		Output:       req.Output,
-		OffPeakRatio: req.OffPeakRatio,
-		Note:         req.Note,
-	})
-	if err := s.svc.Pricing().Save(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存价格表失败：" + err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "价格已保存"})
-}
-
-// handlePricingDelete 删除单个模型的价格（恢复未配置状态）。
-func (s *Server) handlePricingDelete(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.EnsureWritable(); err != nil {
-		writeError(w, err)
-		return
-	}
-	s.svc.Pricing().Delete(r.PathValue("model"))
-	if err := s.svc.Pricing().Save(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "保存价格表失败：" + err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已移除该模型价格"})
 }
 
 // modelView 模型条目 + 按域挂上的促销。内嵌 gateway.Model 让原有字段平铺，

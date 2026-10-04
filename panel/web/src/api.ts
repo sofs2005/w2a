@@ -121,9 +121,8 @@ export const api = {
 
   // 模型 / 聊天
   models: () => get<ModelsResponse>('/api/models'),
-  // 请求统计（按模型聚合 + 时间维度）+ 官方价换算
+  // 请求统计（按模型聚合 + 时间维度）
   stats: (opt?: {
-    mode?: 'peak' | 'offpeak'
     range?: string
     from?: string
     to?: string
@@ -131,7 +130,6 @@ export const api = {
     model?: string
   }) => {
     const q = new URLSearchParams()
-    if (opt?.mode) q.set('mode', opt.mode)
     if (opt?.range) q.set('range', opt.range)
     if (opt?.from) q.set('from', opt.from)
     if (opt?.to) q.set('to', opt.to)
@@ -141,17 +139,6 @@ export const api = {
     return get<StatsResponse>(`/api/stats${qs ? `?${qs}` : ''}`)
   },
   resetStats: () => post<{ ok: boolean; message: string }>('/api/stats/reset'),
-  // 官方价格表编辑
-  savePrice: (p: {
-    model: string
-    cached_input: number
-    miss_input: number
-    output: number
-    off_peak_ratio?: number
-    note?: string
-  }) => put<{ ok: boolean; message: string }>('/api/pricing', p),
-  deletePrice: (model: string) =>
-    del<{ ok: boolean; message: string }>(`/api/pricing/${encodeURIComponent(model)}`),
   chat: (payload: { model: string; messages: ChatMessage[]; extra?: Record<string, unknown>; conversationId?: string }) =>
     post<{ result: import('./types').ChatResult; elapsed_ms: number }>(
       '/api/chat',

@@ -281,7 +281,7 @@ func TestMetricsSingleDomainStillTagged(t *testing.T) {
 	snap := MetricsSnapshotOf()
 	row := snap.Models[0]
 	if row.Bare != "solo" {
-		t.Errorf("bare 应始终下发（面板官方价按它索引），got %q", row.Bare)
+		t.Errorf("bare 应始终下发（面板按裸名成组），got %q", row.Bare)
 	}
 	if len(row.Realms) != 1 || row.Realms[0].Realm != "cn" {
 		t.Fatalf("单域条目应带一条 cn 明细，got %+v", row.Realms)

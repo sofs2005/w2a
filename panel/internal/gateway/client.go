@@ -478,8 +478,8 @@ type ModelStat struct {
 	Credit       float64 `json:"credit"`
 	CreditPerReq float64 `json:"credit_per_req"`
 
-	// Bare 裸模型名（剥掉 cn:/global: 前缀），面板的「官方价」按它索引价格表
-	// （单价与域无关，是厂商定价）。网关直接给出，面板不要自己去 split(":")——
+	// Bare 裸模型名（剥掉 cn:/global: 前缀），面板的统计表按它成组（一个裸名一组行）。
+	// 网关直接给出，面板不要自己去 split(":")——
 	// 按前缀猜域/猜名正是促销配对那处出过的 bug 类型。
 	Bare string `json:"bare,omitempty"`
 
