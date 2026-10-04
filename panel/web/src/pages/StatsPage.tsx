@@ -7,8 +7,9 @@
 // 「时间趋势」卡片与其时间维度 state 目前整体注释掉（详见该处说明与 HOST-PATCHES.md 第 4 条）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { ModelCost, ModelStat, ModelPrice, SessionInfo, StatsResponse } from '../types'
+import type { ModelCost, ModelStat, ModelPrice, RealmStat, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Modal, Spinner } from '../ui'
+import { realmLabel } from '../realm'
 // 时间趋势启用时需一并恢复（见下方注释块）：
 // import TrendChart, { type TrendMetric } from './TrendChart'
 
@@ -40,6 +41,180 @@ function hitTone(rate: number): string {
   if (rate >= 0.5) return 'text-ok'
   if (rate >= 0.1) return 'text-warn'
   return 'text-dim'
+}
+
+/**
+ * 域的展示名。与 realm.ts 的 REALMS 同词（国内版/国际版），空域是「未被路由」——
+ * 选号失败 503 或模型名解析不出，网关不猜归属，面板照实显示而不是硬塞进某一侧。
+ */
+function statRealmLabel(realm: RealmStat['realm']): string {
+  return realm === '' ? '未路由' : realmLabel(realm)
+}
+
+/** 域徽章配色：国内蓝、国际绿、未路由灰（异常路径不该抢眼）。 */
+function statRealmBadge(realm: RealmStat['realm']): string {
+  if (realm === '') return 'badge-dim'
+  return realm === 'cn' ? 'badge-accent' : 'badge-ok'
+}
+
+/**
+ * 一行明细：父行（裸名合计）或某个域的明细行。
+ *
+ * 父行不单独渲染任何数值列——用户要的是「每个裸名下按域分两行」，父行的合计
+ * 只用于排序与"哪些模型在跑"的判断。把父行数值也画出来会让每行出现一组
+ * 无法归属到任何域的数字，正是这次改造要消除的混淆。
+ */
+function StatRow({
+  model,
+  cost,
+  editable,
+  readOnly,
+  onEditPrice,
+}: {
+  model: ModelStat
+  cost?: ModelCost
+  editable: boolean
+  readOnly: boolean
+  onEditPrice: (m: string) => void
+}) {
+  const bare = model.bare || model.model
+  // 分域明细恒存在（网关每个条目至少一个域子条目），缺席只发生在老网关/手写载荷：
+  // 那时退化为一行「未标注域」——宁可少一行，也不要按前缀猜测把数据塞进 cn 或 global，
+  // 归属错了比没有更糟。realm=null 表示"这一行就是父条目自身"，与真的空域（未路由）区分开。
+  const rows: { v: RealmStat; realm: RealmStat['realm'] | null }[] =
+    model.realms && model.realms.length > 0
+      ? model.realms.map((r) => ({ v: r, realm: r.realm }))
+      : [{ v: { ...model, realm: '' }, realm: null }]
+
+  return (
+    <>
+      {rows.map(({ v, realm }, i) => {
+        const first = i === 0
+        // 首行承载跨整组的两个单元格（裸名 + 官方价），行数 n → rowSpan=n。
+        // 这样"官方价"就落在裸名右边，而它只有一个值（单价与域无关）。
+        // 组的最后一行标 stat-group-end：底边由它画，中间行不画（见 styles.css）。
+        const last = i === rows.length - 1
+        const groupCls = [
+          first ? 'stat-group-start' : 'stat-group-mid',
+          last ? 'stat-group-end' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+        return (
+          <tr key={`${model.model}:${realm ?? '__self'}`} className={groupCls}>
+            {first && (
+              <>
+                <td rowSpan={rows.length} className="stat-group">
+                  <div className="mono" style={{ fontSize: 12.5 }}>
+                    {bare}
+                  </div>
+                  <div className="text-faint" style={{ fontSize: 11 }}>
+                    合计 {fmtNum(model.requests)} 次
+                  </div>
+                  {model.last_seen && (
+                    <div className="text-faint" style={{ fontSize: 11 }}>
+                      {fmtISO(model.last_seen)}
+                    </div>
+                  )}
+                </td>
+                <td rowSpan={rows.length} className="num stat-group">
+                  <PriceCell cost={cost} editable={editable} readOnly={readOnly} onEdit={() => onEditPrice(bare)} />
+                </td>
+              </>
+            )}
+            <td>
+              <span className={`badge ${realm === null ? 'badge-dim' : statRealmBadge(realm)}`}>
+                {realm === null ? '未标注域' : statRealmLabel(realm)}
+              </span>
+            </td>
+            <td className="num">
+              {fmtNum(v.requests)}
+              {v.streaming > 0 && (
+                <div className="text-faint" style={{ fontSize: 11 }}>
+                  流式 {v.streaming}
+                </div>
+              )}
+              {v.failed > 0 && (
+                <div className="text-danger" style={{ fontSize: 11 }}>
+                  失败 {v.failed}
+                </div>
+              )}
+            </td>
+            <td className="num">{fmtMs(v.avg_ttfb_ms)}</td>
+            <td className="num">
+              {fmtRate(v.tokens_per_sec)}
+              <div className="text-faint" style={{ fontSize: 11 }}>
+                tok/s
+              </div>
+            </td>
+            <td className="num" title={fmtNum(v.prompt_tokens)}>
+              {fmtTok(v.prompt_tokens)}
+            </td>
+            <td className="num" title={fmtNum(v.completion_tokens)}>
+              {fmtTok(v.completion_tokens)}
+            </td>
+            <td className="num">
+              <span className={hitTone(v.cache_hit_rate)}>{fmtPct(v.cache_hit_rate)}</span>
+              <div
+                className="text-faint"
+                style={{ fontSize: 11 }}
+                title={`命中 ${fmtNum(v.cache_hit_tokens)} / 未命中 ${fmtNum(v.cache_miss_tokens)}`}
+              >
+                {fmtTok(v.cache_hit_tokens)} hit
+              </div>
+            </td>
+            <td className="num">
+              {fmtCredit(v.credit)}
+              <div className="text-faint" style={{ fontSize: 11 }}>
+                {fmtCredit(v.credit_per_req)}/次
+              </div>
+            </td>
+          </tr>
+        )
+      })}
+    </>
+  )
+}
+
+/** PriceCell 官方价单元格：整个裸名一个值（单价与域无关），故跨组行渲染。 */
+function PriceCell({
+  cost,
+  editable,
+  readOnly,
+  onEdit,
+}: {
+  cost?: ModelCost
+  editable: boolean
+  readOnly: boolean
+  onEdit: () => void
+}) {
+  if (!cost?.priced) {
+    return (
+      <button
+        className="btn btn-sm btn-ghost"
+        onClick={onEdit}
+        disabled={!editable || readOnly}
+        title="未配置官方单价，点击填写"
+        style={{ padding: '0 6px', fontSize: 11 }}
+      >
+        未配置 ＋
+      </button>
+    )
+  }
+  return (
+    <>
+      <span className="text-warn">¥{cost.total.toFixed(4)}</span>
+      <div
+        className="text-faint"
+        style={{ fontSize: 11 }}
+        title={`命中 ¥${cost.cached_input_cost.toFixed(4)} / 未命中 ¥${cost.miss_input_cost.toFixed(4)} / 输出 ¥${cost.output_cost.toFixed(4)}`}
+      >
+        {cost.output_cost > 0 || cost.miss_input_cost > 0 || cost.cached_input_cost > 0
+          ? `出 ¥${cost.output_cost.toFixed(3)}`
+          : '—'}
+      </div>
+    </>
+  )
 }
 
 export default function StatsPage({ session }: { session: SessionInfo }) {
@@ -120,6 +295,9 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
   }
 
   // 排序后的模型列表（默认按请求数降序，热点模型在最上面）。
+  //
+  // 排序键取**父条目**（裸名合计），而不是某个域：表格按裸名成组，若按单域排序，
+  // 一个模型的上下位置会随哪个域更忙而跳变，组内两行的相对顺序也不再稳定。
   const models = useMemo(() => {
     const list = [...(stats?.models ?? [])]
     list.sort((a, b) => {
@@ -454,7 +632,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         <div className="card-head">
           <h2>按模型明细</h2>
           <div className="page-actions">
-            <span className="hint">排序</span>
+            <span className="hint">排序（按裸名合计）</span>
             <select
               value={String(sortKey)}
               onChange={(e) => setSortKey(e.target.value as keyof ModelStat)}
@@ -483,6 +661,8 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
               <thead>
                 <tr>
                   <th>模型</th>
+                  <th className="num">官方价</th>
+                  <th>域</th>
                   <th className="num">请求</th>
                   <th className="num">首字</th>
                   <th className="num">吞吐</th>
@@ -490,92 +670,18 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
                   <th className="num">输出</th>
                   <th className="num">缓存命中</th>
                   <th className="num">扣费</th>
-                  <th className="num">官方价</th>
-                  <th>最近</th>
                 </tr>
               </thead>
               <tbody>
                 {models.map((m) => (
-                  <tr key={m.model}>
-                    <td>
-                      <div className="mono" style={{ fontSize: 12.5 }}>
-                        {m.model}
-                      </div>
-                      {m.failed > 0 && (
-                        <div className="text-danger" style={{ fontSize: 11 }}>
-                          失败 {m.failed}
-                        </div>
-                      )}
-                    </td>
-                    <td className="num">
-                      {fmtNum(m.requests)}
-                      {m.streaming > 0 && (
-                        <div className="text-faint" style={{ fontSize: 11 }}>
-                          流式 {m.streaming}
-                        </div>
-                      )}
-                    </td>
-                    <td className="num">{fmtMs(m.avg_ttfb_ms)}</td>
-                    <td className="num">
-                      {fmtRate(m.tokens_per_sec)}
-                      <div className="text-faint" style={{ fontSize: 11 }}>
-                        tok/s
-                      </div>
-                    </td>
-                    <td className="num" title={fmtNum(m.prompt_tokens)}>
-                      {fmtTok(m.prompt_tokens)}
-                    </td>
-                    <td className="num" title={fmtNum(m.completion_tokens)}>
-                      {fmtTok(m.completion_tokens)}
-                    </td>
-                    <td className="num">
-                      <span className={hitTone(m.cache_hit_rate)}>{fmtPct(m.cache_hit_rate)}</span>
-                      <div className="text-faint" style={{ fontSize: 11 }} title={`命中 ${fmtNum(m.cache_hit_tokens)} / 未命中 ${fmtNum(m.cache_miss_tokens)}`}>
-                        {fmtTok(m.cache_hit_tokens)} hit
-                      </div>
-                    </td>
-                    <td className="num">
-                      {fmtCredit(m.credit)}
-                      <div className="text-faint" style={{ fontSize: 11 }}>
-                        {fmtCredit(m.credit_per_req)}/次
-                      </div>
-                    </td>
-                    <td className="num">
-                      {(() => {
-                        const c: ModelCost | undefined = resp?.costs?.[m.model]
-                        if (!c?.priced) {
-                          return (
-                            <button
-                              className="btn btn-sm btn-ghost"
-                              onClick={() => setEditingModel(m.model)}
-                              disabled={!resp?.pricing.editable || session.read_only}
-                              title="未配置官方单价，点击填写"
-                              style={{ padding: '0 6px', fontSize: 11 }}
-                            >
-                              未配置 ＋
-                            </button>
-                          )
-                        }
-                        return (
-                          <>
-                            <span className="text-warn">¥{c.total.toFixed(4)}</span>
-                            <div
-                              className="text-faint"
-                              style={{ fontSize: 11 }}
-                              title={`命中 ¥${c.cached_input_cost.toFixed(4)} / 未命中 ¥${c.miss_input_cost.toFixed(4)} / 输出 ¥${c.output_cost.toFixed(4)}`}
-                            >
-                              {c.output_cost > 0 || c.miss_input_cost > 0 || c.cached_input_cost > 0
-                                ? `出 ¥${c.output_cost.toFixed(3)}`
-                                : '—'}
-                            </div>
-                          </>
-                        )
-                      })()}
-                    </td>
-                    <td className="text-dim" style={{ fontSize: 12 }}>
-                      {fmtISO(m.last_seen)}
-                    </td>
-                  </tr>
+                  <StatRow
+                    key={m.model}
+                    model={m}
+                    cost={resp?.costs?.[m.bare || m.model]}
+                    editable={!!resp?.pricing.editable}
+                    readOnly={session.read_only}
+                    onEditPrice={setEditingModel}
+                  />
                 ))}
               </tbody>
             </table>
@@ -588,6 +694,19 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <h2>指标说明</h2>
         </div>
         <dl className="kv">
+          <dt>按域分行</dt>
+          <dd>
+            统一调度后一个裸模型名会在<strong>国内版</strong>与<strong>国际版</strong>账号之间调度，
+            两域的单价、限免活动、上下文长度都不同，混在一起只能看到加权平均。
+            故每行 = 一个裸名，其下按<strong>实际承接请求的账号域</strong>分行统计（不是按请求里的
+            前缀——前缀只说"允许打哪"，实际落在哪由选号决定）。
+            「未路由」是选号失败（503）或模型名解析不出的请求，网关不猜归属。
+          </dd>
+          <dt>官方价</dt>
+          <dd>
+            整个<strong>裸名</strong>的换算值（单价是厂商定价，与域无关），故只在首行显示，
+            不在各域行重复。
+          </dd>
           <dt>首字延迟</dt>
           <dd>请求发出到收到第一个 token 的时间（TTFB）。只对流式请求有意义，非流式显示为 —。</dd>
           <dt>吞吐</dt>
@@ -601,6 +720,11 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <dd>
             上游返回的 credit 累计（非估算）。<strong>单位是账号积分</strong>（套餐按 500/1500/100 积分计），
             与「官方应付」的<strong>元</strong>不是同一量纲，故两者只并列展示、不做相减。
+          </dd>
+          <dt>模型列</dt>
+          <dd>
+            显示<strong>裸名</strong>（不含 cn:/global: 前缀）与整个模型的合计请求数、
+            最近一次请求时间。这些是跨域的量，故用跨行的单元格承载，不跟着每个域重复。
           </dd>
           <dt>官方应付</dt>
           <dd>
@@ -623,9 +747,10 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           model={editingModel === '__new__' ? '' : editingModel}
           existing={resp.pricing.models?.[editingModel] ?? undefined}
           suggestions={
-            // 待填模型优先给"统计里有用量但未配价"的，其次给网关模型列表里的
+            // 待填模型优先给"统计里有用量但未配价"的，其次给网关模型列表里的。
+            // 用裸名：官方价按裸名索引（单价与域无关），填 "cn:xxx" 会存成永远查不到的键。
             editingModel === '__new__'
-              ? [...new Set([...(resp.unpriced ?? []), ...(resp.stats.models ?? []).map((m) => m.model)])]
+              ? [...new Set([...(resp.unpriced ?? []), ...(resp.stats.models ?? []).map((m) => m.bare || m.model)])]
               : []
           }
           onClose={() => setEditingModel(null)}

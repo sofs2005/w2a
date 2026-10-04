@@ -455,9 +455,55 @@ export interface ChatDelta {
   ttfb_ms?: number
 }
 
-/** 单个模型的派生统计（对应网关 /v1/stats 的 models[]）。 */
+/**
+ * 单个域的统计明细（对应网关 models[].realms[]）。
+ *
+ * 不含 model/bare/realms/last_seen：那些是跨域的标识与记账字段，属于父条目。
+ */
+export interface RealmStat {
+  /**
+   * `'cn'` 国内版 / `'global'` 国际版；
+   * `''` = 请求未被路由到任何账号（选号失败 503、模型名解析不出），独立一组。
+   */
+  realm: '' | 'cn' | 'global'
+  requests: number
+  success: number
+  failed: number
+  streaming: number
+  /** 平均首字延迟（毫秒） */
+  avg_ttfb_ms: number
+  /** 平均端到端耗时（毫秒） */
+  avg_latency_ms: number
+  /** 生成吞吐（输出 token / 秒） */
+  tokens_per_sec: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cache_hit_tokens: number
+  cache_miss_tokens: number
+  cache_write_tokens: number
+  /** 缓存命中率 0~1 */
+  cache_hit_rate: number
+  credit: number
+  credit_per_req: number
+}
+
+/**
+ * 单个模型的派生统计（对应网关 /v1/stats 的 models[]）。
+ *
+ * 统一调度改造后一行 = 一个**裸名**：父条目是跨域合计，`realms` 是各域独立明细。
+ * 因此这里的数值列不直接上表——表格按域分行渲染 `realms`（见 StatsPage），
+ * 父条目的数值只在「无分域明细」的降级路径下才用。
+ */
 export interface ModelStat {
   model: string
+  /**
+   * 裸模型名（剥掉 cn:/global: 前缀），官方价按它索引——单价是厂商定价，与域无关。
+   * 老网关不下发时回退用 model。
+   */
+  bare?: string
+  /** 各域明细（cn → global → 未路由）。单域模型也带一条；整段缺席=老网关，退化为一行。 */
+  realms?: RealmStat[] | null
   requests: number
   success: number
   failed: number

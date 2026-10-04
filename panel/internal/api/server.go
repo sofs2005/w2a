@@ -375,6 +375,18 @@ func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
 // 模型 / 聊天
 // ---------------------------------------------------------------------------
 
+// statPriceKey 统计行查官方价用的键：**裸名**优先（单价是厂商定价，与 cn/global 无关），
+// 老网关不下发 bare 时退回 model 原文。
+//
+// 网关自统一调度改造后 Model 本身已是裸名，两条路等价；保留回退是为了面板与老版本
+// 网关（未带 bare 字段）混跑时不至于整张表查不到价。
+func statPriceKey(m gateway.ModelStat) string {
+	if m.Bare != "" {
+		return m.Bare
+	}
+	return m.Model
+}
+
 // handleStats 返回网关的按模型统计 + 官方价换算。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	// 时间维度参数透传给网关（range/from/to/interval/model）。
@@ -397,7 +409,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	costs := map[string]pricing.Cost{}
 	for _, m := range st.Models {
-		costs[m.Model] = table.Compute(m.Model, pricing.Usage{
+		costs[statPriceKey(m)] = table.Compute(statPriceKey(m), pricing.Usage{
 			PromptTokens:     m.PromptTokens,
 			CacheHitTokens:   m.CacheHitTokens,
 			CacheMissTokens:  m.CacheMissTokens,
@@ -416,12 +428,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		unpricedModels []string
 	)
 	for _, m := range st.Models {
-		c := costs[m.Model]
+		c := costs[statPriceKey(m)]
 		if !c.Priced {
-			unpricedModels = append(unpricedModels, m.Model)
+			unpricedModels = append(unpricedModels, statPriceKey(m))
 			continue
 		}
-		pricedModels = append(pricedModels, m.Model)
+		pricedModels = append(pricedModels, statPriceKey(m))
 		officialTotal += c.Total
 		cachedCost += c.CachedInputCost
 		missCost += c.MissInputCost

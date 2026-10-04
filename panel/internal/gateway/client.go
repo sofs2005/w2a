@@ -478,7 +478,50 @@ type ModelStat struct {
 	Credit       float64 `json:"credit"`
 	CreditPerReq float64 `json:"credit_per_req"`
 
+	// Bare 裸模型名（剥掉 cn:/global: 前缀），面板的「官方价」按它索引价格表
+	// （单价与域无关，是厂商定价）。网关直接给出，面板不要自己去 split(":")——
+	// 按前缀猜域/猜名正是促销配对那处出过的 bug 类型。
+	Bare string `json:"bare,omitempty"`
+
+	// Realms 该裸名在池中实际被哪些账号域承接（"cn"/"global"，固定序），各域独立统计。
+	// 单域模型也会带一条（数组长度 1）——它确实知道自己在哪一域跑的。
+	// 整段缺席只发生在老网关/手写载荷：那时前端退化为单行「未标注域」。
+	//
+	// 分域明细没有独立声明字段的话 encoding/json 会**静默丢弃**整段——这正是
+	// realms/credits 在本项目反复出问题的根源，加字段必须同步加到这儿。
+	Realms []RealmStat `json:"realms,omitempty"`
+
 	LastSeen *time.Time `json:"last_seen,omitempty"`
+}
+
+// RealmStat 单域的统计明细（对应网关 ModelStatPayload.Realms 的元素）。
+//
+// 不含 Model/Bare/Realms/LastSeen：那些是跨域的标识与记账字段，属于父条目，
+// 子条目重复输出只会让前端困惑该信哪一个。
+type RealmStat struct {
+	// Realm "cn" 或 "global"；"" = 请求未被路由到任何账号（选号失败、模型名解析不出）。
+	Realm string `json:"realm"`
+
+	Requests  int64 `json:"requests"`
+	Success   int64 `json:"success"`
+	Failed    int64 `json:"failed"`
+	Streaming int64 `json:"streaming"`
+
+	AvgTTFBMS    float64 `json:"avg_ttfb_ms"`
+	AvgLatencyMS float64 `json:"avg_latency_ms"`
+	TokensPerSec float64 `json:"tokens_per_sec"`
+
+	PromptTokens     int64 `json:"prompt_tokens"`
+	CompletionTokens int64 `json:"completion_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
+
+	CacheHitTokens   int64   `json:"cache_hit_tokens"`
+	CacheMissTokens  int64   `json:"cache_miss_tokens"`
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	CacheHitRate     float64 `json:"cache_hit_rate"`
+
+	Credit       float64 `json:"credit"`
+	CreditPerReq float64 `json:"credit_per_req"`
 }
 
 // Stats 网关 /v1/stats 响应。

@@ -31,6 +31,10 @@ type chatStat struct {
 	mode   string // "stream" | "sync"
 	uid    string // 完整 uid，展示时只取前 8 位
 	nick   string // 账号昵称（auth.Auth.Nickname，登录时落盘）；空则只显示 uid8
+	// realm 本次请求实际落在哪个域的账号上（acct.Realm()，"cn"/"global"）。
+	// 空 = 未被路由（选号失败 503、模型名解析不出）——stats 的「按域分账」靠它，
+	// 留空而不是猜一个域，见 metricsStore 注释。
+	realm  string
 	ttfb   time.Duration
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int

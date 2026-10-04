@@ -489,6 +489,28 @@ tbody tr:hover {
   font-size: 12px;
 }
 
+/* 统计页按域分行：一个模型 = 一组行，首两列（裸名 / 官方价）用 rowspan 跨整组。
+   跨行单元格必须顶对齐，否则内容会垂直居中、看起来跟它管的那些行错位。 */
+.stat-group {
+  vertical-align: top;
+}
+/* 组与组之间加一条实线：默认行分隔是 border-soft，太淡，分组看不出来。 */
+tbody tr.stat-group-start td {
+  border-top: 1px solid var(--border);
+}
+/* 组内中间行不画底边（组的底边由 stat-group-end 那一行表达），否则组被切碎。 */
+tbody tr.stat-group-mid td {
+  border-bottom: none;
+}
+/* 组的最后一行：重画底边，且用实线——它同时是下一组的"组间线"的对照。
+   注意 hover 背景是按行画的，组内各行会各自高亮，这是表格语义的固有行为，可接受。 */
+tbody tr.stat-group-end td {
+  border-bottom: 1px solid var(--border-soft);
+}
+tbody tr.stat-group-end:last-child td {
+  border-bottom: none;
+}
+
 /* ── 徽章 ───────────────────────────────────────────── */
 
 .badge {

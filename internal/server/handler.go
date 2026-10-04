@@ -843,6 +843,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		// 记账域：本请求实际落在哪个域的账号上（不是请求体前缀——前缀只说"允许打哪"，
+		// 实际落在哪由选号决定）。/v1/stats 的按域分账靠它，见 metricsStore 注释。
+		// 赋值点在此（选号成功之后）：选号失败 503 时保持空串，独立成组。
+		st.realm = acct.Realm()
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。

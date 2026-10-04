@@ -103,8 +103,9 @@ func TestStatsCreditsOmittedWhenCacheCold(t *testing.T) {
 	}
 }
 
-// TestStatsCreditsGlobalRealm global 域倍率：前缀键 global:hy3 走 global 目录分支；
-// 裸名 hy3（统一调度口径）在同配置下也命中——CN 无账号 → CN 目录空 → 回落 global。
+// TestStatsCreditsGlobalRealm global 域倍率：裸名行（统一调度口径）在 CN 无账号时
+// 回落 global 目录。前缀请求 "global:hy3" 与裸名 "hy3" 归入**同一行**（stats 键是
+// 裸名，见 metricsStore 注释），故两次记账只产生一行、倍率取 global 目录值。
 // （v2 探测对象形态，fake 透传 fullFieldsModelsBody）
 func TestStatsCreditsGlobalRealm(t *testing.T) {
 	auth.SetGlobalEnabled(true)
@@ -136,8 +137,8 @@ func TestStatsCreditsGlobalRealm(t *testing.T) {
 	snap := MetricsSnapshotOf()
 	h.enrichCredits(&snap)
 
-	if got := findModelRow(t, snap, "global:hy3").Credits; got != "x0.05" {
-		t.Errorf("global:hy3 credits = %q, want x0.05（global 目录命中）", got)
+	if len(snap.Models) != 1 {
+		t.Fatalf("global:hy3 与裸名 hy3 应归入同一裸名行，models=%+v", snap.Models)
 	}
 	if got := findModelRow(t, snap, "hy3").Credits; got != "x0.05" {
 		t.Errorf("裸名 hy3 credits = %q, want x0.05（CN 空 → 回落 global 目录）", got)

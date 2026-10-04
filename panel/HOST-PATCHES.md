@@ -281,6 +281,60 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 `Models.tsx` 的渲染块需手工拼接。`internal/api/server.go` 的 `modelView` 与
 `buildModelViews` 改动面较大，上游若重写该 handler 需整体重放本条的语义。
 
+## 11. 请求统计按域分行：网关 `/v1/stats` + `web/src/pages/StatsPage.tsx`
+
+**动机**：第 10 条把「模型与倍率」页的倍率/促销按域拆开了，但**请求统计**页还塌着：
+网关 `metricsStore` 用**请求体里的模型名原文**做键（`global:x` 与裸名 `x` 各占一行），
+统一调度后同一个模型在 CN 与 global 账号之间调度，两域的单价、限免、上下文都不同，
+却混进同一个累加器——只能看到一个加权平均，既看不出哪域花了多少，也解释不了扣费
+为什么变。用户要求：官方价放裸名后面，其余列拆成国内/国际两行。
+
+**改动**：
+
+1. 网关 `internal/server/metrics.go`：`metricsStore` 从扁平 `byModel` 改为**一棵两层树**
+   `byBare map[string]map[string]*modelMetrics`（裸名 → 域 → 累加器）。
+   - 键用 `resolveModel()` 剥出的**裸名**：`cn:x` 与裸名 `x` 指的是同一个底层模型，
+     只有裸名能让它们合成表格的一行。
+   - 第二层是**承接请求的账号域**（`chatStat.realm`，见 `internal/server/logging.go`），
+     **不是**请求体前缀——前缀只表达"允许打哪"，实际落在哪个域由选号决定；账要记在
+     实际提供服务的那一侧。空域 `""`（选号失败 503、模型名解析不出）独立成组，
+     不并进任何一侧：编造归属比空着更糟。
+   - 容量上限仍按**裸名个数**计（子条目数 = 裸名数 × 域数 ≤ 3，有界）。
+   - `ModelStatPayload` 增 `Bare` / `Realms []RealmStat`；父行的派生量（均值/比率/吞吐）
+     由**原始量合计反算**而不是把各域均值再平均（后者会让请求数少的域被等权放大）。
+   - `enrichCredits` 的注释同步（键已是裸名，仍走 `resolveModel` 只为兜住异常串）。
+2. 网关 `internal/server/handler.go`：选号成功后 `st.realm = acct.Realm()`（与
+   `st.uid` / `st.nick` 同一处）。选号失败路径不赋值 → 空域，正是想要的语义。
+3. `internal/gateway/client.go`（**上游文件，需重放**）：`ModelStat` 增 `Bare` /
+   `Realms`，并新增 `RealmStat` 结构体。同第 8～10 条的坑——白名单结构体，
+   漏声明即**静默丢弃**整段（`realms`、`credits` 在本项目已各出过一次）。
+4. `internal/api/server.go`：官方价换算的键从 `m.Model` 改为 `statPriceKey(m)`
+   （**裸名**优先，老网关不下发 `bare` 时回退 `model`）。单价是厂商定价、与域无关，
+   用带前缀的名查表会查不到——`costs` / `priced` / `unpriced` 三处同步。
+5. `web/src/types.ts` / `web/src/pages/StatsPage.tsx`：`ModelStat` 增 `bare` / `realms`，
+   新增 `RealmStat`。表格改成「每行 = 一个裸名 + 其下按域分行的明细」：抽出新组件
+   `StatRow`，**父行不再渲染任何数值列**（父行数值无法归属到任何域，画出来正是这次
+   要消除的混淆），只承载裸名与官方价；域徽章复用 `realm.ts` 的 `realmLabel`
+   （国内版/国际版），空域显示「未路由」。排序仍按父条目（裸名合计）——按单域排序会
+   让模型位置随"哪个域更忙"跳变。价格编辑的模型名与 `unpriced` 建议列表统一用裸名。
+   降级：`realms` **整段缺席**（老网关/手写载荷）时退化为一行「未标注域」，不按前缀猜域。
+   **注意单域模型也会带一条 `realms`**（数组长度 1）：它确实知道自己在哪一域跑的，
+   标成"未知域"是信息倒退——所以单域模型显示「国内版」/「国际版」徽章，不是「未标注域」。
+   父行与唯一子条目等值（有测试钉住）。
+
+**回归测试**：网关 `internal/server/metrics_test.go` 新增四条——`TestMetricsSplitsByAccountRealm`
+（同一裸名两域各若干请求 → 一行两域明细、父行由合计反算而非均值再平均、域序 cn→global）、
+`TestMetricsBareKeyCollapsesRealmPrefix`（`cn:x` 与裸名 `x` 合成一行）、
+`TestMetricsUnroutedRealmIsOwnGroup`（空域独立成组且不并进 cn）、
+`TestMetricsRealmOrderUnknownRealmLast`（异常域值按字典序补尾，输出确定）。
+`metrics_credits_test.go` 的 `TestStatsCreditsGlobalRealm` 改了旧断言（它钉的正是
+"前缀名与裸名各占一行"的旧口径）。面板侧 `internal/api/models_test.go` 的分域用例不受影响。
+
+**上游冲突面**：`client.go` 是新增字段/新结构体；`StatsPage.tsx` 的按模型明细表格整块
+重写（`<tbody>` 从内联 map 改为 `<StatRow>` 组件），上游若重写该表格需整体重放本条的
+语义；`types.ts` 增字段。网关侧 `metrics.go` 是**本 fork 独有**的聚合实现（上游 `/v1/stats`
+无时间维度），`handler.go` 只加一行赋值。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
