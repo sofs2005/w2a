@@ -292,15 +292,16 @@ func catalogRows(t *testing.T, h *Handler) map[string]map[string]any {
 }
 
 // TestModelListUnionDedupAndRealms 并集去重：同名模型两域都有 → 只出一条，
-// CN 富字段优先（credits 不被 global 空值抹掉），realms 标注 [cn global]；
-// 单域独有条目 realms 只含所属域。
+// 非倍率字段 CN 优先（空值不覆盖），**倍率则按域各留一份**（credits_cn /
+// credits_global）——两域倍率会不同，只留合并值是国际版显示国内价的旧 bug 根因；
+// realms 标注 [cn global]；单域独有条目 realms 只含所属域。
 func TestModelListUnionDedupAndRealms(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
 	resetModelsCache()
 
 	cf := newGlobalModelsHandlerFake(t, 200, `{"code":0,"data":{"models":[
-		{"id":"glm-5.2"},
+		{"id":"glm-5.2","credits":"x0.31"},
 		{"id":"gpt-5.4"}
 	],"agents":[{"name":"cli","models":["glm-5.2","gpt-5.4"]}]}}`)
 	// CN 侧同名模型带富字段（credits/name），global 侧只有裸 id。
@@ -322,12 +323,28 @@ func TestModelListUnionDedupAndRealms(t *testing.T) {
 	if got := realmsOf(t, byID["glm-5.2"]); !reflect.DeepEqual(got, []string{"cn", "global"}) {
 		t.Errorf("glm-5.2 realms=%v want [cn global]", got)
 	}
-	// CN 富字段优先：global 裸条目不得覆盖 CN 的 credits/name。
-	if byID["glm-5.2"]["credits"] != "x0.06" {
-		t.Errorf("glm-5.2 credits=%v want x0.06（CN 优先，global 不覆盖）", byID["glm-5.2"]["credits"])
-	}
+	// 非倍率富字段 CN 优先：global 裸条目不得覆盖 CN 的 name。
 	if byID["glm-5.2"]["name"] != "GLM 5.2" {
 		t.Errorf("glm-5.2 name=%v want GLM 5.2", byID["glm-5.2"]["name"])
+	}
+	// 倍率按域分栏：两域各留各的（CN x0.06 / global x0.31），不得只留 CN 侧
+	// ——只留一份会让国际版 tab 显示国内价；合并字段 credits 退化为纯展示兼容
+	// （CN 优先），面板分域展示走 credits_cn / credits_global。
+	if byID["glm-5.2"]["credits_cn"] != "x0.06" {
+		t.Errorf("glm-5.2 credits_cn=%v want x0.06", byID["glm-5.2"]["credits_cn"])
+	}
+	if byID["glm-5.2"]["credits_global"] != "x0.31" {
+		t.Errorf("glm-5.2 credits_global=%v want x0.31", byID["glm-5.2"]["credits_global"])
+	}
+	if byID["glm-5.2"]["credits"] != "x0.06" {
+		t.Errorf("glm-5.2 credits=%v want x0.06（合并字段 CN 优先，向后兼容）", byID["glm-5.2"]["credits"])
+	}
+	// 单域模型只写自己那侧的倍率字段，另一侧缺席（不是空串）。
+	if got, ok := byID["gpt-5.4"]["credits_global"]; ok {
+		t.Errorf("gpt-5.4 仅 global 侧有倍率，不应写 credits_global（上游未标倍率），got %v", got)
+	}
+	if _, ok := byID["cn-only-x"]["credits_cn"]; ok {
+		t.Error("cn-only-x 上游未标倍率，不应写 credits_cn")
 	}
 	// 单域独有条目：realms 只含所属域。
 	if got := realmsOf(t, byID["gpt-5.4"]); !reflect.DeepEqual(got, []string{"global"}) {

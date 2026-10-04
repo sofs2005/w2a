@@ -25,6 +25,23 @@ function parseRate(s?: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/**
+ * 该模型在指定域的倍率原文。
+ *
+ * 两域倍率不同时网关会分别下发 credits_cn / credits_global，页面按当前 tab 取本域值；
+ * 缺省（老网关 / 该域上游未标）回退到合并后的 credits——它是 CN 优先的并集值，
+ * 作为过渡显示比留空诚实，但国际版 tab 上可能不是本域真实价（页脚已注明）。
+ */
+function realmCredits(m: Model, realm: Realm): string | undefined {
+  const v = realm === 'global' ? m.credits_global : m.credits_cn
+  return v ?? m.credits
+}
+
+/** 该模型在指定域的促销（分域下发；该域无活动返回空数组）。 */
+function realmPromos(m: Model, realm: Realm): ModelPromotion[] {
+  return (realm === 'global' ? m.promotions_global : m.promotions_cn) ?? []
+}
+
 /** 倍率展示文本：保留上游原文精度（x0.00 不能压成 x0），去掉冗余的 "credits" 后缀。
  *  解析不出数值时原样回显，不假装成没有。 */
 function rateText(s?: string): string {
@@ -130,9 +147,10 @@ function promoInfo(p: ModelPromotion): PromoView | null {
 }
 
 /** 一个模型可能同时命中多条促销（如「限时免费」+「夜间折扣」，或折扣 + 同时段徽标）。
- *  后端已按 priority 降序，取第一条上屏，其余进 hover，避免一行塞满徽标。 */
-function modelPromo(m: Model): PromoView | null {
-  const views = (m.promotions ?? []).map(promoInfo).filter((v): v is PromoView => v !== null)
+ *  后端已按 priority 降序，取第一条上屏，其余进 hover，避免一行塞满徽标。
+ *  促销分域下发，故必须传当前 tab 的域——否则国际版会显示国内的活动。 */
+function modelPromo(m: Model, realm: Realm): PromoView | null {
+  const views = realmPromos(m, realm).map(promoInfo).filter((v): v is PromoView => v !== null)
   if (views.length === 0) return null
   const v = views[0]
   return views.length > 1 ? { ...v, title: views.map((x) => x.text).join('\n') } : v
@@ -190,10 +208,11 @@ export default function Models() {
     if (countByRealm[other] > 0) setRealm(other)
   }, [models, countByRealm, realm, realmTouched])
 
-  // 每个域里有优惠的模型数（含时段型），tab 上提示用。
+  // 每个域里有优惠的模型数（含时段型），tab 上提示用。逐域判——同一模型两域活动不同，
+  // 只有当**该域**确实有促销时才计入该域。
   const promoByRealm = useMemo(() => {
     const out: Record<Realm, number> = { global: 0, cn: 0 }
-    for (const m of models) if (modelPromo(m)) for (const r of modelRealms(m)) out[r]++
+    for (const m of models) for (const r of modelRealms(m)) if (modelPromo(m, r)) out[r]++
     return out
   }, [models])
 
@@ -208,10 +227,10 @@ export default function Models() {
           .includes(kw),
       )
     }
-    if (onlyFree) list = list.filter((m) => parseRate(m.credits) === 0)
-    if (onlyPromo) list = list.filter((m) => modelPromo(m) !== null)
+    if (onlyFree) list = list.filter((m) => parseRate(realmCredits(m, realm)) === 0)
+    if (onlyPromo) list = list.filter((m) => modelPromo(m, realm) !== null)
 
-    const rate = (m: Model) => parseRate(m.credits)
+    const rate = (m: Model) => parseRate(realmCredits(m, realm))
     return [...list].sort((a, b) => {
       switch (sort) {
         case 'name':
@@ -220,8 +239,8 @@ export default function Models() {
           return (b.context_length || 0) - (a.context_length || 0)
         case 'promo': {
           // 按促销结束时间升序（快过期的排前面），无日期/无促销的排最后。
-          const ua = modelPromo(a)?.until
-          const ub = modelPromo(b)?.until
+          const ua = modelPromo(a, realm)?.until
+          const ub = modelPromo(b, realm)?.until
           if (ua === undefined) return ub === undefined ? 0 : 1
           if (ub === undefined) return -1
           return ua - ub
@@ -247,8 +266,8 @@ export default function Models() {
   }, [models, realm, q, sort, onlyFree, onlyPromo])
 
   const freeCount = useMemo(
-    () => rows.filter((m) => parseRate(m.credits) === 0).length,
-    [rows],
+    () => rows.filter((m) => parseRate(realmCredits(m, realm)) === 0).length,
+    [rows, realm],
   )
 
   const realmMeta = REALMS.find((r) => r.key === realm)!
@@ -368,10 +387,13 @@ export default function Models() {
               </thead>
               <tbody>
                 {rows.map((m) => {
-                  const rate = parseRate(m.credits)
+                  // 倍率与促销都按**当前 tab 的域**取：两域价/活动不同，取错域就会
+                  // 在国际版 tab 上显示国内价（本页此前的症状）。
+                  const credits = realmCredits(m, realm)
+                  const rate = parseRate(credits)
                   const bare = bareID(m.id)
                   const realms = modelRealms(m)
-                  const promo = modelPromo(m)
+                  const promo = modelPromo(m, realm)
                   const soon =
                     promo?.until !== undefined && promo.until - Date.now() / 1000 < 3 * 86400
                   return (
@@ -394,9 +416,9 @@ export default function Models() {
                         {rate === null ? (
                           <span className="text-faint">—</span>
                         ) : rate === 0 ? (
-                          <span className="text-ok">{rateText(m.credits)}</span>
+                          <span className="text-ok">{rateText(credits)}</span>
                         ) : (
-                          rateText(m.credits)
+                          rateText(credits)
                         )}
                       </td>
                       <td>
@@ -448,6 +470,11 @@ export default function Models() {
         <p className="text-faint" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.7 }}>
           倍率取自上游下发的 <span className="mono">credits</span> 字段原文，数值越小越省；
           <span className="text-faint"> — </span> 表示上游未标倍率（不等于免费）。
+          <span className="text-faint">
+            {' '}
+            倍率与「优惠」都<strong>按当前分栏的域</strong>显示——同一个「双域」模型在国内版与
+            国际版的价、活动都可能不同（各域账号按各自域的价计费）。
+          </span>
           「优惠」来自上游 <span className="mono">/v3/config</span> 的{' '}
           <span className="mono">modelPromotions</span>：<span className="badge badge-ok">限时免费</span>{' '}
           是活动期内倍率降到 0，<span className="badge badge-accent">夜间折扣</span>{' '}

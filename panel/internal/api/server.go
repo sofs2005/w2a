@@ -529,11 +529,18 @@ func (s *Server) handlePricingDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已移除该模型价格"})
 }
 
-// modelView 模型条目 + 挂上的促销。内嵌 gateway.Model 让原有字段平铺，
-// promotions 是附加字段（无促销时省略，前端按「无优惠」处理）。
+// modelView 模型条目 + 按域挂上的促销。内嵌 gateway.Model 让原有字段平铺，
+// promotions_cn / promotions_global 是附加字段（该域无促销时省略）。
+//
+// 为什么按域拆两份而不是一份 promotions：促销是**分域下发**的（PromotionsForRealm
+// 各域各取一次上游 /v3/config），同一个模型在国内与国际挂的活动可能完全不同
+// （甚至一边免费一边收费）。合成一份必然要在两个域里挑一个，面板另一个 tab 就会
+// 显示错域的优惠——此前正是这样：modelRealmBare 只认 "global:"/"cn:" 前缀，
+// 而统一调度后目录只剩裸名，于是所有模型都被当成 CN，国际版 tab 恒显示国内活动。
 type modelView struct {
 	gateway.Model
-	Promotions []upstream.ModelPromotion `json:"promotions,omitempty"`
+	PromotionsCN     []upstream.ModelPromotion `json:"promotions_cn,omitempty"`
+	PromotionsGlobal []upstream.ModelPromotion `json:"promotions_global,omitempty"`
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -557,24 +564,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	out := make([]modelView, 0, len(models))
-	for _, m := range models {
-		realm, bare := modelRealmBare(m.ID)
-		v := modelView{Model: m}
-		for _, p := range promosByRealm[realm] {
-			for _, id := range p.ModelIDs {
-				if strings.EqualFold(id, bare) {
-					v.Promotions = append(v.Promotions, p)
-					break
-				}
-			}
-		}
-		// 优先级高的排前面（同域可同时存在「限时免费」与「夜间折扣」两条）。
-		sort.SliceStable(v.Promotions, func(i, j int) bool {
-			return v.Promotions[i].Priority > v.Promotions[j].Priority
-		})
-		out = append(out, v)
-	}
+	out := buildModelViews(models, promosByRealm)
 
 	resp := map[string]any{"data": out, "count": len(out)}
 	if len(promoErrs) > 0 {
@@ -583,16 +573,86 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// modelRealmBare 拆出模型 id 的域与裸名：global:xxx → (global, xxx)；
-// cn:xxx 或无前缀 → (cn, xxx)。促销的 modelIds 用的是裸名，靠这里对齐。
-func modelRealmBare(id string) (realm, bare string) {
+// buildModelViews 给模型目录条目按域挂上促销，产出发给前端的视图。
+//
+// 抽成纯函数（不碰网络、不碰 svc）是为了能被直接单测——这里正是出过 bug 的地方：
+// 旧实现按 id 前缀（"global:"）判断域，而统一调度后目录只剩裸名，于是每个模型都
+// 落进 CN 分支，国际版 tab 恒显示国内活动。当时的代码藏在 handleModels 的 HTTP
+// 壳里，没有测试够得着，bug 才活了下来。域集合一律取 modelRealms（网关 realms
+// 字段优先），别在本函数里再按 id 猜一次。
+func buildModelViews(models []gateway.Model, promosByRealm map[string][]upstream.ModelPromotion) []modelView {
+	out := make([]modelView, 0, len(models))
+	for _, m := range models {
+		v := modelView{Model: m}
+		bare := modelBare(m.ID)
+		for _, realm := range modelRealms(m.ID, m.Realms) {
+			switch realm {
+			case "global":
+				v.PromotionsGlobal = matchRealmPromos(promosByRealm["global"], bare)
+			case "cn":
+				v.PromotionsCN = matchRealmPromos(promosByRealm["cn"], bare)
+			}
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// matchRealmPromos 挑出该域下发、且覆盖该裸名的促销（优先级高的排前面——同域可同时
+// 存在「限时免费」与「夜间折扣」两条）。
+//
+// 只在本域的活动里找：各域活动来自各自 /v3/config（PromotionsForRealm 各取一次），
+// 跨域合并会让一个 tab 显示另一个域的活动。模型名按不区分大小写比对（上游大小写
+// 不保证与目录一致），与目录侧的裸名对齐靠 modelBare。
+func matchRealmPromos(all []upstream.ModelPromotion, bare string) []upstream.ModelPromotion {
+	var hit []upstream.ModelPromotion
+	for _, p := range all {
+		for _, id := range p.ModelIDs {
+			if strings.EqualFold(id, bare) {
+				hit = append(hit, p)
+				break
+			}
+		}
+	}
+	sort.SliceStable(hit, func(i, j int) bool { return hit[i].Priority > hit[j].Priority })
+	return hit
+}
+
+// modelBare 剥掉模型 id 的可选域前缀，得到促销 modelIds 对齐用的裸名。
+func modelBare(id string) string {
+	if s, ok := strings.CutPrefix(id, "global:"); ok {
+		return s
+	}
+	if s, ok := strings.CutPrefix(id, "cn:"); ok {
+		return s
+	}
+	return id
+}
+
+// modelRealms 返回该模型可承接的域集合（顺序 cn, global，与网关 realms 输出一致）。
+//
+// 首选网关下发的 realms 字段（唯一权威：统一调度后裸名可跨域，前缀已不存在）。
+// 缺席（老网关）时按 id 前缀推断：global: → global，其余 → cn，与改造前的口径一致，
+// 保证面板对新老两版网关都能正确分域。
+func modelRealms(id string, realms []string) []string {
+	if len(realms) > 0 {
+		out := make([]string, 0, len(realms))
+		for _, r := range []string{"cn", "global"} {
+			for _, got := range realms {
+				if got == r {
+					out = append(out, r)
+					break
+				}
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
 	if strings.HasPrefix(id, "global:") {
-		return "global", id[len("global:"):]
+		return []string{"global"}
 	}
-	if strings.HasPrefix(id, "cn:") {
-		return "cn", id[len("cn:"):]
-	}
-	return "cn", id
+	return []string{"cn"}
 }
 
 // chatRequest 聊天测试台请求。

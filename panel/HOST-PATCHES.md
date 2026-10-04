@@ -243,6 +243,44 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 选号是按 `realm` 过滤的，展示口径必须与之一致——两者不一致时（凭证被手工改过等）
 不能给出与选号矛盾的结论。
 
+## 10. 倍率与促销按域拆分：`internal/gateway/client.go` + `web/src/pages/Models.tsx`
+
+**动机**：统一调度改造（本仓库 `d2c52be`）把 `/v1/models` 输出从 `cn:x` / `global:x`
+双条目改成**裸名并集去重**，同名模型合并成一条。合并规则是 CN 优先（见网关
+`handler.go` 的 `mergeMissingFields`），于是两域倍率不同时 global 的值被丢掉，
+「模型与倍率」页的国内版/国际版两个 tab 渲染同一个数——**国际版显示的是国内价**。
+倍率确实分域：网关侧 `upstream.modelRates` 本就按 `realm` 分桶存储，选号（积分保底、
+成本分层）也按账号自身域各查各的，只有展示侧塌了。
+
+**改动**：
+
+1. `internal/gateway/client.go`（**上游文件，需重放**）：`Model` 增 `CreditsCN` /
+   `CreditsGlobal` 两个字段（`json:"credits_cn,omitempty"` / `credits_global`）。
+   同第 8、9 条的坑——白名单结构体，漏声明即静默丢弃。
+2. `internal/api/server.go`：`modelView` 增 `PromotionsCN` / `PromotionsGlobal`。**并顺带
+   修掉一个真 bug**：旧的 `modelRealmBare` 只认 `"cn:"` / `"global:"` 前缀，而统一调度
+   后目录只剩裸名，于是所有模型都落进 CN 分支 → **国际版 tab 恒显示国内活动**。改为按
+   `modelRealms(m.ID, m.Realms)`（网关 `realms` 字段优先，前缀只作老网关回退）取域集合，
+   逐域配对促销。配对逻辑从 `handleModels` 的 HTTP 壳里抽成纯函数
+   `buildModelViews` / `matchRealmPromos` 才测得动（旧实现没测试够得着，bug 才活了下来）。
+3. `web/src/types.ts` / `web/src/pages/Models.tsx`：`Model` 增两个分域倍率字段；新增
+   `realmCredits(m, realm)` / `realmPromos(m, realm)` 两个按当前 tab 取的助手，倍率列、
+   促销列、`onlyFree` / `onlyPromo` 过滤、`freeCount`、排序用的 `modelPromo(m, realm)`
+   全部改为按域取；页脚注明该 tab 显示的是本域价。合并字段 `credits` 保留为兼容回退
+   （老网关或该域上游未标倍率时），不是主展示源。
+
+**回归测试**：`internal/api/models_test.go` 新增三条——`TestModelCreditsPerRealmPassthrough`
+（分域倍率的解码 + 再编码两段链路，含缺席侧不得序列化出来）、
+`TestBuildModelViewsPromotionsPerRealm`（同一裸名两域活动完全不同时各取各的、单域条目
+不串味、老网关前缀回退）、`TestModelBareAndRealms`（前缀剥离 + 域顺序契约）。
+网关侧同步改了 `internal/server/handler_global_models_test.go` 的旧 CN-first 断言
+（它钉的正是"只留合并值"这个旧口径）。
+
+**上游冲突面**：`client.go` 是新增字段；`Models.tsx` 改了倍率列/促销列的渲染取值处
+（同第 8 条那几处 `modelRealm` 调用点），`types.ts` 增字段——重放时若上游同时改了
+`Models.tsx` 的渲染块需手工拼接。`internal/api/server.go` 的 `modelView` 与
+`buildModelViews` 改动面较大，上游若重写该 handler 需整体重放本条的语义。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |

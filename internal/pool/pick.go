@@ -6,7 +6,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
-	"strconv"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -83,7 +82,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 		return p.pickEarliestExpiryLocked(tried, now, realms, reqModel)
 	}
 	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「72 小时内到期」的
-	// 账号时，按真实到期时刻硬优先（最早优先），已实测免费的临期号排在最前。
+	// 账号时，按真实到期时刻硬优先（最早优先），免费（实测或目录判免费）的临期号排在最前。
 	// **只在有紧急候选时启用**——窗口外（含"全池最早到期但还很久"）一律走下方原有
 	// 逻辑，否则最早到期的那个号会被永久垄断（用户明确要求：3 天内才提优先级）。
 	// 分支独立于成本分层/探索/Top5/加权随机：这些机制都可能把选号拉回非临期号，
@@ -114,16 +113,19 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	// （存入 ws.tier/ws.cost1k）——sort 比较器与 pickWeighted 都只读缓存字段，
 	// 不再现算。比较器内现算会翻成 O(n log n) 次冗余浮点/map 查找（46 账号约
 	// 500 次比较），旧实现在此翻过车。
-	// 成本分层：reqModel 非空时，按该模型的实测扣费把候选分层，只保留最优层。
-	//   0 = 已实测免费（限免期/夜间免费的号，最强偏好）
-	//   1 = 无观测（含观测过期）
-	//   2 = 已实测收费
-	// 为什么"无观测"排在"已实测收费"之前：新号的限免状态只能靠实测发现，
+	// 成本分层：reqModel 非空时，按该模型的**成本层**把候选分层，只保留最优层。
+	//   0 = 免费（本地实测免费，或本地无观测但上游目录标免费）
+	//   1 = 未知（本地无观测且目录未下发该模型）
+	//   2 = 收费（本地实测收费，或本地无观测但目录标收费）
+	// 判级收在 credits.go 的 (*Pool).costTierOf：本地实测恒优先，无观测时回退目录
+	// 倍率（按账号自身域查，见该函数注释）。为什么要看目录：只凭实测会让新模型
+	// 全池「未知」——免费的号学不到免费、收费的号可能被当未知放行。
+	// 为什么"未知"排在"已实测收费"之前：新号的限免状态只能靠实测发现，
 	// 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
 	// 为什么用硬过滤而非仅排序：pickWeighted 会在候选内加权随机，只排序的话
 	// 收费号仍有机会抽中，达不到"优先免费"的语义。
 	// 分层口径收在 credits.go 的 costTierOf（紧急分支的"免费层优先"复用同一实现）。
-	costTier := func(e *entry) (int, float64) { return costTierOf(e, reqModel, now) }
+	costTier := func(e *entry) (int, float64) { return p.costTierOf(e, reqModel, now) }
 	bestTier := 2
 	hasTier1 := false
 	explored := false // 本次 pick 是否切了探索层（事件日志在选中号确定后打）
@@ -262,10 +264,10 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 func (p *Pool) pickEarliestExpiryAmongLocked(cands []*entry, reqModel string, now time.Time) *entry {
 	best := cands[0]
 	bestAt, bestOK := best.earliestExpiryAt(now)
-	bestTier, bestCost := costTierOf(best, reqModel, now)
+	bestTier, bestCost := p.costTierOf(best, reqModel, now)
 	for _, e := range cands[1:] {
 		at, ok := e.earliestExpiryAt(now)
-		tier, cost := costTierOf(e, reqModel, now)
+		tier, cost := p.costTierOf(e, reqModel, now)
 		if betterExpiryPick(at, ok, tier, cost, e.a.UID,
 			bestAt, bestOK, bestTier, bestCost, best.a.UID) {
 			best, bestAt, bestOK, bestTier, bestCost = e, at, ok, tier, cost
@@ -337,18 +339,11 @@ func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool 
 		return mc.CostPer1k > 0
 	}
 	// 2) 上游目录倍率兜底：无实测观测时用牌价判收费，堵住「无观测 = 放行」漏洞。
+	//    判级与成本分层共用 catalogRateTier（credits.go），两处口径永不漂移。
 	if p.modelRateOf == nil {
 		return false
 	}
-	rate := p.modelRateOf(e.a.Realm(), model)
-	if rate == "" {
-		return false // 目录未覆盖：未知，放行（见上方注释）
-	}
-	v, err := strconv.ParseFloat(rate, 64)
-	if err != nil {
-		return false // 倍率非数值（异常形态）：不据此惩罚账号
-	}
-	return v > 0
+	return catalogRateTier(p.modelRateOf(e.a.Realm(), model)) == 2
 }
 
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。

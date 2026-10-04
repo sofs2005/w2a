@@ -10,6 +10,7 @@ package pool
 
 import (
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -138,10 +139,10 @@ func (e *entry) debitBatchesLocked(d int64) {
 //
 // 语义（用户确认过的规则）：
 //   - 触发条件：候选里**至少有一个**账号的积分在 72 小时内到期。
-//   - 若该紧急集合里存在**已实测免费**（tier 0）的账号 → 只返回「免费 ∩ 紧急」
+//   - 若该紧急集合里存在**免费**（tier 0，含目录判免费的号）的账号 → 只返回「免费 ∩ 紧急」
 //     （"免费号不该为了烧临期积分去付钱"，用户明确纠正过：不是整个最低成本层优先，
 //     而是只有免费号能排到最早到期前面）。
-//   - 否则 → 返回全部紧急候选（未知成本与已实测收费之间**不按 tier 分层**，由到期
+//   - 否则 → 返回全部紧急候选（未知与收费之间**不按 tier 分层**，由到期
 //     时间决定——"不让未知成本层单凭 tier 排在更早到期账号前"）。
 //
 // 两种「返回 nil」的退化（都必须保留，否则会引入垄断）：
@@ -163,7 +164,7 @@ func (p *Pool) preferredCandidatesLocked(cands []*entry, reqModel string, now ti
 	}
 	free := make([]*entry, 0, len(cands))
 	for _, e := range cands {
-		if ti, _ := costTierOf(e, reqModel, now); ti == 0 {
+		if ti, _ := p.costTierOf(e, reqModel, now); ti == 0 {
 			free = append(free, e)
 		}
 	}
@@ -183,18 +184,58 @@ func (p *Pool) preferredCandidatesLocked(cands []*entry, reqModel string, now ti
 }
 
 // costTierOf 计算 (账号, 模型) 的成本层与单价：
-//   - 0 = 已实测免费（CostPer1k <= 0）
-//   - 1 = 无观测（含观测过期）
-//   - 2 = 已实测收费
+//   - 0 = 免费（本地实测免费，或本地无观测但目录标免费）
+//   - 1 = 未知（本地无观测且目录未下发该模型/倍数不可数值化）
+//   - 2 = 收费（本地实测收费，或本地无观测但目录标收费）
 //
-// 与 pick 内的闭包同一口径（pick 直接调用本函数），未知模型（model==""）按 tier 1。
-func costTierOf(e *entry, model string, now time.Time) (tier int, cost1k float64) {
-	mc, ok := e.modelCostOf(model, now)
-	if !ok {
+// 判据两级，本地实测恒优先于目录（实测是真实扣费证据，目录只是牌价）：
+//  1. 本地实测台账（e.modelCostOf）——有观测即定论，不看目录。
+//  2. 上游目录倍率兜底（p.modelRateOf）——本地无观测/观测过期时按牌价判级。
+//     只凭实测会让「没学过」恒等于「未知」：新模型全池无观测，免费的号学不到
+//     「免费」从而永远落后于已知收费号（pick 的硬过滤会把它滤掉），收费的号却
+//     可能被当成未知而放行（积分保底那条路径的 kimi-k3-1 实案）。
+//
+// 倍率按**账号自身所属域**（e.a.Realm()）查，与 floorBlockedForModel 同键：
+// 账号只会路由到自己域的上游、按该域计费，倍率表正是按 "cn"/"global" 分桶存储。
+// 选号是域集合形态（RealmSet）没有单一路由域，账号自身域是唯一正确的键——
+// 全池 pick 里 CN 号与 global 号各查各域，同一模型名在两域可判出不同层。
+//
+// cost1k 只来自本地实测：目录倍率是「牌价的倍数」，与 costPer1k（每千 token 的
+// 积分数）不同量纲，混进同一个排序键会得出无意义的次序（1.62 的倍数 vs 0.05 分/千
+// token 无从比较）。故目录判出的 tier 2 一律回 0，同层内退化为按 UID 确定性排序
+// ——真实单价本来也只有实测过才有。未知模型（model==""）恒按 tier 1。
+//
+// 调用方必须已持有 p.mu（读 p.modelRateOf；e.a.Realm() 内部取 a.mu，同
+// floorBlockedForModel 的锁序，无反向嵌套）。
+func (p *Pool) costTierOf(e *entry, model string, now time.Time) (tier int, cost1k float64) {
+	if mc, ok := e.modelCostOf(model, now); ok {
+		if mc.CostPer1k <= 0 {
+			return 0, 0
+		}
+		return 2, mc.CostPer1k
+	}
+	if p.modelRateOf == nil {
 		return 1, 0
 	}
-	if mc.CostPer1k <= 0 {
-		return 0, 0
+	return catalogRateTier(p.modelRateOf(e.a.Realm(), model)), 0
+}
+
+// catalogRateTier 把上游目录倍率原文判成成本层：0 = 目录标免费，2 = 目录标收费，
+// 1 = 未知（未下发 / 非数值 / 负数）。
+//
+// 为什么负数也算未知而不是免费：倍率是倍数语义，负值上游不该下发，遇到只能当异常
+// 形态处理——按免费放行等于让一个畸形值把账号的保底拦截至零，风险方向不安全。
+// 与 floorBlockedForModel 共用本函数，保证「判收费」两处永远同口径。
+func catalogRateTier(rate string) int {
+	if rate == "" {
+		return 1
 	}
-	return 2, mc.CostPer1k
+	v, err := strconv.ParseFloat(rate, 64)
+	if err != nil || v < 0 {
+		return 1
+	}
+	if v == 0 {
+		return 0
+	}
+	return 2
 }

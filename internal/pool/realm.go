@@ -104,9 +104,9 @@ func (p *Pool) AvailableUIDsForModelRealms(model string, realms RealmSet) []stri
 // UrgentUIDsForModelRealm 返回「紧急到期优先」的可用 UID 子集（issue:积分过期 的
 // 粘性初次分配侧）：仅当池里存在 72 小时内到期的可用候选时非空，否则返回 nil。
 //
-// 语义与选号侧共用同一实现（credits.preferredCandidatesLocked）：已实测免费层可整体
-// 优先于临期非免费号；无免费层时返回全部紧急候选（**不做"只留最早那一个"的截断**——
-// 粘性侧要在这批里哈希打散，只留一个会让所有新会话钉死在同一账号）。
+// 语义与选号侧共用同一实现（credits.preferredCandidatesLocked）：免费层（实测免费
+// 或目录标免费）可整体优先于临期非免费号；无免费层时返回全部紧急候选（**不做"只留
+// 最早那一个"的截断**——粘性侧要在这批里哈希打散，只留一个会让所有新会话钉死在同一账号）。
 //
 // 调用方（session 路由）只在**新建或失效重绑**时用它缩小哈希候选集；已有有效绑定
 // 走原 fast path，不因积分到期被切号（用户要求保留粘性）。

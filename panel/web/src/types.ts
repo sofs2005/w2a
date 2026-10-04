@@ -240,8 +240,22 @@ export interface Model {
   /** 上游显示名，如 "Deepseek-V4.1-Flash"。 */
   name?: string
   description?: string
-  /** 积分倍率原文，形如 "x0.03" 或 "x0.59 credits"；缺省 = 上游未标倍率。 */
+  /**
+   * 积分倍率原文，形如 "x0.03" 或 "x0.59 credits"；缺省 = 上游未标倍率。
+   *
+   * 两域都有该模型时这是**并集去重留下的单个值**（CN 优先），只代表国内版价；
+   * 按域分栏展示请用 credits_cn / credits_global。
+   */
   credits?: string
+  /**
+   * 该模型在国内版 / 国际版的积分倍率原文（各域自己的价）。
+   *
+   * 为什么按域拆：两域倍率确实会不同，且促销（限时免费 / 夜间折扣）也是分域下发的
+   * ——只留合并后的 credits 会让国际版 tab 显示国内价。
+   * 缺省（老网关未透出）= undefined，此时回退用 credits。
+   */
+  credits_cn?: string
+  credits_global?: string
   vendor?: string
   tags?: string[]
   is_default?: boolean
@@ -261,8 +275,14 @@ export interface Model {
   reasoning_effort?: string
   reasoning_summary?: string
 
-  /** 命中的上游促销（限时免费 / 折扣）。按优先级降序，可能同时有多条。 */
-  promotions?: ModelPromotion[] | null
+  /**
+   * 命中的上游促销（限时免费 / 折扣），按域各一份，各按优先级降序。
+   *
+   * 促销是分域下发的（同一个模型两域挂的活动可能完全不同），故不能合并成一份
+   * ——否则总会有一个 tab 显示错域的优惠。两者都缺省 = 该域无活动（或老网关未拆）。
+   */
+  promotions_cn?: ModelPromotion[] | null
+  promotions_global?: ModelPromotion[] | null
 
   /**
    * 该模型可用的账号域（裸名目录专用）。

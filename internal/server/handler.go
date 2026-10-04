@@ -343,6 +343,25 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		realms[id][realm] = true
 	}
+	// creditsByRealm 记录每个裸名在**各域**的倍率原文（面板按域分栏展示用）。
+	//
+	// 为什么不能只留合并后的那个 credits：合并规则是 CN 优先（见 mergeMissingFields），
+	// 两域倍率不同时 global 的值被丢掉，面板国内版/国际版两个 tab 于是渲染同一个数
+	// ——国际版显示的是国内价。两域倍率确实会不同（upstream 侧 modelRates 本就按域
+	// 分桶存储，pool 选号按账号所属域各查各的），故展示也必须按域各留一份。
+	//
+	// 注意本字段**只服务展示**：选号/积分保底读的是 upstream 包按域分桶的倍率表
+	// （pool.modelRateOf → upstream.ModelRate），与本目录输出无关。
+	creditsByRealm := map[string]map[string]string{}
+	noteCredits := func(id, realm, credits string) {
+		if id == "" || credits == "" {
+			return
+		}
+		if creditsByRealm[id] == nil {
+			creditsByRealm[id] = map[string]string{}
+		}
+		creditsByRealm[id][realm] = credits
+	}
 
 	// CN 动态目录先入（字段最全，作为合并基底）。
 	out := make([]map[string]any, 0)
@@ -367,6 +386,7 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
 		entry = applyModelInfoFields(entry, mi)
+		noteCredits(id, "cn", mi.Credits)
 		// P0：effort 能力透出——远端 supportedEfforts 权威，缺失落到 CN 静态兜底表
 		// （issue #84 客户端可发现档位，不再盲传）。无档位→省略字段（非空数组）。
 		if efforts, def := upstream.EffortListing("cn", id, mi.Efforts, mi.DefaultEffort); efforts != nil {
@@ -409,6 +429,7 @@ func (h *Handler) modelList() []map[string]any {
 			var remoteCtx, remoteOut int64
 			if mi, ok := globalInfos[id]; ok {
 				entry = applyModelInfoFields(entry, mi)
+				noteCredits(id, "global", mi.Credits)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
 			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
@@ -471,13 +492,33 @@ func (h *Handler) modelList() []map[string]any {
 		}
 		entry["realms"] = list
 	}
+	// 分域倍率统一写出（credits_cn / credits_global）：两域倍率会不同，面板按域分栏
+	// 展示必须各取各的，只留合并后的 credits 会让国际版 tab 显示国内价。
+	// 单域模型只写自己那侧；两侧都没有（上游未标倍率）则整体不写该字段。
+	for _, entry := range out {
+		id, _ := entry["id"].(string)
+		cr := creditsByRealm[id]
+		if len(cr) == 0 {
+			continue
+		}
+		if v, ok := cr["cn"]; ok {
+			entry["credits_cn"] = v
+		}
+		if v, ok := cr["global"]; ok {
+			entry["credits_global"] = v
+		}
+	}
 	return out
 }
 
 // mergeMissingFields 把 src 里 dst 尚未设置（或为空值）的字段补进 dst。
 // 用于目录并集去重：CN 条目为基底（字段最全），global 同名条目只补缺、不覆盖——
-// 否则 global 侧空值会抹掉 CN 侧已有的 credits/tags/能力旗标。
+// 否则 global 侧空值会抹掉 CN 侧已有的 tags/能力旗标。
 // id/object/created/owned_by 等身份字段一律不参与（同名即同一对外条目）。
+//
+// credits 的按域展开不走本函数：两域倍率都有效（不是"有没有"而是"各是多少"），
+// 合并语义在此必然是错的，故由调用方另经 creditsByRealm 写出 credits_cn /
+// credits_global，本函数保留的 credits 仅作老客户端的向后兼容值（= CN 值）。
 func mergeMissingFields(dst, src map[string]any) {
 	for k, v := range src {
 		switch k {

@@ -131,6 +131,17 @@ type Model struct {
 	// 按 id 前缀猜（而前缀在裸名化后已不存在，结果全部落进「国内版」）。
 	// 缺省（老网关未下发）= nil，调用方须按「未知」处理，不可当作空集合。
 	Realms []string `json:"realms,omitempty"`
+
+	// CreditsCN / CreditsGlobal 该模型在**各域**的积分倍率原文（如 "x0.06"）。
+	//
+	// 为什么不复用上面的 Credits：那是并集去重时留下的单个值（CN 优先），两域倍率
+	// 不同时它只代表 CN，面板国际版 tab 会显示国内价。两域倍率确实会不同——网关
+	// 选号本就按账号所属域各查各的倍率表。
+	//
+	// 必须显式声明，理由同 Realms：白名单式结构体会静默丢弃未声明字段。缺省
+	// （老网关未下发）时前端回退用 Credits。
+	CreditsCN     string `json:"credits_cn,omitempty"`
+	CreditsGlobal string `json:"credits_global,omitempty"`
 }
 
 // Client 网关客户端。每次请求都携带当前 api_key，因此支持运行期改配置。
