@@ -50,6 +50,9 @@ type AccountStatus struct {
 	// 这是「按号分账」在面板上唯一的可见处：统一调度后裸名会跨域选中账号，
 	// /v1/stats 只按模型字符串聚合、不区分账号，域维度只能从这里看。
 	ModelCosts []ModelCostStatus `json:"model_costs,omitempty"`
+	// CheckinDone 本地今日已签到（签到成功或上游「今天已签到」幂等拒绝均算）。
+	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
+	CheckinDone bool `json:"checkin_done,omitempty"`
 }
 
 // RateLimitedModel 单个被限流模型的台账行（与 pool.RateLimitedModel 对齐）。

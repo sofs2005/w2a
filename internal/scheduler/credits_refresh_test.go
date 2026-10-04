@@ -25,6 +25,12 @@ func fastCreditsRefresh(t *testing.T) {
 	old := creditsRefreshDelay
 	creditsRefreshDelay = 0
 	t.Cleanup(func() { creditsRefreshDelay = old })
+	// 上游瞬时错误重试（任务 #4）默认 2s+4s：失败账号每个要多耗 6s，本包多个
+	// 用例的时限预算（如「失败不中断」的 10s）都是按「失败即时返回」定的，不压短
+	// 就会假失败。压到毫秒级——本包测的是门控与互斥语义，不是重试节奏（后者由
+	// upstream 包自己的用例钉住）。
+	restore := upstream.SetBillingRetryDelayForTest(time.Millisecond)
+	t.Cleanup(restore)
 }
 
 // balanceBody 构造 get-user-resource 的合法响应体（外层 {"code":0,"data":…} 信封

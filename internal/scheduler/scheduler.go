@@ -436,6 +436,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。
 				oc.Status = CheckinAlready
+				s.cfg.Pool.NoteCheckinDone(st.UID)
 			} else {
 				oc.Status = CheckinFail
 				oc.Detail = err.Error()
@@ -445,6 +446,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			oc.Status = CheckinOK
 			// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
 			// 重复触发时出现），成功也落一行。
+			s.cfg.Pool.NoteCheckinDone(st.UID)
 			log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 		}
 		// 分桶 + 逐包到期快照：快过期窗口内的积分单独标记（权重因子），逐包真实到期

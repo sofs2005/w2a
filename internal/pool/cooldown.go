@@ -40,6 +40,20 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 	}
 }
 
+// NoteCheckinDone 标记账号今日已签到（签到成功与上游"今天已签到"幂等拒绝均算）。
+// 记录本地日期，跨零点自然过期；不触碰冷却/禁用状态（签到与冷却域正交）。
+func (p *Pool) NoteCheckinDone(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		day := time.Now().Format("2006-01-02")
+		if e.lastCheckinDay != day {
+			e.lastCheckinDay = day
+			p.dirty.Store(true)
+		}
+	}
+}
+
 // SetCreditsDetailed 更新账号余额总量 + 快过架子集（签到时调用，供优先消耗快过期积分）。
 // expiring 会被钳到 [0, credits]：上游分桶异常时不污染权重。
 // 兼容入口：不更新逐包到期快照（creditBatches 保持不变）——生产已改用

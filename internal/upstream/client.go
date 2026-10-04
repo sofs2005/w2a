@@ -1496,6 +1496,53 @@ func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, b
 	return nil, lastErr
 }
 
+// billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
+// 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
+var billingRetryDelay = 2 * time.Second
+
+// SetBillingRetryDelayForTest 跨包测试钩子：让包外测试（如 scheduler 的
+// RefreshCreditsOnce 用例）把重试间隔压到毫秒级。不导出生产 API——生产恒定
+// 2s/4s；只有测试需要它，否则「失败账号逐个补打两次」会把遍历耗时从 ~0
+// 拉到每号 6s，令既有测试的时限预算失真（与 ResetLookupChainForTest 同口径）。
+// 返回恢复函数，调用方 defer 即可（比自存旧值少一处易漏的还原）。
+func SetBillingRetryDelayForTest(d time.Duration) (restore func()) {
+	old := billingRetryDelay
+	billingRetryDelay = d
+	return func() { billingRetryDelay = old }
+}
+
+// isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
+// 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
+// code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
+// 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) {
+		return ue.Kind == ErrServer
+	}
+	return true
+}
+
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
+// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
+// 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
+func (c *Client) retryBillingTransient(fn func() error) error {
+	err := fn()
+	if err == nil || !isTransientBillingErr(err) {
+		return err
+	}
+	for i := 1; i <= 2; i++ {
+		time.Sleep(time.Duration(i) * billingRetryDelay)
+		if err = fn(); err == nil || !isTransientBillingErr(err) {
+			return err
+		}
+	}
+	return err
+}
+
 // UserResource 查询账号当前可花费积分余额（所有套餐 CycleCapacity 聚合，负值钳 0）。
 func (c *Client) UserResource(a *auth.Auth) (remain int64, err error) {
 	remain, _, err = c.UserResourceDetailed(a, 0)
@@ -1582,7 +1629,14 @@ func (c *Client) getUserResourceBody(a *auth.Auth) (*userResourceResp, error) {
 		"PackageEndTimeRangeBegin": now.Format(packageEndLayout),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format(packageEndLayout),
 	}
-	data, err := c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+	// 余额查询同样做瞬时错误有界重试（签到后紧接着的 user-resource 偶发 500 会让
+	// 该账号错过本次解冻/到期快照更新，只能等下一个刷新周期）。
+	var data json.RawMessage
+	err := c.retryBillingTransient(func() error {
+		var e error
+		data, e = c.billingMeterJSON(a, c.billingMeterPaths(a), http.MethodPost, body)
+		return e
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1675,9 +1729,13 @@ func packageRemainUsed(a respAccount) (remain, used, size int64) {
 }
 
 // DailyCheckin 执行每日签到。已签到（业务 code 非 0）也返回错误，调用方按 msg 区分。
+// 偶发上游 5xx（code 10000）做有界重试（见 retryBillingTransient）——单次抖动不再
+// 让该账号整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *auth.Auth) error {
-	_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
-	return err
+	return c.retryBillingTransient(func() error {
+		_, err := c.billingMeterJSON(a, c.checkinMeterPaths(a), http.MethodPost, map[string]any{})
+		return err
+	})
 }
 
 // IsAlreadyCheckin 报告 err 是否表示"今天已签到"（上游幂等拒绝重复签到）。

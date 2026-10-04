@@ -69,6 +69,9 @@ type Status struct {
 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
 	ConsecutiveFails int       `json:"consecutive_fails"`
 	DegradeUntil     time.Time `json:"degrade_until,omitempty"` // 连败降权截止（非零且未过 = 降权中）
+	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
+	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
+	CheckinDone bool `json:"checkin_done,omitempty"`
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
@@ -124,6 +127,10 @@ type entry struct {
 	errTotal    int64         // 累计错误（终身累计，供状态展示；选号权重不消费，原成功率因子已删）
 	lastErr     time.Time     // 最近一次错误时间
 	lastSuccess     time.Time // 最近一次成功时间
+	// lastCheckinDay 最近一次签到成功的本地日期（"2006-01-02"）。签到成功与上游
+	// 幂等拒绝（"今天已签到"）都算；statusOf 据此输出 CheckinDone 供面板按钮显示
+	// 签到/已签。持久化：跨重启不丢当日状态。
+	lastCheckinDay string
 	coolKind        CoolKind
 	until           time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled        bool
@@ -381,6 +388,9 @@ type stateAccount struct {
 	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
 	LastSuccess time.Time `json:"last_success,omitempty"`
 	LastErr     time.Time `json:"last_err,omitempty"`
+	// LastCheckinDay 最近一次签到成功的本地日期（entry.lastCheckinDay 同源）。
+	// 持久化以保留「当日已签」状态：签到后重启，面板按钮不回退成「签到」。
+	LastCheckinDay string `json:"last_checkin_day,omitempty"`
 	// SoftStreak 连续软冷却次数（软退避指数）。旧 state.json 缺此字段 → 零值，
 	// 退避从基数重新开始（向后兼容）。
 	SoftStreak int `json:"soft_streak"`

@@ -208,6 +208,45 @@ func IsAlreadyCheckedIn(err error) bool {
 	return false
 }
 
+// billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
+// 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
+var billingRetryDelay = 2 * time.Second
+
+// isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
+// 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
+// code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
+// 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+func isTransientBillingErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) {
+		return ue.Kind == ErrServer
+	}
+	return true
+}
+
+// retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
+// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。
+//
+// 为什么面板侧也要有：用户在面板点的「签到」按钮走的是本包的 DailyCheckin
+// （面板持有账号凭据、直连上游），不经网关，故网关侧的重试覆盖不到这里。
+// 一次 5xx 抖动会让该账号整天漏签，而签到是积分续命的唯一入口。
+func retryBillingTransient(fn func() error) error {
+	err := fn()
+	if err == nil || !isTransientBillingErr(err) {
+		return err
+	}
+	for i := 1; i <= 2; i++ {
+		time.Sleep(time.Duration(i) * billingRetryDelay)
+		if err = fn(); err == nil || !isTransientBillingErr(err) {
+			return err
+		}
+	}
+	return err
+}
+
 // IsBuddyTaskIncomplete 判定领养门槛未达标（HTTP 400 + first_buddy 关键词）。
 func IsBuddyTaskIncomplete(err error) bool {
 	var ue *Error
@@ -585,7 +624,20 @@ type CheckinResult struct {
 }
 
 // DailyCheckin 执行每日签到。已签到不视为失败，返回 Already=true。
+// 偶发上游 5xx 做有界重试（见 retryBillingTransient）——单次抖动不再让该账号
+// 整天漏签；「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(a *authstore.Account) (*CheckinResult, error) {
+	var res *CheckinResult
+	err := retryBillingTransient(func() error {
+		var e error
+		res, e = c.dailyCheckinOnce(a)
+		return e
+	})
+	return res, err
+}
+
+// dailyCheckinOnce 单次签到调用（重试逻辑在 DailyCheckin）。
+func (c *Client) dailyCheckinOnce(a *authstore.Account) (*CheckinResult, error) {
 	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+"/v2/billing/meter/daily-checkin", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, err
@@ -741,12 +793,20 @@ func (c *Client) UserResource(a *authstore.Account) (*Credits, error) {
 		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
 		"PackageEndTimeRangeEnd":   now.Add(365 * 101 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	})
-	req, err := http.NewRequest(http.MethodPost, c.billingBase(a)+"/v2/billing/meter/get-user-resource", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	billingHeaders(req, a)
-	data, err := c.doJSON(req)
+	// 余额查询同样做瞬时错误有界重试（签到后紧接着的 user-resource 偶发 500 会让
+	// 面板错过本次余额快照更新，只能等下一次刷新）。
+	// 请求在闭包内**逐次重建**：重试复用同一个 *http.Request 会因 Body 已被首次
+	// 发送消费而报 ContentLength 不符，必须每次新造。
+	var data json.RawMessage
+	err := retryBillingTransient(func() error {
+		req, e := http.NewRequest(http.MethodPost, c.billingBase(a)+"/v2/billing/meter/get-user-resource", bytes.NewReader(body))
+		if e != nil {
+			return e
+		}
+		billingHeaders(req, a)
+		data, e = c.doJSON(req)
+		return e
+	})
 	if err != nil {
 		return nil, err
 	}
