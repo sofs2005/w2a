@@ -157,3 +157,65 @@ func TestCostTierNoRateTableKeepsLegacy(t *testing.T) {
 		t.Fatalf("未注入倍率表时应为 tier 1（无观测），got tier=%d cost=%v", tier, cost)
 	}
 }
+
+// TestCostTierUnknownPoolCannotFilter 全池「未知」时成本分层**不再具备筛选力**——
+// 这是实案（国内 0.11 / 国际 0 的模型上，国内号仍接走大部分流量）的机制回归。
+//
+// 为什么单看 costTierOf 的返回值不够：TestCostTierNoRateTableKeepsLegacy 只断言
+// 单个号是 tier 1，而事故的破坏力来自**全员 tier 1 时 bestTier==1、硬过滤放行全部
+// 候选**——分层静默失效，退化成纯权重抽签，积分多的域（国内四号合计 27701 分 vs
+// 国际三号 1100 分）自然吃掉大头。本用例锁的是这个"失效"的可见后果，而不是
+// 任一单点返回值：倍率表就绪时国际零价号必须独占，缺失时国内高积分号必须能中选。
+func TestCostTierUnknownPoolCannotFilter(t *testing.T) {
+	withNoPickGap(t)
+
+	// 三域判定的最小复刻：国内号积分远高于国际号，模型国内收费、国际免费。
+	setup := func(rateOf func(realm, model string) string) *Pool {
+		p := New("")
+		p.SetCostExploreInterval(0)
+		p.SetRandomSource(func(n int64) int64 { return 0 }) // 抽签确定化：权重高者中选
+		if rateOf != nil {
+			p.SetModelRateOf(rateOf)
+		}
+		cn := &auth.Auth{UID: "cn-a"}
+		cn.SetRealm("cn")
+		gl := &auth.Auth{UID: "g-a"}
+		gl.SetRealm("global")
+		p.Add(cn)
+		p.Add(gl)
+		// 国内号积分是国际号的 10 倍：权重抽签必偏向国内号（积分项 ×10 满档）。
+		p.SetCredits("cn-a", 100000)
+		p.SetCredits("g-a", 10000)
+		return p
+	}
+
+	// 倍率表就绪：国内 0.11 收费 → tier 2，国际 0 免费 → tier 0。
+	// 硬过滤只留 tier 0，国内号**积分再高也一次不该中选**。
+	p := setup(rates(map[string]map[string]string{
+		"cn":     {"dual-model": "0.11"},
+		"global": {"dual-model": "0.00"},
+	}))
+	for i := 0; i < 20; i++ {
+		a := p.PickExcludingForRealm(nil, "dual-model", "")
+		if a == nil {
+			t.Fatalf("第 %d 次 pick 返回 nil", i)
+		}
+		if a.UID != "g-a" {
+			t.Fatalf("倍率表就绪时国际免费号应独占（第 %d 次选中 %s）——"+
+				"若此处失败说明成本分层没生效，收费号在偷偷接流量", i, a.UID)
+		}
+	}
+
+	// 倍率表缺失（老部署 / 冷缓存 / 修复前的判级口径）：全员 tier 1，
+	// bestTier==1 → 硬过滤放行全部候选 → 退化回权重抽签，国内高积分号中选。
+	// 这不是"期望行为"，而是把事故机制**钉在测试里**：一旦有人在无表时误以为
+	// 分层仍在兜底，这条断言会立刻提醒他分层其实已经失效。
+	p2 := setup(nil)
+	a := p2.PickExcludingForRealm(nil, "dual-model", "")
+	if a == nil {
+		t.Fatal("无倍率表时 pick 应返回账号（未知层不硬过滤）")
+	}
+	if a.UID != "cn-a" {
+		t.Fatalf("无倍率表时分层失效、退化为权重抽签 → 高积分国内号应中选，got %s", a.UID)
+	}
+}
