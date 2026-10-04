@@ -149,6 +149,13 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// CreditFloor 积分保底：账号余额低于该值时，对收费模型不再参与选号——
+		// 防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到（最坏约 11.5
+		// 小时不可用）。收费判据两级：本地实测台账优先，无观测时用上游目录倍率
+		// 兜底（高价新模型全池无观测时不会绕过）。免费模型（实测 cost=0 或目录
+		// 倍率 0）不受限；签到回血越过 floor 自动恢复。
+		// 默认 0 = 关闭；负值钳 0。
+		CreditFloor int64 `json:"credit_floor"`
 		// StateFlush 池状态（state.json）后台落盘周期，如 "30m"。
 		//
 		// 余额扣减估算/成功错误计数/冷却截止这类**高频运行态**攒到周期末统一落盘；
@@ -450,6 +457,10 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
+	if c.Pool.CreditFloor < 0 {
+		c.Pool.CreditFloor = 0
 	}
 	// 池状态落盘周期：空值回落默认 30m（Default 已置；此兜底覆盖显式 ""）；
 	// "0" 是合法值（关闭后台落盘，仅靠退出时 Flush），不回落；负值钳 0 同关闭。

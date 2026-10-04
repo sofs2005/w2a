@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -57,6 +58,9 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	if reqModel != "" {
 		healthyOf = func(e *entry) bool { return realmOK(e) && e.healthyForModel(now, reqModel) }
 	}
+	// floorBlocked 积分保底拦截判定（实现在 floorBlockedForRealmModel，与粘性路径共用）：
+	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
+	floorBlocked := func(e *entry) bool { return p.floorBlockedForModel(e, reqModel, now) }
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -64,6 +68,9 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 		}
 		if !healthyOf(e) {
 			continue
+		}
+		if floorBlocked(e) {
+			continue // 积分保底：触底号不接收费模型（免费/未知倍率不受限）
 		}
 		if p.inFlightFull(e) {
 			continue // 在途占满：跳过（max=0 不限时不触发）
@@ -73,7 +80,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realms)
+		return p.pickEarliestExpiryLocked(tried, now, realms, reqModel)
 	}
 	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「72 小时内到期」的
 	// 账号时，按真实到期时刻硬优先（最早优先），已实测免费的临期号排在最前。
@@ -291,12 +298,70 @@ func betterExpiryPick(
 	return aUID < bUID
 }
 
+// floorBlockedForModel 积分保底拦截判定（pick 普通轮换、全冷却兜底与
+// PickByUIDForModel 粘性路径的单一事实来源）：floor>0 且账号触底
+// （credits < floor）且该模型**收费**时为真。
+//
+// 收费判据两级（任一成立即判收费 → 拦）：
+//  1. 本地实测台账（e.modelCostOf）：该号在该模型上实测 cost>0。
+//  2. 上游目录倍率（p.modelRateOf）：本地无观测/观测过期时的兜底。只看实测会让
+//     「无观测」恒等于「放行」——而高价新模型恰恰全池无观测（kimi-k3-1 实案：
+//     x1.62、223 分/百万 token，两笔打穿 100 分的号并触发硬冷却到次日 04:00）。
+//     倍率由上游随模型目录下发，请求前即已知，不必付学费才能学到。
+//
+// 倍率按**账号自身所属域**（e.a.Realm()）查：账号只会路由到自己域的上游，也只会
+// 被该域的目录计费；倍率表正是按该键存储（CN 存 "cn"、global 存 "global"，见
+// upstream.storeModelRates）。本仓库选号是**域集合**形态（RealmSet），没有单一的
+// 路由域参数可用，而账号自身域恰好是唯一正确的键——多域并集下每个账号各查各域，
+// 语义比"取集合键"更准（集合键 "cn+global" 在倍率表里根本不存在）。
+//
+// 不拦的情形：
+//   - 模型免费：本地实测 cost<=0，或目录倍率为 0/"0.00"。保底的目的正是
+//     「留余额给免费模型用」——但若账号已归零，上游仍会 402（余额门禁是账号级的，
+//     与模型无关），此时由 ErrHardCredit 冷却承接，与本判定无关。
+//   - 模型倍率未知（台账无观测且目录未下发该模型）：无法判收费，按放行处理。
+//     这是有意的保守选择——目录未覆盖的模型多为内部/别名模型，拦了会让号永久失联；
+//     风险由「未知」本身承担，但已知收费的一律拦。
+//   - model 为空（无模型上下文）不拦：无成本维度，floor 无从判收费。
+//
+// 余额用本地插值口径（签到权威值 - 每笔 usage.credit 实扣，见 NoteModelCost）：
+// 只会偏低不会偏高（官方对账延迟方向安全），正是保底需要的安全方向。
+// 调用方必须已持有 p.mu（读 e.credits / e.modelCost / p.modelRateOf；e.a.Realm()
+// 内部取 a.mu，与 pickInRealms 既有读法同为 p.mu → a.mu 序，无反向嵌套）。
+func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool {
+	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+		return false
+	}
+	// 1) 本地实测台账：最权威（真实扣费证据）。
+	if mc, ok := e.modelCostOf(model, now); ok {
+		return mc.CostPer1k > 0
+	}
+	// 2) 上游目录倍率兜底：无实测观测时用牌价判收费，堵住「无观测 = 放行」漏洞。
+	if p.modelRateOf == nil {
+		return false
+	}
+	rate := p.modelRateOf(e.a.Realm(), model)
+	if rate == "" {
+		return false // 目录未覆盖：未知，放行（见上方注释）
+	}
+	v, err := strconv.ParseFloat(rate, 64)
+	if err != nil {
+		return false // 倍率非数值（异常形态）：不据此惩罚账号
+	}
+	return v > 0
+}
+
 // pickEarliestExpiryLocked 全冷却兜底：在非禁用的软冷却/熔断账号中选截止最早的一个。
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
 // realms 为域集合（nil/空 = 全池）：池内域外账号不参与本集合的兜底。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realms RealmSet) *auth.Auth {
+//
+// 积分保底同样在此生效（model 非空时）：floor 把健康号全部拦掉后 cands 为空会走到
+// 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
+// floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
+// 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realms RealmSet, model string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -310,6 +375,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if p.floorBlockedForModel(e, model, now) {
+			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
 		if p.inFlightFull(e) {
 			continue

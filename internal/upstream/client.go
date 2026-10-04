@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -667,6 +668,12 @@ type Client struct {
 	// 与 efforts 同 realm 分层桶（同 C-2 隔离原则），共用 effortsMu。
 	defaultEfforts map[string]map[string]string
 
+	// modelRates 缓存各模型当前生效积分倍率（规范化数值，如 "0.5"）。
+	// 与 efforts 共用 realm 分层和锁；每次成功刷新模型目录时整体替换对应域。
+	// 消费方是 pool 的积分保底（credit_floor）：本地实测台账无观测时，用目录
+	// 倍率判「这个模型收不收费」——见 pool.floorBlockedForRealmModel。
+	modelRates map[string]map[string]string
+
 	// globalModels 缓存 global 模型名目录纯动态探测结果（1h TTL + 5min 负缓存），
 	// 见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
@@ -860,6 +867,74 @@ func (c *Client) storeEfforts(realm string, efforts map[string][]string, defs ma
 	}
 	c.efforts[k] = efforts
 	c.defaultEfforts[k] = defs
+}
+
+// normalizeModelRate 把上游倍率原文规范化为可比较的数值键。
+// 兼容 "x0.05" / "x0.05 credits" / "0.50x" 等形态；无法数值化时保留去除
+// credits 后缀与空白后的原文，避免编造倍率。
+func normalizeModelRate(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(strings.ToLower(s), "credits") {
+		s = strings.TrimSpace(s[:len(s)-len("credits")])
+	}
+	if strings.HasPrefix(strings.ToLower(s), "x") {
+		s = strings.TrimSpace(s[1:])
+	} else if strings.HasSuffix(strings.ToLower(s), "x") {
+		s = strings.TrimSpace(s[:len(s)-1])
+	}
+	if s == "" {
+		return ""
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return strings.TrimSpace(raw)
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// effectiveModelRate 返回模型当前生效倍率：有机器可读优惠时取折扣价，
+// 否则取牌价；两者均缺省时为空。
+//
+// 为什么优惠优先：PromoCredits 是当前生效价（如「限时免费」的 "0x"），Credits
+// 是转正后牌价。积分保底要判的是「这一笔会不会扣钱」，故以生效价为准。
+func effectiveModelRate(mi ModelInfo) string {
+	if mi.PromoFactor != nil && strings.TrimSpace(mi.PromoCredits) != "" {
+		return normalizeModelRate(mi.PromoCredits)
+	}
+	return normalizeModelRate(mi.Credits)
+}
+
+// storeModelRates 按 realm 整体替换模型倍率快照。目录成功刷新但没有可解析
+// 倍率时写入空桶，使旧倍率不会继续冒充当前价。
+func (c *Client) storeModelRates(realm string, infos []ModelInfo) {
+	rates := make(map[string]string, len(infos))
+	for _, mi := range infos {
+		if mi.ID == "" {
+			continue
+		}
+		if rate := effectiveModelRate(mi); rate != "" {
+			rates[mi.ID] = rate
+		}
+	}
+	c.effortsMu.Lock()
+	defer c.effortsMu.Unlock()
+	if c.modelRates == nil {
+		c.modelRates = make(map[string]map[string]string)
+	}
+	c.modelRates[realmKey(realm)] = rates
+}
+
+// ModelRate 返回最近成功刷新的指定域模型生效倍率；未知返回空串。
+func (c *Client) ModelRate(realm, model string) string {
+	if c == nil || model == "" {
+		return ""
+	}
+	c.effortsMu.RLock()
+	defer c.effortsMu.RUnlock()
+	return c.modelRates[realmKey(realm)][model]
 }
 
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），
@@ -1164,6 +1239,14 @@ type ModelInfo struct {
 	MaxAllowedSize    int64    // maxAllowedSize 最大允许上下文（与 maxInputTokens 口径并列，上游各自下发）
 	ReasoningEffort   string   // reasoning.effort 推理模式（与 supportedEfforts 数组不同源）
 	ReasoningSummary  string   // reasoning.summary 推理摘要模式（如 "auto"）
+
+	// 优惠（modelPromotions，/v3/config data.modelPromotions）：Credits 是**牌价**
+	//（转正后基准倍率），Promo* 是当前生效的限时优惠。积分保底据此取「生效价」判
+	// 收费——否则限时免费的模型会被按牌价误拦（见 effectiveModelRate）。
+	// 仅解析机器可读的折扣倍率；badge/hover 展示文案本仓库不透出（面板是独立 GUI，
+	// 优惠展示走它自己的直连路径），故不解析。
+	PromoFactor  *float64 // 折扣系数（0=限时免费，0.5=五折）；nil=无
+	PromoCredits string   // 折扣后倍率原文（如 "0x" / "0.50x"）
 }
 
 // dynModelEntry 上游模型目录（CN /console 与 global /v2 同构）的单条模型解析形态，
@@ -1306,6 +1389,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
+	// 刷新积分倍率快照（供 pool 积分保底的目录兜底判「收不收费」）：
+	// 与 effort 桶不同，倍率是**整体替换**——目录成功但无可解析倍率时写空桶，
+	// 避免旧价继续冒充当前价（见 storeModelRates）。
+	c.storeModelRates(a.Realm(), out)
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入 efforts 桶）。
 	// 空桶时跳过写：避免「某探测无档位数据」清掉既有桶（例：cn 桶已有档位，再次探测返回全无等级 → 不应清空）。
 	cache := make(map[string][]string, len(out))
@@ -1428,6 +1515,140 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
+// v3PromoDiscount 优惠的折扣段（只在部分促销条目上存在）。
+type v3PromoDiscount struct {
+	DiscountedCredits string  `json:"discountedCredits"`
+	Factor            float64 `json:"factor"`
+}
+
+// v3PromoWindow daily 时段窗口（"23:00"→"7:50"，start > end 表示跨午夜）。
+type v3PromoWindow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// v3PromoSchedule 优惠的生效时段（Timezone 实测恒 Asia/Shanghai；validFrom/Until
+// 可缺省；daily 为空 = 全天）。
+type v3PromoSchedule struct {
+	Daily      []v3PromoWindow `json:"daily"`
+	Timezone   string          `json:"timezone"`
+	ValidFrom  string          `json:"validFrom"` // RFC3339
+	ValidUntil string          `json:"validUntil"`
+}
+
+// v3ModelPromotion /v3/config data.modelPromotions 单条优惠定义（实测 7 条：
+// deepseek 系错峰五折、glm-5.2 夜间五折、hy3 与 hy4-preview-f 限时免费）。
+// discount 只在部分条目上存在：有 factor 的可算生效价；「错峰使用」类只有时段
+// 文案（factor 藏在 hover 文本里，无机器可读值），无折扣段即不参与算价。
+type v3ModelPromotion struct {
+	Enabled  bool             `json:"enabled"`
+	Priority int              `json:"priority"`
+	ModelIDs []string         `json:"modelIds"`
+	Discount *v3PromoDiscount `json:"discount"`
+	Schedule *v3PromoSchedule `json:"schedule"`
+}
+
+// promoZone 优惠时区：上游恒 Asia/Shanghai（UTC+8 无夏令时），用 FixedZone 免依赖
+// 系统 tzdata（Windows 无 IANA 库时 LoadLocation 会失败）。
+var promoZone = time.FixedZone("CST", 8*3600)
+
+// promoClock 解析 "HH:MM" 为当日分钟数；坏值返回 (-1, false)。
+func promoClock(hhmm string) (int, bool) {
+	parts := strings.Split(hhmm, ":")
+	if len(parts) != 2 {
+		return -1, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || h < 0 || h > 24 || m < 0 || m > 59 {
+		return -1, false
+	}
+	return h*60 + m, true
+}
+
+// promoActive 评估优惠在 now 是否生效：enabled + validFrom/validUntil 内 + 落在
+// 任一 daily 窗口（支持跨午夜，如 23:00→7:50）。schedule 为 nil 视为全天生效。
+func promoActive(p *v3ModelPromotion, now time.Time) bool {
+	if !p.Enabled {
+		return false
+	}
+	if sc := p.Schedule; sc != nil {
+		if sc.ValidFrom != "" {
+			from, err := time.Parse(time.RFC3339, sc.ValidFrom)
+			if err == nil && now.Before(from) {
+				return false
+			}
+		}
+		if sc.ValidUntil != "" {
+			until, err := time.Parse(time.RFC3339, sc.ValidUntil)
+			if err == nil && !now.Before(until) {
+				return false
+			}
+		}
+		if len(sc.Daily) > 0 {
+			cur := now.Hour()*60 + now.Minute()
+			inWindow := false
+			for _, w := range sc.Daily {
+				st, ok1 := promoClock(w.Start)
+				ed, ok2 := promoClock(w.End)
+				if !ok1 || !ok2 {
+					continue
+				}
+				if st <= ed {
+					if cur >= st && cur < ed {
+						inWindow = true
+						break
+					}
+				} else if cur >= st || cur < ed { // 跨午夜（23:00→7:50）
+					inWindow = true
+					break
+				}
+			}
+			if !inWindow {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// applyModelPromotions 把当前生效的优惠挂到目录条目：同模型多条命中取 priority
+// 最高（实测 glm-5.2 白天 badge-only(50) 与夜间五折(100) 靠 priority+daily 双轨
+// 切换）。只有带 discount 的条目会改变 PromoFactor/PromoCredits（无折扣的错峰类
+// 没有机器可读倍率，挂了也不能算价，本仓库不透出展示字段故直接跳过）。
+func applyModelPromotions(out map[string]ModelInfo, promos []v3ModelPromotion) {
+	if len(promos) == 0 || len(out) == 0 {
+		return
+	}
+	now := time.Now().In(promoZone)
+	type cand struct {
+		prio int
+		p    *v3ModelPromotion
+	}
+	best := map[string]cand{}
+	for i := range promos {
+		p := &promos[i]
+		if p.Discount == nil || !promoActive(p, now) {
+			continue // 无机器可读折扣：对本仓库无消费方（见 ModelInfo.Promo* 注释）
+		}
+		for _, id := range p.ModelIDs {
+			if _, ok := out[id]; !ok {
+				continue // 目录外模型（如同名 global 变体）不挂
+			}
+			if b, seen := best[id]; !seen || p.Priority > b.prio {
+				best[id] = cand{prio: p.Priority, p: p}
+			}
+		}
+	}
+	for id, c := range best {
+		mi := out[id]
+		f := c.p.Discount.Factor
+		mi.PromoFactor = &f
+		mi.PromoCredits = c.p.Discount.DiscountedCredits
+		out[id] = mi
+	}
+}
+
 // fetchV3Models 单路探测 /v3/config（CN/global 双域通用，按 chatBase 切 base）。
 // 解析口径与 parseGlobalModelNames 对象形态一致（data.models[].id 优先、disabled 剔除、
 // 全字段落 ModelInfo）；v3 独有的 contextWindow/agent modelTags 额外字段自然忽略。
@@ -1474,7 +1695,36 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 		}
 		out = append(out, mi)
 	}
+	// 挂当前生效的限时优惠：Credits 是**牌价**（如 hy4-preview-f 的 x0.29），而实际
+	// 生效价是折扣价（限时免费时 0x）。积分保底要判「这一笔会不会扣钱」，必须按
+	// 生效价判——否则限免中的模型会被按牌价误拦。
+	if promos := parseV3Promotions(raw); len(promos) > 0 {
+		idx := make(map[string]ModelInfo, len(out))
+		for _, mi := range out {
+			idx[mi.ID] = mi
+		}
+		applyModelPromotions(idx, promos)
+		for i := range out {
+			if mi, ok := idx[out[i].ID]; ok {
+				out[i] = mi
+			}
+		}
+	}
 	return out, nil
+}
+
+// parseV3Promotions 从 /v3/config 原始响应里取出 modelPromotions 段（解析失败/缺省
+// → nil，优惠是增强项，绝不能因为解析不出而拖垮整个目录探测）。
+func parseV3Promotions(raw []byte) []v3ModelPromotion {
+	var env struct {
+		Data struct {
+			ModelPromotions []v3ModelPromotion `json:"modelPromotions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	return env.Data.ModelPromotions
 }
 
 // billingMeterJSON 按 realm 候选路径发 billing/meter 域请求，ErrNotFound 时换下一候选路径

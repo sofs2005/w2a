@@ -87,6 +87,9 @@ type Status struct {
 	InFlightFull   int             `json:"in_flight_full"`
 	StickySessions int             `json:"sticky_sessions"`
 	RedisMode      string          `json:"redis_mode"`
+	// CreditFloor 网关生效的积分保底值（0 = 关闭）。面板据此说明「某号为何对
+	// 某模型不出票」：账号 credits < 该值 且模型收费时，该号被排除在选号之外。
+	CreditFloor int64 `json:"credit_floor"`
 }
 
 // Health 网关 /healthz 响应。

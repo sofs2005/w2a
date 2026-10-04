@@ -543,6 +543,21 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                 />
               </div>
             </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label>积分保底 pool.credit_floor</label>
+                <input
+                  type="text"
+                  value={numStr('pool.credit_floor')}
+                  onChange={(e) => update('pool.credit_floor', numOrUndefined(e.target.value))}
+                  placeholder="0"
+                />
+                <div className="desc">
+                  余额低于该值的账号不再接<strong>收费</strong>模型（免费模型照常可用），防止收费请求把余额打穿。
+                  0 = 关闭。改后需重启网关生效。
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="card">

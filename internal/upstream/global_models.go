@@ -146,6 +146,8 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	if len(efforts) > 0 || len(defaults) > 0 {
 		c.storeEfforts("global", efforts, defaults)
 	}
+	// global 域积分倍率快照（供 pool 积分保底的目录兜底；与 CN 侧同口径）。
+	c.storeModelRates("global", infos)
 
 	// 成功：探测结果去重。names/infos 均落缓存；倍率等选号敏感字段只透出展示，
 	// 不注入 costTier（§3.D2 不变）。
@@ -410,6 +412,20 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 	}
 	if len(out) == 0 {
 		return nil, nil, nil, nil, fmt.Errorf("global models empty list")
+	}
+	// 挂当前生效的限时优惠（同 CN fetchV3Models 口径）：只对 /v3/config 响应有意义，
+	// 企业端点族没有 modelPromotions 段——解析不到即 nil，applyModelPromotions 空转。
+	if promos := parseV3Promotions(raw); len(promos) > 0 {
+		idx := make(map[string]ModelInfo, len(infos))
+		for _, mi := range infos {
+			idx[mi.ID] = mi
+		}
+		applyModelPromotions(idx, promos)
+		for i := range infos {
+			if mi, ok := idx[infos[i].ID]; ok {
+				infos[i] = mi
+			}
+		}
 	}
 	return out, infos, efforts, defaults, nil
 }
