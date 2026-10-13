@@ -20,7 +20,7 @@
 // 一次跑完（state 只存活于进程内存，不落盘，因此 `--rm` 不会丢）：
 //
 //	docker run --rm -it -v "$PWD/auths:/app/auths" --user root \
-//	  --entrypoint /app/login ghcr.io/sofs2005/workbuddy2api:latest
+//	  --entrypoint /app/login ghcr.io/sofs2005/w2a:latest
 package main
 
 import (

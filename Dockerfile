@@ -47,7 +47,7 @@ COPY --from=build /out/wb2api /app/wb2api
 COPY --from=build /out/signin_bin /app/signin_bin
 # 运维工具：宿主机无 Go 环境时用容器完成 OAuth 登录
 #   docker run --rm -it -v "$PWD/auths:/app/auths" --user root \
-#     --entrypoint /app/login ghcr.io/sofs2005/workbuddy2api:latest
+#     --entrypoint /app/login ghcr.io/sofs2005/w2a:latest
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
 COPY --from=build /out/trial_bin /app/trial_bin

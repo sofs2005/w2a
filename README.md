@@ -201,8 +201,8 @@ flowchart LR
 ### Docker Compose 一键部署
 
 ```bash
-git clone https://github.com/sofs2005/workbuddy2api.git
-cd workbuddy2api
+git clone https://github.com/sofs2005/w2a.git
+cd w2a
 
 # 面板登录口令（必填 —— 未设置时 compose 会直接报错退出）
 echo 'WBGUI_PASSWORD=你的强口令' > .env
@@ -225,11 +225,11 @@ echo 'WBGUI_PASSWORD=你的强口令' > .env
 ```bash
 # 国内版（默认）
 docker run --rm -it -v "$PWD/auths:/app/auths" --user root \
-  --entrypoint /app/login ghcr.io/sofs2005/workbuddy2api:latest
+  --entrypoint /app/login ghcr.io/sofs2005/w2a:latest
 
 # 国际版：追加 --realm=global
 docker run --rm -it -v "$PWD/auths:/app/auths" --user root \
-  --entrypoint /app/login ghcr.io/sofs2005/workbuddy2api:latest --realm=global
+  --entrypoint /app/login ghcr.io/sofs2005/w2a:latest --realm=global
 ```
 
 `--user root` 让登录产物能自动 `chown` 给服务进程 uid（10001），避免宿主目录属主不一致导致 token 续期回写失败；可用环境变量 `AUTH_DIR`（默认 `/app/auths`）/ `CHOWN_UID`（默认 `10001`，`0` 表示不 chown）覆盖。`login -h` 查看完整用法。
@@ -297,7 +297,7 @@ docker compose exec -it wb2api bash -c './login.sh'
 docker compose up -d
 ```
 
-默认拉取已构建好的镜像 `ghcr.io/sofs2005/workbuddy2api:latest`；想从源码本地构建则加 `--build`：
+默认拉取已构建好的镜像 `ghcr.io/sofs2005/w2a:latest`；想从源码本地构建则加 `--build`：
 
 ```bash
 docker compose up -d --build
