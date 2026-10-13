@@ -15,7 +15,7 @@ export interface Account {
   has_refresh_token: boolean
 
   in_gateway: boolean
-  /** healthy | cooling | disabled | token_expired | gateway_unreachable | missing_credential | unknown */
+  /** healthy | cooling | disabled | stopped | token_expired | gateway_unreachable | missing_credential | unknown */
   status: string
   /** cn | global。统一调度后裸名跨域选号，靠它分辨请求落在哪一域的号上。 */
   realm?: string
@@ -25,6 +25,9 @@ export interface Account {
   cool_remaining_sec?: number
   disabled: boolean
   reason?: string
+  /** 运维手动停用（对话流量摘除）：日常任务照常，仅不参与选号。与 disabled（系统判死）并列独立。 */
+  manual_disabled?: boolean
+  manual_reason?: string
   in_flight: number
   breaker_fails: number
   breaker_until?: string
@@ -178,6 +181,17 @@ export interface OpResult {
   message: string
   reward?: number
   data?: Record<string, unknown>
+}
+
+/** 停用/启用的操作回显（网关 /admin 端点响应）。 */
+export interface AdminState {
+  uid: string
+  manual_disabled: boolean
+  manual_reason?: string
+  /** 系统自动禁用位。启用后仍为真 = 账号还被系统判死，需另行处理。 */
+  disabled: boolean
+  /** 本次调用是否真的改动了状态（幂等重试为 false）。 */
+  changed: boolean
 }
 
 export interface TaskItem {

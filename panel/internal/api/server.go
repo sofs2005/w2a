@@ -60,6 +60,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{uid}/refresh", s.handleAccountRefresh)
 	mux.HandleFunc("POST /api/accounts/{uid}/travel", s.handleAccountTravel)
 	mux.HandleFunc("POST /api/accounts/{uid}/credits", s.handleAccountCredits)
+	// 停用/启用：摘出或恢复对话流量（日常任务照常）。转发网关 /admin 端点。
+	mux.HandleFunc("POST /api/accounts/{uid}/disable", s.handleAccountDisable)
+	mux.HandleFunc("POST /api/accounts/{uid}/enable", s.handleAccountEnable)
 
 	// ── 批量任务 ──────────────────────────────────────────
 	mux.HandleFunc("POST /api/tasks/checkin", s.handleBatchCheckin)
@@ -215,6 +218,34 @@ func (s *Server) handleAccountCredits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, c)
+}
+
+// handleAccountDisable 手动停用账号（摘出对话流量，日常任务照常）。
+// reason 从可选 JSON body 读取；空体/非 JSON 都不拒绝（网关侧会补默认值）。
+func (s *Server) handleAccountDisable(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 4<<10))
+		_ = json.Unmarshal(raw, &body)
+	}
+	st, err := s.svc.DisableAccount(r.Context(), r.PathValue("uid"), strings.TrimSpace(body.Reason))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleAccountEnable 解除手动停用（只解手动位，不复活系统禁用）。
+func (s *Server) handleAccountEnable(w http.ResponseWriter, r *http.Request) {
+	st, err := s.svc.EnableAccount(r.Context(), r.PathValue("uid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 // ---------------------------------------------------------------------------

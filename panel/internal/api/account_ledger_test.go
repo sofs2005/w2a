@@ -180,3 +180,102 @@ func TestAccountsMergesLedgerFields(t *testing.T) {
 		t.Errorf("model_costs 未合并: %+v", a.ModelCosts)
 	}
 }
+
+// TestAccountStatusManualDisabledPassthrough 钉住手动停用态在面板侧的存活。
+//
+// 与上面两条同因：gateway.AccountStatus 是白名单式结构体，manual_disabled 漏声明
+// 就被静默丢弃，面板上表现为「我明明摘出了这个号，列表里看着跟正常号一样」——
+// 而运维很可能据此以为停用没生效，反复点。覆盖解码（/status → AccountStatus）
+// 与编码（AccountView → JSON）两段。
+func TestAccountStatusManualDisabledPassthrough(t *testing.T) {
+	raw := []byte(`{"accounts":[{
+		"uid":"u1","credits":100,"disabled":false,
+		"manual_disabled":true,"manual_reason":"限流观察几天"
+	}]}`)
+
+	var decoded struct {
+		Accounts []gateway.AccountStatus `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("解码 /status 失败: %v", err)
+	}
+	if len(decoded.Accounts) != 1 {
+		t.Fatalf("账号数=%d want 1", len(decoded.Accounts))
+	}
+	ga := decoded.Accounts[0]
+	if !ga.ManualDisabled {
+		t.Error("manual_disabled 在解码时被丢弃（gateway.AccountStatus 漏声明 json tag？）")
+	}
+	if ga.ManualReason != "限流观察几天" {
+		t.Errorf("manual_reason 在解码时被丢弃: %q", ga.ManualReason)
+	}
+
+	// 编码段：两个字段都要透出到 /api/accounts 响应。
+	blob, err := json.Marshal(ops.AccountView{UID: "u1", ManualDisabled: true, ManualReason: "限流观察几天"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := json.Unmarshal(blob, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back["manual_disabled"] != true {
+		t.Errorf("manual_disabled 未透出: %s", blob)
+	}
+	if back["manual_reason"] != "限流观察几天" {
+		t.Errorf("manual_reason 未透出: %s", blob)
+	}
+
+	// manual_reason 是 omitempty：未停用时必须缺席（不是空串），前端据此区分
+	// 「无原因」与「原因是空」。
+	empty, err := json.Marshal(ops.AccountView{UID: "u2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var emptyBack map[string]any
+	if err := json.Unmarshal(empty, &emptyBack); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := emptyBack["manual_reason"]; present {
+		t.Errorf("无原因时 manual_reason 不应出现: %s", empty)
+	}
+}
+
+// TestAccountsMergesManualDisabled 走 Service.Accounts() 全路径，钉住 merge 循环里
+// 的透传与状态归并分支——真正的丢失点在那里（单靠结构体编解码测试钉不住）。
+func TestAccountsMergesManualDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":[{
+			"uid":"u1","credits":42,"disabled":false,
+			"manual_disabled":true,"manual_reason":"停用测试"
+		}],"total":1,"healthy":0}`))
+	}))
+	defer srv.Close()
+
+	store, err := authstore.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("构建凭证 store: %v", err)
+	}
+	svc := ops.New(&config.Config{}, store, gateway.New(srv.URL, func() string { return "" }, time.Second), nil)
+
+	accounts, _, _, err := svc.Accounts(context.Background())
+	if err != nil {
+		t.Fatalf("Accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("账号数=%d want 1", len(accounts))
+	}
+	a := accounts[0]
+	if !a.ManualDisabled || a.ManualReason != "停用测试" {
+		t.Errorf("手动停用态未从 /status 合并: %+v", a)
+	}
+	// 归并成独立状态串而非 healthy：摘出号已不参与选号，混进「正常」会让运维误判。
+	if a.Status != "stopped" {
+		t.Errorf("status=%q want stopped", a.Status)
+	}
+}

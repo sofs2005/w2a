@@ -2,6 +2,7 @@
 import type {
   AccountProfile,
   AccountsResponse,
+  AdminState,
   AliasEntry,
   AliasesResponse,
   ChatDelta,
@@ -104,6 +105,9 @@ export const api = {
   accountRefresh: (uid: string) => post<OpResult>(`/api/accounts/${encodeURIComponent(uid)}/refresh`),
   accountTravel: (uid: string) => post<OpResult>(`/api/accounts/${encodeURIComponent(uid)}/travel`),
   accountCredits: (uid: string) => post<Credits>(`/api/accounts/${encodeURIComponent(uid)}/credits`),
+  accountDisable: (uid: string, reason?: string) =>
+    post<AdminState>(`/api/accounts/${encodeURIComponent(uid)}/disable`, reason ? { reason } : {}),
+  accountEnable: (uid: string) => post<AdminState>(`/api/accounts/${encodeURIComponent(uid)}/enable`),
 
   // 批量任务
   batchCheckin: (uids: string[]) => post<TaskView>('/api/tasks/checkin', { uids }),

@@ -120,11 +120,22 @@ export default function Accounts({ session }: { session: SessionInfo }) {
   }
 
   /** runSingle 执行单账号操作并展示结果。 */
-  const runSingle = async (a: Account, action: 'checkin' | 'refresh' | 'travel' | 'credits') => {
+  const runSingle = async (a: Account, action: 'checkin' | 'refresh' | 'travel' | 'credits' | 'disable' | 'enable') => {
     setBusyUid(a.uid)
     setNotice(null)
     try {
-      if (action === 'checkin' || action === 'refresh' || action === 'travel') {
+      if (action === 'disable' || action === 'enable') {
+        const st = action === 'disable' ? await api.accountDisable(a.uid) : await api.accountEnable(a.uid)
+        setNotice({
+          kind: 'ok',
+          text:
+            action === 'disable'
+              ? `${displayName(a)}：已摘出对话流量（签到等日常任务照常）`
+              : st.disabled
+                ? `${displayName(a)}：已恢复选号，但账号仍被系统禁用，需先解决故障`
+                : `${displayName(a)}：已恢复选号`,
+        })
+      } else if (action === 'checkin' || action === 'refresh' || action === 'travel') {
         const res =
           action === 'checkin'
             ? await api.accountCheckin(a.uid)
@@ -379,6 +390,11 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                             {a.reason}
                           </div>
                         )}
+                        {a.manual_disabled && (
+                          <div className="text-faint" style={{ fontSize: 11.5, marginTop: 3 }}>
+                            {a.manual_reason || '手动摘出'} · 日常任务照常
+                          </div>
+                        )}
                         {a.status === 'token_expired' && (
                           <div className="text-faint" style={{ fontSize: 11.5, marginTop: 3 }}>
                             需刷新或重新登录
@@ -446,6 +462,25 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                           <button className="btn btn-sm" disabled={busy} onClick={() => void runSingle(a, 'credits')} title="查询余额">
                             积分
                           </button>
+                          {a.manual_disabled ? (
+                            <button
+                              className="btn btn-sm"
+                              disabled={busy || writeDisabled}
+                              onClick={() => void runSingle(a, 'enable')}
+                              title="恢复选号（只解手动摘出；若系统仍判死需另行处理）"
+                            >
+                              启用
+                            </button>
+                          ) : (
+                            <button
+                              className="btn btn-sm"
+                              disabled={busy || writeDisabled}
+                              onClick={() => void runSingle(a, 'disable')}
+                              title="摘出对话流量：签到/保活/猫猫照常，仅不参与选号"
+                            >
+                              停用
+                            </button>
+                          )}
                           <button
                             className="btn btn-sm btn-danger"
                             disabled={busy || session.read_only || !session.dangerous_ops || !a.has_file}

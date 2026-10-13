@@ -25,16 +25,23 @@ type AccountStatus struct {
 	// Realm 该账号所属域（cn / global）。统一调度后裸名会跨域选号，账号列表若不
 	// 标出域，运维就看不出「这次请求落在国内号还是国际号上」——而两域的出站模型名
 	// 可能不同（别名映射），是排查的第一分叉点。
-	Realm           string    `json:"realm,omitempty"`
-	Nickname        string    `json:"nickname,omitempty"`
-	Credits         int64     `json:"credits"`
-	Cooling         bool      `json:"cooling"`
-	CoolKind        string    `json:"cool_kind,omitempty"`
-	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
-	Until           time.Time `json:"until,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	SoftStreak      int       `json:"soft_streak,omitempty"`
-	Disabled        bool      `json:"disabled"`
+	Realm         string    `json:"realm,omitempty"`
+	Nickname      string    `json:"nickname,omitempty"`
+	Credits       int64     `json:"credits"`
+	Cooling       bool      `json:"cooling"`
+	CoolKind      string    `json:"cool_kind,omitempty"`
+	CoolRemaining int64     `json:"cool_remaining_sec,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	SoftStreak    int       `json:"soft_streak,omitempty"`
+	Disabled      bool      `json:"disabled"`
+	// ManualDisabled 运维手动停用（对话流量摘除）。与 Disabled（系统判死）并列独立，
+	// 面板据此区分「我主动摘的」与「系统判定坏了」——两者可用操作不同（前者 enable、
+	// 后者 revive）。白名单纪律：网关 /status 已下发 manual_disabled/manual_reason
+	// （pool.Status），这里漏声明就会被 encoding/json 静默丢弃，面板上表现为
+	// 「摘出的号看着跟正常号一样」。
+	ManualDisabled  bool      `json:"manual_disabled"`
+	ManualReason    string    `json:"manual_reason,omitempty"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
@@ -630,4 +637,73 @@ func (c *Client) ResetStats(ctx context.Context) error {
 		return fmt.Errorf("重置统计失败（HTTP %d）: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 运维管理（/admin）
+// ---------------------------------------------------------------------------
+
+// AdminState 网关 /admin/accounts/{uid}/* 的统一回显（与 server.adminState 对齐）。
+type AdminState struct {
+	UID            string `json:"uid"`
+	ManualDisabled bool   `json:"manual_disabled"`
+	ManualReason   string `json:"manual_reason,omitempty"`
+	// Disabled 系统自动禁用位。启用（enable）后它可能仍为真——那说明账号还被系统
+	// 判死，需先解决故障再 revive。面板据此给「已恢复但仍被禁用」的提示。
+	Disabled bool `json:"disabled"`
+	// Changed 本次调用是否真的改动了状态（幂等重试时为 false）。
+	Changed bool `json:"changed"`
+}
+
+// DisableAccount 手动停用（摘出对话流量，签到/保活/排程照常）。reason 可空。
+func (c *Client) DisableAccount(ctx context.Context, uid, reason string) (*AdminState, error) {
+	body := []byte("{}")
+	if reason != "" {
+		// 编码失败不可能（map[string]string 恒可编码），忽略错误与网关侧口径一致。
+		body, _ = json.Marshal(map[string]string{"reason": reason})
+	}
+	return c.adminCall(ctx, uid, "disable", body)
+}
+
+// EnableAccount 解除手动停用。只解 manualDisabled 位，**不**复活系统禁用
+// （那需要 revive）——运维明确摘除的号不应被一次 enable 悄悄放回选号池。
+func (c *Client) EnableAccount(ctx context.Context, uid string) (*AdminState, error) {
+	return c.adminCall(ctx, uid, "enable", []byte("{}"))
+}
+
+// adminCall 调一次 /admin/accounts/{uid}/{verb} 并解析回显。
+//
+// 404 有两种来源，必须分开翻译：
+//   - admin.enabled 未开：网关按开关条件注册路由，未开时 /admin/ 整组不存在，
+//     ServeMux 回的是裸文本 "404 page not found"——这是配置问题，要给出开启指引。
+//   - uid 不在池中：网关 handler 自己写的 OpenAI 风格 JSON 错误体。
+//
+// 两者都是 404，靠响应体是否为 JSON 区分（JSON 体 = handler 应答）。
+func (c *Client) adminCall(ctx context.Context, uid, verb string, body []byte) (*AdminState, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/admin/accounts/"+url.PathEscape(uid)+"/"+verb, body)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// 继续走下面的解析。
+	case http.StatusNotFound:
+		if !bytes.Contains(raw, []byte("{")) {
+			return nil, fmt.Errorf("网关未开启 admin.enabled：停用/启用端点不可用，请在网关配置中开启后重试")
+		}
+		return nil, fmt.Errorf("账号 %s 不在网关账号池中", uid)
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("网关拒绝鉴权（401）：请检查 api_key 是否正确")
+	default:
+		return nil, fmt.Errorf("%s", explainGatewayError(resp.StatusCode, raw))
+	}
+
+	var st AdminState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return nil, fmt.Errorf("解析 /admin 响应失败: %w (body: %s)", err, truncate(string(raw), 200))
+	}
+	return &st, nil
 }

@@ -87,6 +87,10 @@ export function statusBadge(status: string): { cls: string; text: string } {
       return { cls: 'badge-warn', text: '冷却中' }
     case 'disabled':
       return { cls: 'badge-danger', text: '已禁用' }
+    case 'stopped':
+      // 手动摘出：非故障（日常任务照常、凭证与积分都是活的），用警告色与
+      // disabled 的危险色区分开。
+      return { cls: 'badge-warn', text: '已摘出' }
     case 'token_expired':
       return { cls: 'badge-danger', text: 'Token 过期' }
     case 'gateway_unreachable':
