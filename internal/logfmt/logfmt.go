@@ -4,7 +4,8 @@
 //   - uid 统一截 8 位：与 chat 流水行（internal/server/logging.go uidPrefix）对齐，
 //     日志行只留 uid 前 8 位。全量 uid 可从 data/state.json 查（54 个号无 8 位前缀碰撞）。
 //   - 模块前缀：调度四类已有天然前缀（travel/activity/checkin/keepalive）保持；
-//     其他补 [pool]/[auth]/[server] 等 [mod] 方括号前缀，redisstore/session 已有保持。
+//     其他补 [pool]/[auth]/[server] 等 [mod] 方括号前缀，redisstore/session 已有保持；
+//     调度批次级汇总行（"本轮唤醒了哪几类"）统一用 [sched]。
 //   - 级别语义：正常流转不打级别字样（保持简洁）；可疑/降级/失败行加 WARN:/ERR: 前缀。
 //
 // 本包不引入日志库，只提供 UID8 截断 / Label 账号标签 / Pad 显示宽对齐三个纯字符串

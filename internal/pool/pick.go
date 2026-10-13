@@ -61,6 +61,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	// 触底 + 收费（本地实测台账 或 上游目录倍率）即拦；免费/未知倍率不受限。
 	floorBlocked := func(e *entry) bool { return p.floorBlockedForModel(e, reqModel, now) }
 	var cands []*entry
+	floorBlockedN := 0 // 被积分保底拦掉的 healthy 候选数（仅用于"候选集被拦空"时的聚合 WARN）
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
@@ -69,6 +70,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 			continue
 		}
 		if floorBlocked(e) {
+			floorBlockedN++
 			continue // 积分保底：触底号不接收费模型（免费/未知倍率不受限）
 		}
 		if p.inFlightFull(e) {
@@ -77,6 +79,14 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
+		// 候选集为空、且存在被保底拦掉的 healthy 号 ⇒ 本次"选不出号"的直接成因是
+		// 积分保底而非池枯竭，兜底前点明（否则只表现为静默走 fallback）。
+		// 逐候选打日志会刷屏（热路径每请求×候选数），故只在拦空这一聚合点打一条。
+		// reqModel 为空时 floorBlocked 恒 false（计数 0），零误触发。
+		if floorBlockedN > 0 {
+			log.Printf("WARN: [pool] pick: all %d healthy candidates floor-blocked (model=%q floor=%d), trying fallback",
+				floorBlockedN, reqModel, p.creditFloor)
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realms, reqModel)

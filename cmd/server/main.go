@@ -290,6 +290,30 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 
+	// 池状态心跳：空闲期"服务还活着吗、池还健康吗"在 docker logs 里看不到任何迹象
+	// （启动横幅之后，无请求/无非排程点时日志长期静默）。每 5 分钟一条低频汇总：
+	// 频率取 5 分钟——不挂 pool 的 30 分钟落盘周期（太稀，空闲期仍看不出活性），
+	// 也不挂 scheduler（Run 一睡可能数小时）。只打 ticker 触发的那条，不另打启动基线
+	// （与首条 tick 重复，且启动横幅已证明日志通路活着）。ctx 取消即退出。
+	go func() {
+		const heartbeatInterval = 5 * time.Minute
+		start := time.Now()
+		t := time.NewTicker(heartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				total, healthy, cooling, disabled, full := p.CountsDetailed()
+				_, cnHealthy, _, _, _ := p.CountsDetailedForRealm("cn")
+				_, globalHealthy, _, _, _ := p.CountsDetailedForRealm("global")
+				log.Printf("[pool] heartbeat: accounts=%d healthy=%d (cn=%d global=%d) cooling=%d disabled=%d inflight_full=%d sticky=%d uptime=%s",
+					total, healthy, cnHealthy, globalHealthy, cooling, disabled, full, sessCount(), time.Since(start).Round(time.Second))
+			}
+		}
+	}()
+
 	// 启动余额刷新：让 state.json 的 credits 从进程第一秒就是权威值，而非上次签到
 	// 的陈旧快照（面板不点「积分」时读的就是它）。异步独立 goroutine：上游慢/不可达
 	// 绝不能阻塞网关对外服务。用同一个 ctx，SIGTERM 时放弃剩余账号。

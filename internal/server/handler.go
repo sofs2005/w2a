@@ -830,6 +830,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			// 选号失败 503 是"为什么没有可用号"的最大盲区（此前全静默，只留一行流水表格）。
+			// 带池计数：tried 小且 healthy>0 ⇒ 粘性/域过滤把号挡了；healthy==0 ⇒ 池枯竭。
+			// 每请求至多一条（此处 break 退出轮转），频率有界。
+			total, healthy, cooling, disabled, _ := h.cfg.Pool.CountsDetailed()
+			realmKey := route.CandidateRealms().Key()
+			if realmKey == "" {
+				realmKey = "all" // 空集 = 全池（RealmSet.Key 约定），日志里 "" 易被误读成缺值
+			}
+			log.Printf("WARN: [server] no account picked model=%q realm=%s tried=%d rotate=%d pool(total=%d healthy=%d cooling=%d disabled=%d)",
+				bareModel, realmKey, len(tried), i, total, healthy, cooling, disabled)
 			break
 		}
 		// 出站模型名按选中账号的域取值（别名）或剥前缀（钉域）；该域无此模型时
@@ -856,6 +866,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if stickyUID != "" && acct.UID == stickyUID {
 				unbindSticky()
 			}
+			// 偶发属正常并发流转，不打 WARN；成串出现即 max_in_flight 压力信号。
+			// 每请求至多 MaxRotate 条，天然有界。
+			log.Printf("[server] inflight slot lost, rotate: acct=%s model=%q i=%d",
+				logfmt.Label(acct.UID, acct.Nickname), bareModel, i)
 			if !rotateBackoff(i, r.Context()) {
 				// 客户端已断连：换号重试无意义，终止轮转走末端错误透传。
 				break
@@ -868,6 +882,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				lastErr = err
+				// NoteError/NoteSessionDead 都只改池内计数、不打日志，这是唯一能看见
+				// "为什么突然换号"的点（否则只表现为一次静默 continue）。
+				log.Printf("WARN: [server] refresh failed, rotate: acct=%s model=%q i=%d err=%v",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, i, err)
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					// 12153 一次失败不杀号（临时触发会误杀）：与 scheduler keepalive/checkin

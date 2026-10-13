@@ -163,6 +163,28 @@ const (
 	taskGrowth
 )
 
+// String 返回任务类型的短名，供批次日志行按名字展示（缺省 %v 打出来是数字，
+// "本轮唤醒了哪些任务"读不出来）。
+func (k taskKind) String() string {
+	switch k {
+	case taskCheckin:
+		return "checkin"
+	case taskTravel:
+		return "travel"
+	case taskActivity:
+		return "activity"
+	case taskKeepalive:
+		return "keepalive"
+	case taskSchool:
+		return "school"
+	case taskCat:
+		return "cat"
+	case taskGrowth:
+		return "growth"
+	}
+	return "unknown"
+}
+
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
@@ -307,6 +329,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 		// 54 号 × 5 条 ≈ 7-8 分钟睡眠）不再阻塞同槽其他任务族；返回前
 		// 等全部任务收尾（下一轮 nextWake 照旧从"现在"起算，多轮重叠
 		// 的风险与串行版相同——nextWake 只挑现在之后的时点）。
+		// 批次级一行：各任务内部有明细，但"本轮唤醒了哪几类"没有汇总，
+		// 排障时"签到到底跑没跑"要多跳几层才能判。
+		log.Printf("[sched] wake up: dispatch kinds=%v", kinds)
 		s.runBatch(ctx, kinds)
 	}
 }
