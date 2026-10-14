@@ -1092,6 +1092,28 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11101「Unmarshal chat params failed」：请求体解析失败，与
+			// 11115/11135/11148 同族——发生在上游**解析请求体**阶段，还没走到模型
+			// 路由，同一份 body 换任何账号都是同样的解析错误。轮转只会放大无效请求
+			// （每个号一次上游调用 + rotateBackoff 占用在途名额），末端还会落到
+			// 「其余保持 503」的兜底映射，把确定失败的请求伪装成「账号不可用、稍后
+			// 再试」，客户端于是对必然失败的请求无限重试。立即透传上游原文回 400。
+			//
+			// 「不同账号可能有不同模型权限」这个轮转理由属于 11102（ErrModelBlocked）
+			// 的分类域，那里已有 (账号, 模型) 负缓存避让，不该由 11101 承担。
+			if kind == upstream.ErrBadParams {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					// 空 body 兜底：无上游原文可透传，保留可读分类文案（不编造原文）。
+					msg = "chat request body was rejected by upstream"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "bad_params", msg,
+					h.hintOf(upstream.ErrBadParams, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1409,7 +1431,10 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //   - ErrSessionDead → Disable：session 死亡，永久禁用（需人工重登）。
 //   - ErrContentBlocked → 不罚账号（无冷却/熔断/NoteError）；passthrough 首遇触发
 //     降级重试，最终仍拦则回 400 content_blocked（防火墙文案，不含账号/错误码）。
-//   - ErrBadParams → 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇），但仍轮转。
+//   - ErrBadParams → 11101「Unmarshal chat params failed」：请求的问题不是账号的
+//     问题（上游解析请求体阶段就失败，同一 body 换任何号都一样）。零动作
+//     （不冷却/不熔断/不 NoteError、不喂连败，同 ErrPromptTooLong 待遇），
+//     chatCompletions 已直接透传原文 400 返回不轮转——该分支只为文档完备。
 //   - ErrPromptTooLong → 11115「prompt is too long」：请求的问题不是账号的问题
 //     （同一 body 换任何号都超限）。零动作（不冷却/不熔断/不 NoteError、不喂连败，
 //     同 ErrContentBlocked 待遇），chatCompletions 已直接透传原文返回不轮转——
@@ -1522,9 +1547,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// chatCompletions 已 fail-fast 透传原文，该分支只为文档完备。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
-		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
-		// ——不同账号可能有不同的模型权限，值得换号再试一次。
+		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。零动作
+		// （不冷却/不熔断/不 NoteError，同 ErrPromptTooLong 待遇），chatCompletions
+		// 已 fail-fast 透传原文回 400 不轮转——该分支只为文档完备。
+		//
+		// 为何不轮转：11101 发生在上游解析请求体阶段，还没走到模型路由，所以
+		// 「不同账号可能有不同模型权限」这条轮转理由实际属于 11102
+		// （ErrModelBlocked），那里已有 (账号, 模型) 负缓存避让。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
