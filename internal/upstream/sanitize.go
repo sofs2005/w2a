@@ -176,7 +176,8 @@ func sanitizeToolCalls(v any) bool {
 	return changed
 }
 
-// sanitizeMessages 净化 messages 中的 content、reasoning_content 与 tool_calls；任一命中返回 true。
+// sanitizeMessages 净化 messages 中的 content、reasoning_content、reasoning 与
+// tool_calls；任一命中返回 true。
 func sanitizeMessages(messages []any) bool {
 	changed := false
 	for _, msg := range messages {
@@ -197,6 +198,19 @@ func sanitizeMessages(messages []any) bool {
 		if rc, ok := m["reasoning_content"].(string); ok {
 			if s := sanitizeText(rc); s != rc {
 				m["reasoning_content"] = s
+				changed = true
+			}
+		}
+		// reasoning：思维链的另一形态字段，必须与 reasoning_content 同等净化。
+		// backfillReasoningContent（thinking.go）在两者之间**双向镜像**（rc 非空则
+		// reasoning=rc；rc 缺失则 rc=reasoning），而它在 payload.go 里先于
+		// sanitizeMessages 执行——镜像留下的是净化前的副本，只洗一个字段，另一个
+		// 字段里的指纹照样出站。反探测串出现在请求体里本身就是上游整单拦截条件，
+		// 漏洗等于白洗。此处与 sanitizeFeatures/sanitizeRewrites 的具体串无关：
+		// 表怎么改，两个字段都必须同口径。
+		if r, ok := m["reasoning"].(string); ok {
+			if s := sanitizeText(r); s != r {
+				m["reasoning"] = s
 				changed = true
 			}
 		}
