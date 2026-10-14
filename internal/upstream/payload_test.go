@@ -137,6 +137,66 @@ func decodeBody(b []byte) (map[string]any, error) {
 	return obj, err
 }
 
+// TestClampMinMaxTokens GPT 系上游对过小 max_tokens 一律 400 code=11133
+// model_param_invalid。下限**逐模型不同**，两处实测都要尊重：
+//   - gpt-5.4：本仓库实测 ≥100（commit c6e849f，integer_below_min_value）；
+//   - 其余 gpt-*：fork 实测 ≥16（gpt-6-sol/gpt-6-luna/gpt-5.6-sol，15 拒 16 过）。
+//
+// 关键反例是 0：本仓库口径里 max_tokens=0 语义为「未设置」，上游回落默认输出上限
+// （实测 32000）。钳到 16 会把默认上限砍成 16，比不修更糟——必须原样透传。
+func TestClampMinMaxTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want any // nil = 字段不存在
+	}{
+		// gpt-5.4 独立下限 100：16..99 仍是失败区间，不能被通用 16 兜底糊过去。
+		{"gpt-5.4 below its floor", `{"model":"gpt-5.4","max_tokens":16,"messages":[]}`, float64(100)},
+		{"gpt-5.4 at its floor", `{"model":"gpt-5.4","max_tokens":100,"messages":[]}`, float64(100)},
+		{"gpt-5.4 above its floor", `{"model":"gpt-5.4","max_tokens":4096,"messages":[]}`, float64(4096)},
+		{"gpt-5.4 tiny", `{"model":"gpt-5.4","max_tokens":1,"messages":[]}`, float64(100)},
+		// 通用 GPT 下限 16。
+		{"gpt-5.6-sol below floor", `{"model":"gpt-5.6-sol","max_tokens":15,"messages":[]}`, float64(16)},
+		{"gpt-5.6-sol at floor", `{"model":"gpt-5.6-sol","max_tokens":16,"messages":[]}`, float64(16)},
+		{"gpt-5.6-sol above floor", `{"model":"gpt-5.6-sol","max_tokens":32000,"messages":[]}`, float64(32000)},
+		{"gpt-6-astra below floor", `{"model":"gpt-6-astra","max_tokens":2,"messages":[]}`, float64(16)},
+		// realm 前缀形态：出站 body 是裸名，但错误路径可能带前缀进来。
+		{"global prefix stripped", `{"model":"global:gpt-5.4","max_tokens":10,"messages":[]}`, float64(100)},
+		{"cn prefix stripped", `{"model":"cn:gpt-5.6-sol","max_tokens":3,"messages":[]}`, float64(16)},
+		{"uppercase gpt", `{"model":"GPT-5.6-SOL","max_tokens":3,"messages":[]}`, float64(16)},
+		// 别名翻译后同样要钳（顺序：translate 先于 clamp）。
+		{"alias translated then clamped", `{"model":"gpt-5.6-sol","max_completion_tokens":1,"messages":[]}`, float64(16)},
+		{"alias above floor untouched", `{"model":"gpt-5.6-sol","max_completion_tokens":900,"messages":[]}`, float64(900)},
+		// 0 / null / 负数 / 非数值 / 缺失：一律不钳（见函数注释口径）。
+		{"zero means unset", `{"model":"gpt-5.4","max_tokens":0,"messages":[]}`, float64(0)},
+		{"negative untouched", `{"model":"gpt-5.4","max_tokens":-1,"messages":[]}`, float64(-1)},
+		{"string untouched", `{"model":"gpt-5.4","max_tokens":"1","messages":[]}`, "1"},
+		{"absent untouched", `{"model":"gpt-5.4","messages":[]}`, nil},
+		// 非 GPT 系不受影响。
+		{"non-gpt untouched", `{"model":"hy4-preview","max_tokens":1,"messages":[]}`, float64(1)},
+		{"deepseek untouched", `{"model":"deepseek-v4.1-flash","max_tokens":5,"messages":[]}`, float64(5)},
+		{"gpt-prefixed non-gpt-ish untouched", `{"model":"gptx-1","max_tokens":1,"messages":[]}`, float64(1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj, err := decodeBody(PrepareBodyOptWithEffertsPreserve(t, c.body))
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			got, has := obj["max_tokens"]
+			if c.want == nil {
+				if has {
+					t.Fatalf("max_tokens = %v, want absent", got)
+				}
+				return
+			}
+			if got != c.want {
+				t.Fatalf("max_tokens = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestPrepareBodyOptWithEfforts(t *testing.T) {
 	efforts := map[string][]string{
 		"glm-5.2":      {"off", "low", "high"},

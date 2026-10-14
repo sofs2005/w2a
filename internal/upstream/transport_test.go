@@ -6,6 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +38,94 @@ func TestTransportDisableKeepAlivesStaysFalse(t *testing.T) {
 	if tr := newTransport(); tr.DisableKeepAlives {
 		t.Error("DisableKeepAlives must stay false: per-request TLS handshake contradicts MaxIdleConnsPerHost=20 reuse intent (see transport-hardening.md)")
 	}
+}
+
+// TestTransportUsesEnvironmentProxy 断言 Transport.Proxy 已接上环境变量解析器。
+//
+// 为什么需要代理：本网关常在受限网络里部署（无直连、须经企业代理出网）。此前完全
+// 没有代理能力，连不上上游只能表现为「所有账号都不可用」，排查方向会一路跑偏到
+// 账号/风控，实际根因是网络不可达。
+//
+// 本用例**只验接线**（Proxy 非 nil），不验环境变量语义——因为
+// http.ProxyFromEnvironment 把环境变量读进**进程级** sync.Once 缓存（进程内只解析
+// 一次），同包内任何先跑到的测试都会把缓存定死，t.Setenv 于它无效（本用例最初就是
+// 这么写的，单跑绿、全量跑红）。真实语义由子进程用例
+// TestTransportProxyFromEnvSubprocess 覆盖：子进程是全新的进程，env 在首次调用前就位。
+func TestTransportUsesEnvironmentProxy(t *testing.T) {
+	if tr := newTransport(); tr.Proxy == nil {
+		t.Fatal("Transport.Proxy is nil: 环境变量代理配置完全失效（HTTP_PROXY/HTTPS_PROXY/NO_PROXY 均不生效）")
+	}
+}
+
+// TestTransportProxyFromEnvSubprocess 子进程验证代理环境变量的**真实**读取语义：
+// 进程启动时设置 HTTPS_PROXY → 走代理；未设置 → 直连。子进程内环境变量在
+// http.ProxyFromEnvironment 首次调用之前就已就位，故这是生产启动路径的等价形态。
+//
+// 用 go test 复跑本包的 TestTransportEnvProxyProbe 作探针（见该用例），避免依赖
+// 仓库内无源码的预编译二进制。
+func TestTransportProxyFromEnvSubprocess(t *testing.T) {
+	if os.Getenv("WB2A_PROXY_PROBE") != "" {
+		t.Skip("probe 子进程自身不再派生子进程")
+	}
+	for _, c := range []struct {
+		name string
+		env  []string
+		want string // 期望的 proxy host；"" = 直连
+	}{
+		{"HTTPS_PROXY 设置 → 走代理", []string{"HTTPS_PROXY=http://proxy.corp:3128"}, "proxy.corp:3128"},
+		{"未设置 → 直连", nil, ""},
+		{"NO_PROXY 命中该主机 → 回落直连", []string{
+			"HTTPS_PROXY=http://proxy.corp:3128", "NO_PROXY=copilot.tencent.com"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestTransportEnvProxyProbe$")
+			cmd.Env = append([]string{"WB2A_PROXY_PROBE=1"}, c.env...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe subprocess failed: %v\n%s", err, out)
+			}
+			got := parseProxyProbe(t, out)
+			if got != c.want {
+				t.Errorf("proxy host = %q, want %q\n%s", got, c.want, out)
+			}
+		})
+	}
+}
+
+// proxyProbeMarker 子进程探针的输出标记。必须带标记而非裸打印：go test 自身也会往
+// 子进程 stdout 写 PASS/FAIL 行，裸值无法与那些行区分。
+const proxyProbeMarker = "PROXYHOST="
+
+// parseProxyProbe 从子进程输出里取出探针标记行的值（"" = 直连）。
+func parseProxyProbe(t *testing.T, out []byte) string {
+	t.Helper()
+	for _, line := range strings.Split(string(out), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), proxyProbeMarker); ok {
+			return v
+		}
+	}
+	t.Fatalf("probe marker %q not found in subprocess output:\n%s", proxyProbeMarker, out)
+	return ""
+}
+
+// TestTransportEnvProxyProbe 子进程探针：打印 newTransport 的 Proxy 对该 URL 的解析
+// 结果（host 或空串）。仅供 TestTransportProxyFromEnvSubprocess 以子进程方式调用。
+func TestTransportEnvProxyProbe(t *testing.T) {
+	if os.Getenv("WB2A_PROXY_PROBE") == "" {
+		t.Skip("仅由 TestTransportProxyFromEnvSubprocess 以子进程方式运行")
+	}
+	tr := newTransport()
+	req, _ := http.NewRequest(http.MethodGet, "https://copilot.tencent.com/v2/chat/completions", nil)
+	u, err := tr.Proxy(req)
+	if err != nil {
+		fmt.Printf("%sERR:%v\n", proxyProbeMarker, err)
+		return
+	}
+	if u != nil {
+		fmt.Printf("%s%s\n", proxyProbeMarker, u.Host)
+		return
+	}
+	fmt.Printf("%s\n", proxyProbeMarker) // 直连
 }
 
 // TestResponseHeaderTimeoutDoesNotKillSSELongStream 流式场景回归（任务书设计

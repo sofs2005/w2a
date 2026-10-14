@@ -429,6 +429,17 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
+		// 企业版门控：企业版无个人成长体系，daily-checkin 恒 400 code 10001
+		// 「企业账号不支持该操作」（见 auth.IsEnterprise 实测注释）。与 IsGlobal 正交
+		// （企业版 realm 可能 cn 也可能 global），必须单独判；不跳过则每天空发一次
+		// 注定失败的调用并刷 WARN。
+		if a.IsEnterprise() {
+			oc.Status, oc.Detail = CheckinSkipped, "enterprise"
+			skipN++
+			log.Printf("checkin %s: skip (enterprise account)", logfmt.Label(st.UID, st.Nickname))
+			out = append(out, oc)
+			continue
+		}
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -652,6 +663,13 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	// 拿不到 days，无法挑档；且 streak 500 会每趟刷 WARN 污染日志。结论：证据不足，跳过
 	// global（不发起任何领取类调用）。CN 账号无此问题（CN streak 200 days=N）。
 	if a.IsGlobal() {
+		return
+	}
+	// 企业版门控：连登奖励链（redeem / lottery / claim-gift）同样是个人成长体系，
+	// 企业版一律 403「growth system is only available for personal users」或
+	// 400 code 10001「企业账号不支持该操作」（见 auth.IsEnterprise 实测注释）。
+	// 与 IsGlobal 正交，须单独判——否则每趟都白跑一轮注定失败的领取链。
+	if a.IsEnterprise() {
 		return
 	}
 	if s.rewardClaimedToday(a.UID) {

@@ -495,3 +495,48 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		}
 	}
 }
+
+
+// TestReasoningFieldSanitized reasoning 是思维链的另一形态字段，必须与
+// reasoning_content 同等净化。关键在于**净化顺序**：backfillReasoningContent
+// （thinking.go）在两者之间双向镜像，而它在 payload.go 里先于 sanitizeMessages
+// 执行——镜像留下的是净化前的副本，只洗一个字段挡不住。
+//
+// 触发串用 sanitizeRewrites 里的裸数字形态（改写为带连字符形态），断言只看
+// 「改写过没有」，不硬编码表内容——表本身由 TestSanitizeLiteralByteExact 看护。
+func TestReasoningFieldSanitized(t *testing.T) {
+	msgs := []any{
+		map[string]any{
+			"role":      "assistant",
+			"content":   "hi",
+			"reasoning": "上游返回 11128 拦截",
+		},
+	}
+	if !sanitizeMessages(msgs) {
+		t.Fatal("reasoning 字段里的指纹未被净化")
+	}
+	got, _ := msgs[0].(map[string]any)["reasoning"].(string)
+	if strings.Contains(got, "11128") {
+		t.Fatalf("reasoning 仍含未净化指纹: %q", got)
+	}
+}
+
+// TestReasoningFieldSanitizedThroughBackfill 全链路复现真正的出站形态：客户端只送
+// reasoning_content，backfillReasoningContent 把它镜像进 reasoning，随后
+// sanitizeMessages 必须把**镜像出来的**那份也洗掉。
+func TestReasoningFieldSanitizedThroughBackfill(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"assistant","content":"a","reasoning_content":"see 11128"}
+	]}`
+	out := PrepareBodyOpt([]byte(body), true)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg := obj["messages"].([]any)[0].(map[string]any)
+	for _, field := range []string{"reasoning_content", "reasoning"} {
+		if s, _ := msg[field].(string); strings.Contains(s, "11128") {
+			t.Fatalf("%s 中的指纹经回填镜像后漏洗: %q", field, s)
+		}
+	}
+}

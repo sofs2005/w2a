@@ -451,3 +451,387 @@ func TestRepackThenCleanupRealShape(t *testing.T) {
 	assertRepackPairsContiguous(t, msgs)
 	assertPairingSymmetric(t, msgs)
 }
+
+// TestRepackNoticeBeforeFirstResult 通知插在**首个**结果之前时也要后移。
+//
+// 这是上游补丁 0001 修的核心缺口：旧实现在 results 还为空时直接 break，通知被留在
+// assistant 与首个结果之间，配对依旧断裂 → 上游判 11148 顶死整条会话。
+func TestRepackNoticeBeforeFirstResult(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{
+		map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}},
+	}}
+	notice := map[string]any{"role": "developer", "content": "URI guard"}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	next := map[string]any{"role": "user", "content": "next"}
+
+	out, changed := repackToolResultBlocks([]any{call, notice, result, next})
+	if !changed {
+		t.Fatal("通知插在首个结果之前应触发重排")
+	}
+	if len(out) != 4 ||
+		reflect.ValueOf(out[0]).Pointer() != reflect.ValueOf(call).Pointer() ||
+		reflect.ValueOf(out[1]).Pointer() != reflect.ValueOf(result).Pointer() ||
+		reflect.ValueOf(out[2]).Pointer() != reflect.ValueOf(notice).Pointer() ||
+		reflect.ValueOf(out[3]).Pointer() != reflect.ValueOf(next).Pointer() {
+		t.Fatalf("顺序/内容不符：%#v", out)
+	}
+}
+
+// TestRepackNoticeAndTurnBoundaries 通知可跨首个结果与并行结果之间收集，
+// 但绝不跨越 user / assistant 轮边界。
+func TestRepackNoticeAndTurnBoundaries(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}, map[string]any{"id": "c2"}}}
+	dev := map[string]any{"role": "developer", "content": "dev"}
+	sys := map[string]any{"role": "system", "content": "system"}
+	r1 := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "one"}
+	r2 := map[string]any{"role": "tool", "tool_call_id": "c2", "content": "two"}
+	user := map[string]any{"role": "user", "content": "boundary"}
+	out, changed := repackToolResultBlocks([]any{call, dev, r1, sys, r2, user})
+	want := []any{call, r1, r2, dev, sys, user}
+	if !changed || !reflect.DeepEqual(out, want) {
+		t.Fatalf("changed=%v out=%#v want=%#v", changed, out, want)
+	}
+
+	// user 轮边界之前的通知不得被搬到下一轮的结果组里。
+	nextCall := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "later"}}}
+	laterResult := map[string]any{"role": "tool", "tool_call_id": "later", "content": "later"}
+	input := []any{call, dev, user, r1, nextCall, laterResult}
+	out, changed = repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("必须保留轮边界：changed=%v out=%#v", changed, out)
+	}
+}
+
+// TestRepackTrailingNoticeIsNoop 通知全在结果之后时零改动（不产生无谓重排）。
+func TestRepackTrailingNoticeIsNoop(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}}}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	notice := map[string]any{"role": "developer", "content": "notice"}
+	input := []any{call, result, notice}
+	out, changed := repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("尾部通知应为空操作：changed=%v out=%#v", changed, out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mergeAdjacentToolCalls
+// ---------------------------------------------------------------------------
+
+// tcMsg 造一条带单个 tool_call 的 assistant（content 为 nil，与 agent 客户端回放
+// 并行调用时的报文形状一致）。
+func tcMsg(id string) map[string]any {
+	return map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+		map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}},
+	}}
+}
+
+// callIDsOf 取消息的 tool_calls id 序列（非 assistant / 无 tool_calls → nil）。
+func callIDsOf(m any) []string {
+	mm, _ := m.(map[string]any)
+	if role, _ := mm["role"].(string); role != "assistant" {
+		return nil
+	}
+	tcs, _ := mm["tool_calls"].([]any)
+	var ids []string
+	for _, tci := range tcs {
+		tc, _ := tci.(map[string]any)
+		if id, _ := tc["id"].(string); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// TestMergeAdjacentToolCallsSplitParallel 线上复现形态：同一批并行调用被拆成两条
+// 紧邻的 assistant.tool_calls。上游 deepseek 系对「带 tool_calls 的 assistant 紧跟
+// 另一条带 tool_calls 的 assistant」判 400 code=11148 并顶死整条会话（换号无效，
+// 不是账号问题）——这是 mergeAdjacentToolCalls 的正面修复目标。
+func TestMergeAdjacentToolCallsSplitParallel(t *testing.T) {
+	messages := []any{
+		tcMsg("c00"),
+		tcMsg("c01"),
+		map[string]any{"role": "tool", "tool_call_id": "c00", "content": "r0"},
+		map[string]any{"role": "tool", "tool_call_id": "c01", "content": "r1"},
+	}
+	out, changed := mergeAdjacentToolCalls(messages)
+	if !changed {
+		t.Fatal("背靠背的两条 assistant.tool_calls 应被合并")
+	}
+	if len(out) != 3 {
+		t.Fatalf("两条 assistant 应合成一条，实际 %d 条消息", len(out))
+	}
+	// 拼接顺序必须是声明顺序（= 结果的 wire 顺序），不得反转。
+	if got := callIDsOf(out[0]); !reflect.DeepEqual(got, []string{"c00", "c01"}) {
+		t.Fatalf("合并后 tool_calls = %v want [c00 c01]", got)
+	}
+	// 合并后不得再出现「相邻的两条带 tool_calls 的 assistant」。
+	prevHadCalls := false
+	for i, m := range out {
+		hasCalls := len(callIDsOf(m)) > 0
+		if prevHadCalls && hasCalls {
+			t.Fatalf("消息[%d] 仍是相邻的两条 assistant.tool_calls（上游判 11148）：%#v", i, out)
+		}
+		prevHadCalls = hasCalls
+	}
+}
+
+// TestMergeAdjacentToolCallsThreeConsecutive 三条连续全并（多路并行调用被拆成三条）。
+func TestMergeAdjacentToolCallsThreeConsecutive(t *testing.T) {
+	out, changed := mergeAdjacentToolCalls([]any{tcMsg("c00"), tcMsg("c01"), tcMsg("c02")})
+	if !changed {
+		t.Fatal("三条连续应被合并")
+	}
+	if len(out) != 1 {
+		t.Fatalf("应合成一条，实际 %d", len(out))
+	}
+	if got := callIDsOf(out[0]); !reflect.DeepEqual(got, []string{"c00", "c01", "c02"}) {
+		t.Fatalf("tool_calls = %v want [c00 c01 c02]", got)
+	}
+}
+
+// TestMergeAdjacentToolCallsNoop 已是规范形态（一条 assistant 带全部 tool_calls）
+// 必须零改动——上层依赖 changed=false 判断 no-op。
+func TestMergeAdjacentToolCallsNoop(t *testing.T) {
+	merged := map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+		map[string]any{"id": "c00"}, map[string]any{"id": "c01"},
+	}}
+	messages := []any{
+		merged,
+		map[string]any{"role": "tool", "tool_call_id": "c00", "content": "r0"},
+	}
+	out, changed := mergeAdjacentToolCalls(messages)
+	if changed {
+		t.Error("规范形态不应被改动")
+	}
+	if &out[0] != &messages[0] {
+		t.Error("零改动应返回原 slice")
+	}
+}
+
+// TestMergeAdjacentToolCallsBoundaries 合并条件从严的边界：合并只能发生在**相邻**
+// 且后一条无正文的 assistant.tool_calls 之间。隔着消息、后一条有正文、前一条无
+// tool_calls 三种都不合并——凭猜测合并会改变语义。
+func TestMergeAdjacentToolCallsBoundaries(t *testing.T) {
+	t.Run("中间隔着 user 不合并", func(t *testing.T) {
+		// 隔了消息说明不是同一批声明，这类形态交给 repackToolResultBlocks 原样处理。
+		messages := []any{tcMsg("c00"), map[string]any{"role": "user", "content": "x"}, tcMsg("c01")}
+		if _, changed := mergeAdjacentToolCalls(messages); changed {
+			t.Error("非相邻不应合并")
+		}
+	})
+	t.Run("后一条 content 非空不合并", func(t *testing.T) {
+		// content 非空无法无损拼接，不猜语义。
+		messages := []any{tcMsg("c00"), map[string]any{"role": "assistant", "content": "text",
+			"tool_calls": []any{map[string]any{"id": "c01"}}}}
+		if _, changed := mergeAdjacentToolCalls(messages); changed {
+			t.Error("后一条有正文不应合并")
+		}
+	})
+	t.Run("前一条无 tool_calls 不合并", func(t *testing.T) {
+		messages := []any{map[string]any{"role": "assistant", "content": "hi"}, tcMsg("c00")}
+		if _, changed := mergeAdjacentToolCalls(messages); changed {
+			t.Error("前一条无 tool_calls 不应合并")
+		}
+	})
+	t.Run("单条消息不越界", func(t *testing.T) {
+		if _, changed := mergeAdjacentToolCalls([]any{tcMsg("c00")}); changed {
+			t.Error("单条消息不应改动")
+		}
+	})
+}
+
+// TestMergeAdjacentToolCallsFoldTextBackward 反向拆分顺序：正文与调用声明拆成两条
+// 独立 assistant（正文在后）。正文要折进前一条带 tool_calls 的 assistant，合成
+// assistant(正文 + tool_calls)——这样「声明 tool_calls 的 assistant 紧跟它自己的
+// 结果」在两种拆分顺序下都成立。
+func TestMergeAdjacentToolCallsFoldTextBackward(t *testing.T) {
+	messages := []any{
+		tcMsg("c00"),
+		map[string]any{"role": "assistant", "content": "我先看一下"},
+		map[string]any{"role": "tool", "tool_call_id": "c00", "content": "r0"},
+	}
+	out, changed := mergeAdjacentToolCalls(messages)
+	if !changed {
+		t.Fatal("后置正文应折进前一条")
+	}
+	if len(out) != 2 {
+		t.Fatalf("正文应折进上一条，实际 %d 条消息", len(out))
+	}
+	asst := out[0].(map[string]any)
+	if asst["content"] != "我先看一下" {
+		t.Fatalf("正文未折入：%#v", asst)
+	}
+	if got := callIDsOf(asst); !reflect.DeepEqual(got, []string{"c00"}) {
+		t.Fatalf("tool_calls 丢失：%v", got)
+	}
+	// 数组正文可能含多模态块，拼接会丢结构——不折叠，原样出站。
+	t.Run("数组正文不折叠", func(t *testing.T) {
+		arr := []any{map[string]any{"type": "text", "text": "hi"}}
+		msgs2 := []any{tcMsg("c00"), map[string]any{"role": "assistant", "content": arr}}
+		if _, ch := mergeAdjacentToolCalls(msgs2); ch {
+			t.Error("数组正文不应被折叠（会丢结构）")
+		}
+	})
+}
+
+// TestMergeAdjacentToolCallsEmptyArrayContent 有客户端把「没有正文」发成
+// content:[] 而不是 null。若不把空数组算空，背靠背的两条 assistant(tool_calls)
+// 就不合并 → 上游 deepseek 系照样判 11148（正是本函数要挡的形态，条件漏了空数组）。
+func TestMergeAdjacentToolCallsEmptyArrayContent(t *testing.T) {
+	first := tcMsg("c00")
+	first["content"] = []any{}
+	second := tcMsg("c01")
+	second["content"] = []any{}
+	out, changed := mergeAdjacentToolCalls([]any{first, second})
+	if !changed {
+		t.Fatal("content 为空数组应按空正文处理并合并")
+	}
+	if len(out) != 1 {
+		t.Fatalf("应合成一条，实际 %d", len(out))
+	}
+}
+
+// TestMergeAdjacentToolCallsKeepsReasoningContent deepseek 多轮要求 assistant 带
+// 思维链回填（thinking.go 的 reasoning_content），合并时丢弃会换一个错误。
+// 两边都有则换行拼接。
+func TestMergeAdjacentToolCallsKeepsReasoningContent(t *testing.T) {
+	first := tcMsg("c00")
+	first["reasoning_content"] = "r1"
+	second := tcMsg("c01")
+	second["reasoning_content"] = "r2"
+	out, changed := mergeAdjacentToolCalls([]any{first, second})
+	if !changed {
+		t.Fatal("期望合并")
+	}
+	rc, _ := out[0].(map[string]any)["reasoning_content"].(string)
+	if rc != "r1\nr2" {
+		t.Fatalf("reasoning_content = %q want %q", rc, "r1\nr2")
+	}
+}
+
+// TestMergeAdjacentThroughPrepareBody 全链路：出站管线必须把「拆开的并行调用」
+// 归一到上游认可的形态（对照实验：合成一条 → 200；拆成两条 → deepseek 系 503/11148）。
+// 同时验证三步顺序 merge → repack → cleanup 不会互相打架。
+func TestMergeAdjacentThroughPrepareBody(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"user","content":"跑两个命令"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_00_a","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}]},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"call_01_b","type":"function","function":{"name":"exec_command","arguments":"{\"cmd\":\"ls\"}"}}]},
+		{"role":"tool","tool_call_id":"call_00_a","content":"/opt"},
+		{"role":"tool","tool_call_id":"call_01_b","content":"a b c"}
+	]}`
+	out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal 出站 body: %v", err)
+	}
+	msgs := obj["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("拆开的两条 assistant 应合成一条（5 → 4），实际 %d：%#v", len(msgs), msgs)
+	}
+	if got := callIDsOf(msgs[1]); !reflect.DeepEqual(got, []string{"call_00_a", "call_01_b"}) {
+		t.Fatalf("合并后 tool_calls = %v want [call_00_a call_01_b]", got)
+	}
+	assertPairingSymmetric(t, msgs)
+}
+
+// ---------------------------------------------------------------------------
+// 空 function.name
+// ---------------------------------------------------------------------------
+
+// TestCleanupOrphanEmptyFunctionName 线上 11133：上游流式响应在工具调用 name 分片
+// 到达前异常结束（200 空流也算）时，聚合器产出 name 为空的占位条目，客户端把它写进
+// 会话历史。下一轮原样转发，上游判 400 code=11133（tool_calls[i].function.name must
+// be a non-empty string）——**带不带配对结果都会拒**，整条会话从此每轮 503。
+// 修复：按 id 对称裁剪时否决空 name 条目（调用与其结果成对剔除）。
+func TestCleanupOrphanEmptyFunctionName(t *testing.T) {
+	emptyName := func(id string) map[string]any {
+		return map[string]any{"id": id, "type": "function", "function": map[string]any{"name": "", "arguments": "{}"}}
+	}
+	messages := []any{
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			emptyName("bad"), // 脏条目：name 为空串
+			map[string]any{"id": "good", "type": "function", "function": map[string]any{"name": "read", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "tool", "tool_call_id": "bad", "content": "r0"},
+		map[string]any{"role": "tool", "tool_call_id": "good", "content": "r1"},
+	}
+	out, changed := cleanupOrphanToolCalls(messages)
+	if !changed {
+		t.Fatal("空 name 条目应被剔除")
+	}
+	asst := out[0].(map[string]any)
+	tcs := asst["tool_calls"].([]any)
+	if len(tcs) != 1 {
+		t.Fatalf("只应保留 good，实际 %#v", tcs)
+	}
+	if id, _ := tcs[0].(map[string]any)["id"].(string); id != "good" {
+		t.Fatalf("保留的应是 good，实际 %s", id)
+	}
+	// 带结果的脏条目其**结果也必须成对剔除**，否则残留孤儿 tool 结果同样判 11148。
+	assertPairingSymmetric(t, out)
+}
+
+// TestCleanupOrphanEmptyNameWhitespaceOnly 纯空白 name 同样判脏——上游的
+// non-empty 校验不认只含空白的串。
+func TestCleanupOrphanEmptyNameWhitespaceOnly(t *testing.T) {
+	messages := []any{
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "ws", "type": "function", "function": map[string]any{"name": " \t ", "arguments": "{}"}},
+		}},
+		map[string]any{"role": "tool", "tool_call_id": "ws", "content": "r"},
+	}
+	out, changed := cleanupOrphanToolCalls(messages)
+	if !changed {
+		t.Fatal("纯空白 name 应判脏")
+	}
+	if _, ok := out[0].(map[string]any)["tool_calls"]; ok {
+		t.Fatalf("整批脏条目被剔后应删除 tool_calls 键：%#v", out[0])
+	}
+}
+
+// TestCleanupOrphanEmptyNameMissingFieldsNotDirty 判定精确收窄为「function 对象存在、
+// name 字段存在且为空白串」：缺 function / 缺 name 字段的占位条目不判脏（上游不因此
+// 拒参），与既有「空 id 双侧不识别」用例同口径，不扩大打击面。
+func TestCleanupOrphanEmptyNameMissingFieldsNotDirty(t *testing.T) {
+	cases := []struct {
+		name string
+		tc   map[string]any
+	}{
+		{"缺 function 字段", map[string]any{"id": "x", "type": "function"}},
+		{"缺 name 字段", map[string]any{"id": "x", "type": "function", "function": map[string]any{"arguments": "{}"}}},
+		{"name 非字符串", map[string]any{"id": "x", "type": "function", "function": map[string]any{"name": 42}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			messages := []any{
+				map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{c.tc}},
+				map[string]any{"role": "tool", "tool_call_id": "x", "content": "r"},
+			}
+			out, changed := cleanupOrphanToolCalls(messages)
+			if changed {
+				t.Fatalf("占位条目不判脏，不应改动：%#v", out)
+			}
+		})
+	}
+}
+
+// TestCleanupOrphanEmptyNameWithoutResult 空 name 且**无结果**的条目仍走既有孤儿
+// 路径（收集阶段照常登记 callIDs，保住 hasTraffic 语义——否则这种本可被孤儿规则
+// 删掉的形态会漏出站）。
+func TestCleanupOrphanEmptyNameWithoutResult(t *testing.T) {
+	messages := []any{
+		map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{
+			map[string]any{"id": "bad", "type": "function", "function": map[string]any{"name": ""}},
+		}},
+		map[string]any{"role": "user", "content": "next"},
+	}
+	out, changed := cleanupOrphanToolCalls(messages)
+	if !changed {
+		t.Fatal("空 name 且无结果的条目应被剔除")
+	}
+	if _, ok := out[0].(map[string]any)["tool_calls"]; ok {
+		t.Fatalf("应删除 tool_calls 键：%#v", out[0])
+	}
+}

@@ -147,10 +147,11 @@ func TestFetchGlobalModelInfosProbe(t *testing.T) {
 	if infos[0].ContextWindow != 192000 {
 		t.Errorf("ContextWindow=%d want 192000", infos[0].ContextWindow)
 	}
-	// 名单路径共享同一探测缓存：零额外上游请求（v3-config-merge 后首探 = v3+v2 两路）。
+	// 名单路径共享同一探测缓存：零额外上游请求（v3-config-merge 后首探 = 3 路 v3 UA + v2）。
 	names := c.FetchGlobalModels(globalAcct())
-	if len(calls) != 2 || !containsStr(calls, "/v3/config") || !containsStr(calls, "/v2/enterprises/personal/models") {
-		t.Fatalf("probe calls=%v want [/v3/config /v2/enterprises/personal/models] (cache shared)", calls)
+	if countPath(calls, "/v3/config") != v3RouteCalls ||
+		countPath(calls, "/v2/enterprises/personal/models") != 1 {
+		t.Fatalf("probe calls=%v want %d×/v3/config + 1×/v2 (cache shared)", calls, v3RouteCalls)
 	}
 	hasHy3 := false
 	for _, id := range names {
@@ -166,8 +167,8 @@ func TestFetchGlobalModelInfosProbe(t *testing.T) {
 	if len(infos2) != 1 || infos2[0].ID != "hy3" {
 		t.Fatalf("cached infos=%+v want 1 hy3", infos2)
 	}
-	if len(calls) != 2 {
-		t.Errorf("cache: probe calls=%d want 2 (second hit 1h cache)", len(calls))
+	if n := len(calls); n != v3RouteCalls+1 {
+		t.Errorf("cache: probe calls=%d want %d (3 v3 UA + v2 once, second hit 1h cache)", n, v3RouteCalls+1)
 	}
 }
 

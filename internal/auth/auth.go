@@ -189,6 +189,31 @@ func (a *Auth) SetRealm(realm string) { a.realm = ResolveRealm(realm, a.Domain) 
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 
+// IsEnterprise 报告账号是否为企业版（auth 文件带非空 enterpriseId）。
+//
+// 企业版**没有个人成长体系**：签到 / 成长任务 / 连登奖励 / 猫猫旅行 在上游一律被拒
+// （fork linguo2625469 7e3bc51 实测，2026-10-07 同一时刻 A/B 对照）：
+//   - POST /v2/billing/meter/daily-checkin                → 400 code 10001「企业账号不支持该操作」
+//   - POST /billing/meter/claim-gift / claim-compensation → 400 code 10001 同上
+//   - GET  /activity/growth/{streak,buddy/info,heatmap,lottery/*}
+//     与 GET /v2/activity/growth/tasks                    → 403「growth system is only available for personal users」
+//
+// 我们仓库的 growth 端点与上表逐一对应（upstream/growth_bonus.go、growth_reward.go、
+// travel.go 同为 /activity/growth/*），签到走 billing 域，故该实测结论直接适用。
+// 引用处（scheduler 签到 / 旅行 / 连登奖励三类循环）必须与 IsGlobal 门控并列跳过：
+// 否则每天对注定失败的端点空发请求（白耗一次上游调用并刷 WARN 日志）。
+//
+// 注意与 IsGlobal 是**正交**的两道闸，不可互相取代：企业版账号的 realm 既可能是
+// cn 也可能是 global，两个条件都要判。
+//
+// 不受影响的能力：选号派发、保活（token 刷新）、额度展示。本函数的门控**只**该用在
+// 上表那类个人成长体系调用上——模型目录（含 /console|/v2 的 enterprises/personal/models）
+// 与 chat 派发都要照常服务企业版账号，不可顺手把它一并跳过。
+//
+// 直读字段（EnterpriseID 自 Parse 后不再改写，upstream 也按同款直读），无需加锁：
+// Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写，EnterpriseID 不会。
+func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
+
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
 func isGlobalDomain(d string) bool {

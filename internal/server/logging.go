@@ -261,8 +261,11 @@ func logChatRow(seq int64, ttfb, total time.Duration, model, mode, uid, nick str
 	tokpsField := "-"
 	if toks >= 0 {
 		tokField = fmt.Sprintf("%d", toks)
-		if total > 0 {
-			tokpsField = fmt.Sprintf("%.1ftok/s", float64(toks)/total.Seconds())
+		// 速率与用量账本走同一口径（generationSeconds 扣掉 TTFB，见其注释）。
+		// 此前这里自己除 total，漏扣首 token 等待，于是控制台流水行的 tok/s 与
+		// 面板数字对不上——本函数本来就收到了 ttfb，只是没拿它算速率。
+		if gen := generationSeconds(float64(total.Milliseconds()), ttfb); gen > 0 {
+			tokpsField = fmt.Sprintf("%.1ftok/s", float64(toks)/gen)
 		} else {
 			tokpsField = "0.0tok/s"
 		}

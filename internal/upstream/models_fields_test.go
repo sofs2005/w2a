@@ -149,6 +149,57 @@ func TestFetchModelsFiltersTextToImage(t *testing.T) {
 	}
 }
 
+// TestNonChatModelGenerationTags 生成类 tag 全谱过滤（fork linguo2625469 7b24e22）：
+// 图片 / 视频生成模型都必须挡在对话目录外——旧规则只认 text-to-image，视频模型会
+// 混进目录、被选中后报 code=11102。
+//
+// 表里同时放**反向对照**（"chat"/"reasoning" 等对话类 tag 不得误伤）与"名字像生成、
+// tag 是对话"的条目：若把判据写成 id 前缀或子串匹配，这些行会红。
+func TestNonChatModelGenerationTags(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		id   string
+		tags []string
+		want bool
+	}{
+		{"text-to-image 仍拦", "img-gen", []string{"text-to-image", "chat"}, true},
+		{"image-to-image 拦", "gpt-image-1", []string{"image-to-image"}, true},
+		{"text-to-video 拦", "seedance-2.5", []string{"text-to-video"}, true},
+		{"image-to-video 拦", "seedance-2.5-i2v", []string{"image-to-video"}, true},
+		{"生成 tag 混在对话 tag 中仍拦", "seedance-2.5", []string{"chat", "text-to-video"}, true},
+		{"纯对话 tag 不拦", "glm-5.2", []string{"chat"}, false},
+		{"推理 tag 不拦", "deepseek-v4.1-flash", []string{"chat", "reasoning"}, false},
+		{"无 tag 不拦", "gpt-5.4", nil, false},
+		{"名字含 video 但 tag 是对话 → 不拦", "video-chat-1", []string{"chat"}, false},
+		{"tag 大小写不匹配不拦（上游为小写字面量，不做模糊匹配）", "x", []string{"Text-To-Image"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := nonChatModel(c.id, 8192, c.tags); got != c.want {
+				t.Errorf("nonChatModel(%q, 8192, %v) = %v, want %v", c.id, c.tags, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFetchModelsFiltersVideoGenTags 端到端：上游目录带 seedance 视频模型时，
+// FetchModels 的并集结果不得含它（本函数 CN/global 共用，CN 侧同样生效）。
+func TestFetchModelsFiltersVideoGenTags(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"models":[
+			{"id":"seedance-2.5","name":"Seedance","maxInputTokens":8192,"maxOutputTokens":8192,"tags":["text-to-video"]},
+			{"id":"gpt-image-1","name":"GPT Image","maxInputTokens":8192,"maxOutputTokens":8192,"tags":["image-to-image"]},
+			{"id":"glm-5.2","name":"GLM","maxInputTokens":131072,"maxOutputTokens":8192,"tags":["chat"]}
+		],"agents":[{"name":"cli","models":["seedance-2.5","gpt-image-1","glm-5.2"]}]}}`), nil
+	})
+	infos, err := c.FetchModels(authStub())
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if len(infos) != 1 || infos[0].ID != "glm-5.2" {
+		t.Fatalf("expected only glm-5.2 (生成类模型应被过滤), got %+v", infos)
+	}
+}
+
 // TestFetchModelsKeepsNormalChatModels P2：正常对话模型（deepseek/glm/kimi）不被过滤。
 func TestFetchModelsKeepsNormalChatModels(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {

@@ -93,6 +93,14 @@ func (s *Scheduler) runTravel(ctx context.Context) {
 			log.Printf("travel %s: skip (global realm)", logfmt.Label(st.UID, st.Nickname))
 			continue
 		}
+		if a.IsEnterprise() {
+			// 企业版门控：猫猫旅行属个人成长体系（/activity/growth/buddy/*），
+			// 企业版上游 403「growth system is only available for personal users」
+			// （见 auth.IsEnterprise 实测注释）。与 IsGlobal 正交，须单独判；
+			// 逐账号打点与上方 global skip 同口径，便于「旅行是不是没跑」排查。
+			log.Printf("travel %s: skip (enterprise account)", logfmt.Label(st.UID, st.Nickname))
+			continue
+		}
 		if !first {
 			if !sleepCtx(ctx, travelAccountDelay) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再巡

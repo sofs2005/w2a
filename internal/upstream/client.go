@@ -25,20 +25,21 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
-	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
-	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrClient                        // 其他 4xx / 业务错误
+	ErrNone             ErrKind = iota // 成功
+	ErrHardCredit                      // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                        // 429 软限流 → 短冷却
+	ErrSessionDead                     // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                        // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                          // 5xx 上游故障
+	ErrContentBlocked                  // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                       // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
+	ErrAccountFault                    // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                    // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrWafBlock                        // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避（WAF 403 修复 P0-1）
+	ErrPromptTooLong                   // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
+	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrClient                          // 其他 4xx / 业务错误
+	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
 )
 
 func (k ErrKind) String() string {
@@ -67,6 +68,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrToolCallMismatch:
+		return "tool_call_mismatch"
 	case ErrClient:
 		return "client"
 	default:
@@ -179,7 +182,7 @@ var contentBlockedRule = errorRule{kind: ErrContentBlocked, mode: matchLower, pa
 
 // badParamsRule 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
 // "Unmarshal chat params failed..."（code 11101）。这是"发给上游的 body 有问题"，
-// 与账号健康无关——不罚号，但仍轮转（commit B）。
+// 与账号健康无关——不罚号，且**不轮转**（同一 body 换号必然同样失败）。
 var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []string{
 	"Unmarshal chat params failed",
 	`"code":11101`,
@@ -616,13 +619,19 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusBadRequest && (invalidImageRule.hit(body, lower) || codeMarker(lower, "11135")) {
 		return ErrImageInvalid
 	}
+	// 11148「工具调用与工具结果不匹配」是确定性的请求级错误：同一份 body 换任何账号
+	// 都是同样答复，轮转无意义。判在内容策略/参数错误/通用 4xx 之前，与 11135 同层。
+	if status == http.StatusBadRequest && isToolCallMismatch(lower) {
+		return ErrToolCallMismatch
+	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	// 请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）：
 	// 这是"发给上游的 body 有问题"。网关侧截断已由 413 消灭（issue #41 commit A），
 	// 剩余来源是客户端 JSON 本身畸形——换了账号照样 400，不该罚号（白白冷却好号）。
-	// 归 ErrBadParams：不冷却/不熔断/不计错，但**仍然轮转**（不同账号可能有不同的
-	// 模型权限，值得再试一次）。
+	// 归 ErrBadParams：不冷却/不熔断/不计错，且**不轮转**——11101 发生在上游解析
+	// 请求体阶段，还没走到模型路由，所以「不同账号可能有不同模型权限」这条轮转理由
+	// 实际属于 11102（ErrModelBlocked），那里已有 (账号, 模型) 负缓存避让。
 	if status >= 400 {
 		if contentBlockedRule.hit(body, lower) {
 			return ErrContentBlocked
@@ -634,6 +643,17 @@ func Classify(status int, body string) ErrKind {
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上面 hardRule 捕获。
 	return ErrNone
+}
+
+// isToolCallMismatch 判定 11148「工具调用与工具结果不匹配」。
+//
+// 这是**确定性请求级**错误：同一份 body 换任何账号都会得到相同答复（历史配对断了
+// 就是断了），所以轮转无意义、只会白白消耗健康账号。三种文案形态都要认：
+// 上游标准文案、下划线错误码名，以及 JSON 信封里的 code（含空白/引号变体，走 codeMarker）。
+func isToolCallMismatch(lower string) bool {
+	return strings.Contains(lower, "tool calls and tool results do not match") ||
+		strings.Contains(lower, "tool_call_sequence_broken") ||
+		codeMarker(lower, "11148")
 }
 
 // apiEnvelope 上游统一信封。
@@ -1330,7 +1350,17 @@ func (c *Client) modelsPath(a *auth.Auth) string {
 // 来源：harness buddy.ts:547-555。三类规则：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
 //   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
+//   - tags 含生成类标签（图片/视频）：生成走各自专用端点，作为对话模型选上去只会
+//     报 code=11102，非本网关用途。
+//
+// 生成类标签随上游目录扩充，不能只认 text-to-image。fork linguo2625469 7b24e22
+// （2026-10-02 实测其 global 账号的桌面端 UA 目录）报出 seedance 系视频模型
+// （tags 带 text-to-video / image-to-video）与 gpt-image 系（image-to-image，该
+// 系列同时带 text-to-image，故旧规则已覆盖）。我们无 global 号可自行复测这批
+// 新标签，但谓词语义是确定的：这些 tag 标识生成端点专属模型，与对话无关——旧规则
+// 只拦 text-to-image，视频模型会混进对话目录、被选中后报 11102。
+//
+// 本函数 CN 与 global 共用，新标签对两域同时生效（两侧都由 parsex 侧按 tags 过滤）。
 func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
@@ -1342,7 +1372,8 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 		return true
 	}
 	for _, t := range tags {
-		if t == "text-to-image" {
+		switch t {
+		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 			return true
 		}
 	}

@@ -47,6 +47,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "request context exceeds the model's limit; reduce history/message size"
 	case ErrImageInvalid:
 		return "image request was rejected by upstream; check image_url format and image data"
+	case ErrToolCallMismatch:
+		// 配对断裂是**客户端历史**的问题（工具执行失败却写回了 assistant.tool_calls），
+		// 网关侧清理只能救回还能救的部分。指路：开新会话，别在这条历史上继续追加。
+		return "tool_call/tool_result pairing in the request history is broken; start a new conversation"
 	case ErrWafBlock:
 		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
 		// （等待窗口过去再试，换号/立刻重试无意义）。

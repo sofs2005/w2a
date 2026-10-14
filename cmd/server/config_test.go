@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -545,6 +546,68 @@ func TestMaxBodyLegacyKeyIgnored(t *testing.T) {
 		if _, err := Load(fp); err != nil {
 			t.Fatalf("legacy max_body_mb=%s must not fail startup: %v", v, err)
 		}
+	}
+}
+
+// TestServerReadTimeout 入站读取上限（issue #100）：缺省 300s；"0" = 显式不限制
+// （0 是合法值，不回落默认）；负值/不可解析 fail fast —— 静默钳 0 会把保护悄悄关掉。
+func TestServerReadTimeout(t *testing.T) {
+	c := Default()
+	if c.Server.ReadTimeout != "300s" {
+		t.Errorf("default read_timeout=%q want 300s", c.Server.ReadTimeout)
+	}
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 300*time.Second {
+		t.Errorf("default dur=%v want 300s", c.ServerReadTimeoutDur)
+	}
+
+	// 显式清空 = 未配置 → 回落默认（不是「不限制」：两者语义相反，不能混）。
+	c = Default()
+	c.Server.ReadTimeout = ""
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize empty: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 300*time.Second {
+		t.Errorf("empty dur=%v want 300s", c.ServerReadTimeoutDur)
+	}
+
+	// "0" = 不限制（http.Server 的 ReadTimeout 0 即无超时）。
+	c = Default()
+	c.Server.ReadTimeout = "0"
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize zero: %v", err)
+	}
+	if c.ServerReadTimeoutDur != 0 {
+		t.Errorf("zero dur=%v want 0", c.ServerReadTimeoutDur)
+	}
+
+	// 负值 fail fast：配置本意是「限制多少」，写负数必然是笔误，不该被静默当成关闭。
+	c = Default()
+	c.Server.ReadTimeout = "-5s"
+	if err := c.normalize(); err == nil {
+		t.Error("negative read_timeout should fail fast")
+	}
+
+	c = Default()
+	c.Server.ReadTimeout = "bogus"
+	if err := c.normalize(); err == nil {
+		t.Error("unparsable read_timeout should fail fast")
+	}
+}
+
+// TestServerReadTimeoutFromFile 配置文件路径同样生效（不只是 Default()+normalize()）。
+func TestServerReadTimeoutFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"server":{"read_timeout":"45s"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ServerReadTimeoutDur != 45*time.Second {
+		t.Errorf("dur=%v want 45s", c.ServerReadTimeoutDur)
 	}
 }
 
