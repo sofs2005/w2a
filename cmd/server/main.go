@@ -370,10 +370,12 @@ func main() {
 		Addr:              cfg.Listen,
 		Handler:           rootHandler,
 		ReadHeaderTimeout: 30 * time.Second,
-		// ReadTimeout 覆盖整个请求读取（含 body）：防慢速 body 拖死连接。
-		// max_body_mb 已移除（请求体无上限，交由上游自然响应），超大 body 成为
-		// 唯一的自然约束：60s 内传不完会得到连接错误（read timeout）而非 413。
-		ReadTimeout: 60 * time.Second,
+		// ReadTimeout 覆盖整个请求读取（含 body 上传）：防慢速 body 拖死连接。
+		// 请求体已无网关侧上限（max_body_mb 移除），此前硬编码 60s 会把大上下文/
+		// 文件块经反代链的慢速上传掐掉，客户端拿到 400 "read body: ... i/o timeout"
+		// ——而请求本身完全合法，重试同样注定超时（issue #100）。
+		// 改由 server.read_timeout 配置：缺省 300s，"0" = 不限制。改动需重启进程。
+		ReadTimeout: cfg.ServerReadTimeoutDur,
 		// IdleTimeout keep-alive 空闲连接回收：配合 ctx 传播（FIX-2）防连接泄漏堆积。
 		// 注意：SSE 流式响应期间连接非空闲，不受此项掐断；不设全局 WriteTimeout
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。

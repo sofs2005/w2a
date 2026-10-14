@@ -23,7 +23,20 @@ type Config struct {
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
 
-	Server struct{} `json:"server"` // 已退役段：max_body_mb 移除后无字段；旧配置该段下任意键因 JSON 未知字段而自然忽略
+	// Server 入站 HTTP 服务参数（issue #100）。
+	//
+	// 此段曾因 max_body_mb 移除而退役（请求体改由上游自然响应），现重新启用：
+	// 旧配置里该段下的任何键都因 JSON 未知字段而自然忽略，所以从空结构体改回
+	// 有字段不会让既有配置报错。
+	Server struct {
+		// ReadTimeout 入站请求读取（含 body 上传）总时长上限（issue #100）。
+		// http.Server 的 ReadTimeout 覆盖整个请求读取：大上下文/文件块请求经
+		// 反代链转发时上传可能超过旧固定值 60s，被掐后客户端拿到
+		// 400 "read body: ... i/o timeout"——而请求本身完全合法。
+		// 缺省 "300s"；"0" = 不限制（慢速 body 可无限占用连接，自担风险）；
+		// 改动需重启进程。
+		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+	} `json:"server"`
 
 	Cooldown struct {
 		// hard_credit / err_threshold / err_cooldown 三个历史键已退役：
@@ -189,6 +202,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// StateFlushDur 解析后的池状态落盘周期（pool.state_flush）；0 = 关闭后台落盘。
 	StateFlushDur time.Duration `json:"-"`
+	// ServerReadTimeoutDur 解析后的入站请求读取上限（server.read_timeout）；0 = 不限制。
+	ServerReadTimeoutDur time.Duration `json:"-"`
 }
 
 // Default 默认配置。
@@ -201,6 +216,7 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	c.Server.ReadTimeout = "300s"
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
 	// 消除 issue #49 的默认值漂移）。
 	c.Schedule = config.DefaultSchedule()
@@ -424,6 +440,18 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
+	// 负值 fail fast —— 静默钳 0 会把保护悄悄关掉（配置本意是「限制多少」，
+	// 写负数几乎必然是笔误，而不是「请关掉保护」）。
+	if c.Server.ReadTimeout == "" {
+		c.Server.ReadTimeout = "300s"
+	}
+	if c.ServerReadTimeoutDur, err = time.ParseDuration(c.Server.ReadTimeout); err != nil {
+		return fmt.Errorf("server.read_timeout: %w", err)
+	}
+	if c.ServerReadTimeoutDur < 0 {
+		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义（关掉限制请写 \"0\"）", c.Server.ReadTimeout)
+	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
