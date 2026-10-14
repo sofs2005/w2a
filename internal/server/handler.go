@@ -6,8 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -965,6 +967,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = uerr.Status
 		}
 		if uerr == nil && terr != nil {
+			// 上游超时 / 停滞：**不换号、不罚号**。
+			//
+			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，
+			// 只会把客户端拖到 MaxRotate × header_timeout（部署值 600s 时最坏约
+			// 半小时），期间还给一串健康号喂连败计数。此前全仓没有任何超时识别，
+			// 超时和「网络抖动」共用同一条换号路径。
+			//
+			// 账号处置与抖动分支刻意不同：**不** NoteFailures（超时不代表号坏）、
+			// **不** fail（不释放粘性绑定——该号下一轮仍可能是对的，解绑只会让
+			// 会话重新随机分配），只释放本轮在途名额并终止轮转。
+			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
+				releaseHeld()
+				st.status = http.StatusServiceUnavailable
+				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
+				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
+					logfmt.Label(acct.UID, acct.Nickname), terr)
+				break
+			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
 			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
@@ -1197,6 +1217,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// 上游超时：轮转已在传输层分支止损（见 isUpstreamTimeout），这里给一条**能区分**
+	// 的文案，别混进「没有可用账号」——两者的排查方向完全不同（前者是上游慢/网络，
+	// 后者是池里没号），混在一起运维只会去查账号池。
+	if errors.Is(lastErr, errUpstreamTimeout) {
+		code = "upstream_timeout"
+		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
 	// （无上游原文）固定 no_healthy_account hint。
@@ -1278,6 +1305,34 @@ func (h *Handler) noteChatSuccess(uid, bareModel, outModel, stickyKey string) {
 	if stickyKey != "" && h.cfg.Session != nil {
 		h.cfg.Session.Bind(stickyKey, uid)
 	}
+}
+
+// errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
+var errUpstreamTimeout = errors.New("upstream timeout")
+
+// isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
+// 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
+//
+// 三态判定：
+//   - net.Error.Timeout()——Transport.ResponseHeaderTimeout（首字节阶段）与
+//     HTTP.Client.Timeout 都归此；
+//   - 显式 deadline（context.DeadlineExceeded / os.ErrDeadlineExceeded）；
+//   - **客户端仍在但 ctx 被取消**——那只能是我们自己的空闲看门狗（idle.go 的
+//     idleMonitoringBody 在流中静默超阈值时 cancel）掐的流，也就是上游停滞。
+//     客户端主动断连时 r.Context() 已取消（clientGone=true），不误判为上游超时，
+//     照常走抖动分支——人已走，把它算成上游故障只会污染超时统计。
+func isUpstreamTimeout(err error, clientGone bool) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	return !clientGone && errors.Is(err, context.Canceled)
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
