@@ -58,6 +58,29 @@ func main() {
 		// 用 errors.Is 而非 os.IsNotExist——后者看不穿 Load 里 fmt.Errorf("%w") 的包装，
 		// 会让这个分支永不命中、直接 log.Fatalf 退出（旧实现的实际行为）。
 		if errors.Is(err, fs.ErrNotExist) {
+			// 但「配置不存在」不等于「首次运行」：老部署的配置路径漂移时（实案：
+			// ENTRYPOINT 从 /app/config.json 改到 /app/config/config.json，而宿主机
+			// 单文件挂载仍钉旧路径），真配置在别处、只是读不到。此时自动生成会**静默
+			// 换掉 api_key**（下游全 401），且旧配置里的调优从头到尾没生效过。
+			// 用运行痕迹（state.json / 面板 data 侧产物）判别，拒绝这种「假装首启」；
+			// 判据的取舍见 priorRunEvidence 的注释。
+			//
+			// 判据取自纯默认 + env：配置文件本就不存在，StateFile 只能来自默认值或
+			// WB2A_* 覆盖——这正是「网关认为该去哪儿找」的权威口径。
+			base, berr := Load("")
+			if berr == nil {
+				if ev := priorRunEvidence(base.StateFile); ev != "" {
+					log.Fatalf("config %s 不存在，但检测到本部署的运行痕迹（%s）：\n"+
+						"  这几乎总是**配置路径对不上**，而不是首次运行——真配置在另一个路径上，网关读不到。\n"+
+						"  拒绝自动生成：那会换掉 api_key（下游客户端全部 401），并让既有调优静默失效。\n"+
+						"  请核对容器的配置文件挂载路径与 -config 参数是否一致：\n"+
+						"    docker inspect <容器名> --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{\"\\n\"}}{{end}}'\n"+
+						"  注意 05b18ce 起 ENTRYPOINT 读的是 /app/config/config.json（挂**目录** ./config:/app/config），\n"+
+						"  旧部署的单文件挂载 config.json:/app/config.json 已对不上。\n"+
+						"  确属首次运行请清空上述痕迹，或显式用 -config 指向真实配置。",
+						*cfgPath, ev)
+				}
+			}
 			if key, werr := WriteDefault(*cfgPath); werr == nil {
 				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
 				cfg, err = Load(*cfgPath)

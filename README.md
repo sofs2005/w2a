@@ -457,6 +457,39 @@ docker compose pull && docker compose up -d
 
 镜像由 GitHub Actions 在 `master` 推送时自动构建发布到 GHCR；也可 `docker compose up -d --build` 从源码本地构建。
 
+> **⚠️ 从 05b18ce 之前的版本升级：配置文件挂载路径变了，必须手工调整。**
+>
+> 该提交把容器内的配置路径从 `/app/config.json` 改为 `/app/config/config.json`
+> （挂**目录** `./config:/app/config`），起因是单文件挂载在首启时会被 Docker 当目录创建。
+> 若你的容器仍是旧挂载 `./config.json:/app/config.json`，会出现两个后果：
+>
+> 1. 网关读不到你的配置 —— `upstash`、`prompt`、`pool` 等调优**从未生效**（一直跑默认值）；
+> 2. 每次 `down` + `up` 重建容器都会**重新生成一把新的 `api_key`**，下游客户端全部 401。
+>    （`docker restart` 时容器可写层还在，所以看不出问题，只在重建容器时暴露。）
+>
+> 先确认挂载现状：
+>
+> ```bash
+> docker inspect workbuddy2api --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+> ```
+>
+> 出现 `-> /app/config.json`（旧路径）就按下述步骤迁移：
+>
+> ```bash
+> cd /vol1/1000/workbuddy2api          # 换成你的实际部署目录
+> mkdir -p config
+> cp config.json config/config.json    # 把真配置搬到新路径
+> # 编辑 docker-compose.yml：把 `- ./config.json:/app/config.json` 改成 `- ./config:/app/config`
+> docker compose up -d                 # 重建容器
+> ```
+>
+> 迁移后 `docker compose logs wb2api | head -5` 应看到 `loaded N account(s)`，而**不再**有
+> 「不存在，已生成推荐配置」那行 —— 出现后者说明路径仍未对上。
+>
+> 新版网关还会主动兜底：若配置缺失但检测到运行痕迹（`state.json` / `model_aliases.json` /
+> `gui-credentials.json` / `backups` 任一存在），会**拒绝生成新配置并报错退出**，
+> 而不是悄悄换掉 `api_key`。日志会直接打印上面这条 `docker inspect` 命令。
+
 ### 源码构建
 
 面板（`panel/`）是 `git subtree` 引入的**独立 Go module**，根 module 通过

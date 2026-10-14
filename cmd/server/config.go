@@ -264,6 +264,45 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
+// priorRunEvidence 判定「这台部署曾经跑过」，返回检测到的痕迹描述；空串 = 干净首次运行。
+//
+// 为什么需要它：配置缺失有两种成因，处理方式截然相反——
+//
+//  1. 真正的首次运行（全新部署，什么都没跑过）：自动生成一份随机 api_key 的推荐配置
+//     是贴心且安全的；
+//  2. **老部署的配置路径漂移**（实案：05b18ce 把 ENTRYPOINT 从 /app/config.json 改成
+//     /app/config/config.json，而宿主机的单文件挂载仍钉在旧路径）：此时配置缺失只是
+//     假象——真配置在另一个路径上，网关读不到。自动生成会**静默换掉 api_key**，下游
+//     客户端全部 401；同时旧 config.json 里的 listen / upstash / pool 调优从头到尾
+//     没被读过。症状极难归因：每次 down+up 都换一把新 key，像「随机失效」。
+//
+// 判据只取**网关/面板自己产出的**文件，不取 auths/：README 记载的首装流程是
+// 「先 login.sh 登录（写 auths/）→ 再 docker compose up -d」，故 auths/ 里有凭证
+// 完全可能是尚未首启的正常状态，拿它当「跑过」的证据会把首装直接打死。
+// 同理不能拿「目录是否存在」当判据——Dockerfile 里 `mkdir -p /app/auths /app/data`
+// 让这两个目录在全新容器里就已存在，只有里面的**内容**才是运行痕迹。
+//
+// state.json 是网关的池状态落盘（internal/pool/persist.go），登录脚本绝不产生它；
+// 面板的 data 侧产物（model_aliases.json / backups / gui-credentials.json）同理。
+func priorRunEvidence(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	dir := filepath.Dir(stateFile)
+	candidates := []struct{ path, desc string }{
+		{stateFile, "池状态文件"},
+		{filepath.Join(dir, "model_aliases.json"), "模型别名文件"},
+		{filepath.Join(dir, "gui-credentials.json"), "面板凭据文件"},
+		{filepath.Join(dir, "backups"), "面板配置备份目录"},
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c.path); err == nil {
+			return c.desc + " " + c.path
+		}
+	}
+	return ""
+}
+
 // WriteDefault 在 path 落一份推荐配置（首次运行自动生成，免去「手工复制 config.example.json
 // 再改 key」这一步）。api_key 用 crypto/rand 随机生成，**不留示例占位符**：
 // listen 默认绑 :7863（0.0.0.0），空 key 或 "test_key" 等于把网关连同全部账号裸暴露。

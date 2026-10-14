@@ -800,6 +800,51 @@ func TestLoadMissingConfigIsNotExist(t *testing.T) {
 	}
 }
 
+// TestPriorRunEvidence 守护 main.go 的「拒绝假装首启」判据。
+//
+// 关键取舍：判据**只认网关/面板自己产出的**文件（state.json / model_aliases.json /
+// gui-credentials.json / backups），**不认 auths/ 里的凭证**——README 的首装流程是
+// 「先 login.sh 写 auths/ → 再 up -d」，用凭证当判据会把正常首装打死。
+func TestPriorRunEvidence(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	authDir := filepath.Join(dir, "auths")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) 干净首启：目录存在（Dockerfile 会 mkdir）但没有任何运行产物 → 无痕迹
+	if ev := priorRunEvidence(stateFile); ev != "" {
+		t.Errorf("干净首次运行不应有痕迹, got %q", ev)
+	}
+
+	// 2) auths/ 有凭证但网关从未跑过（README 首装流程）→ **仍无痕迹**，必须能自动生成
+	os.WriteFile(filepath.Join(authDir, "workbuddy-u1.json"), []byte(`{"uid":"u1"}`), 0o600)
+	if ev := priorRunEvidence(stateFile); ev != "" {
+		t.Errorf("仅 auths/ 有凭证不应算运行痕迹（会打死首装流程）, got %q", ev)
+	}
+
+	// 3) state.json 存在（网关跑过并落盘）→ 有痕迹，拒绝自动生成
+	os.WriteFile(stateFile, []byte(`{}`), 0o600)
+	if ev := priorRunEvidence(stateFile); !strings.Contains(ev, "state.json") {
+		t.Errorf("state.json 存在应判为运行痕迹, got %q", ev)
+	}
+	os.Remove(stateFile)
+
+	// 4) 面板侧产物同样算痕迹（配置漂移时面板往往已写过 data 目录）
+	alias := filepath.Join(dir, "model_aliases.json")
+	os.WriteFile(alias, []byte(`{"aliases":[]}`), 0o600)
+	if ev := priorRunEvidence(stateFile); !strings.Contains(ev, "model_aliases.json") {
+		t.Errorf("model_aliases.json 存在应判为运行痕迹, got %q", ev)
+	}
+	os.Remove(alias)
+
+	// 5) state_file 为空（纯内存形态）→ 无判据，不得误判为「跑过」
+	if ev := priorRunEvidence(""); ev != "" {
+		t.Errorf("state_file 为空时不应有痕迹, got %q", ev)
+	}
+}
+
 // TestWriteDefault 首启自动生成推荐配置：随机 api_key、0600、父目录自建、
 // 拒绝覆盖已有文件（安全默认优于示例占位符——listen 绑 0.0.0.0，空 key 裸暴露）。
 func TestWriteDefault(t *testing.T) {

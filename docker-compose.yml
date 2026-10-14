@@ -49,4 +49,11 @@ services:
       # 挂目录后 ENTRYPOINT 读的是 /app/config/config.json：该文件不存在时网关
       # 自动生成一份随机 api_key 的配置（0600），落在宿主机 ./config/config.json，
       # 即开即用。需要在线编辑就改这个文件（面板「网关配置」页写的也是它）。
+      #
+      # ⚠️ 旧部署（沿用 ./config.json:/app/config.json 单文件挂载）必须迁移：
+      #    容器内路径已改为 /app/config/config.json，旧挂载点对不上 → 网关读不到真配置
+      #    （upstash/prompt/pool 等调优全部失效），且每次 down+up 重建容器都会重新
+      #    生成一把新 api_key（下游全 401）。docker restart 时容器可写层尚在，看不出问题。
+      #    迁移：mkdir -p config && cp config.json config/config.json，再删掉下面那行注释
+      #    的旧写法、改用本行。确认方式见 README「更新到最新版本」。
       - ./config:/app/config
