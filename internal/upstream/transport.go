@@ -71,10 +71,28 @@ func newDialer() *net.Dialer {
 //     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
 //   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
+//
+// 出站代理：Proxy 取 http.ProxyFromEnvironment，读标准环境变量 HTTP_PROXY /
+// HTTPS_PROXY / NO_PROXY（含小写形态）。这是**刻意**的选择——本网关常在受限网络里
+// 部署（无直连、须经企业代理出网），而此前完全没有代理能力：连不上上游时只能表现为
+// 「所有账号都不可用」，排查方向上会一路跑偏到账号/风控，实际根因是网络不可达。
+//
+// 三点设计约束：
+//   - 环境变量优先于代码默认：标准库 ProxyFromEnvironment 在变量未设置时返回 nil
+//     （= 直连），故对「不设变量」的既有部署是零行为变化，无需开关。
+//   - NO_PROXY 由标准库一并处理（含 "example.com"、".example.com"、"*" 等形态），
+//     不自造匹配逻辑——自造版本几乎必然漏掉某条标准形态。
+//   - 本函数在启动时构造一次；而 http.ProxyFromEnvironment **自身**也把环境变量
+//     读进进程级 sync.Once 缓存（进程内只解析一次）。两者叠加的语义是：启动后改
+//     环境变量不生效，**改代理须重启进程**——与其它出站参数（超时等）同口径。
+//     这既是标准库的既定行为，也是本网关「配置改动需重启」的既有约定（见
+//     config 里各 restart 注记），不另造热加载。
 func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
 		DialContext: dialer.DialContext,
+		// 环境变量代理（HTTP_PROXY/HTTPS_PROXY/NO_PROXY）；未设置 = 直连（零回归）。
+		Proxy: http.ProxyFromEnvironment,
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
