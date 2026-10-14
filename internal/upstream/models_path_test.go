@@ -121,8 +121,9 @@ func TestGlobalModelsProbeV2First(t *testing.T) {
 
 	got := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	if len(calls) != 2 || !containsStr(calls, "/v3/config") || !containsStr(calls, "/v2/enterprises/personal/models") {
-		t.Fatalf("probe calls=%v want [/v3/config /v2/enterprises/personal/models] (v2-first, no console)", calls)
+	if countPath(calls, "/v3/config") != v3RouteCalls ||
+		countPath(calls, "/v2/enterprises/personal/models") != 1 {
+		t.Fatalf("probe calls=%v want %d×/v3/config + 1×/v2 (v2-first, no console)", calls, v3RouteCalls)
 	}
 	counts := map[string]int{}
 	for _, id := range got {
@@ -156,11 +157,10 @@ func TestGlobalModelsProbeConsoleFallback(t *testing.T) {
 
 	got := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	if len(calls) != 3 ||
-		!containsStr(calls, "/v3/config") ||
-		!containsStr(calls, "/v2/enterprises/personal/models") ||
-		!containsStr(calls, "/console/enterprises/personal/models") {
-		t.Fatalf("fallback calls=%v want [/v3/config /v2/... /console/...]", calls)
+	if countPath(calls, "/v3/config") != v3RouteCalls ||
+		countPath(calls, "/v2/enterprises/personal/models") != 1 ||
+		countPath(calls, "/console/enterprises/personal/models") != 1 {
+		t.Fatalf("fallback calls=%v want %d×/v3 + /v2 + /console", calls, v3RouteCalls)
 	}
 	counts := map[string]int{}
 	for _, id := range got {

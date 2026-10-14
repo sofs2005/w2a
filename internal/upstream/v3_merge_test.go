@@ -65,9 +65,9 @@ func TestGlobalModelsMergeV3PrimaryV2Supplement(t *testing.T) {
 	names := c.FetchGlobalModels(globalAcct())
 	infos := c.FetchGlobalModelInfos(globalAcct())
 
-	// 两路并发各一次（v2 200 → 不打 /console）。
-	if len(calls) != 2 {
-		t.Fatalf("probe calls=%v want 2 (v3 + v2)", calls)
+	// 三路 v3 UA 并发各一次 + v2 一次（v2 200 → 不打 /console）。
+	if len(calls) != 4 {
+		t.Fatalf("probe calls=%v want 4 (3 v3 UA routes + v2)", calls)
 	}
 
 	// 名单：v3 原序（glm-5.2, hy4-preview, deepseek-v4.1-flash）+ v2 补充（gpt-5.3-codex）。
@@ -107,9 +107,9 @@ func TestGlobalModelsMergeV3FailDegradesToV2(t *testing.T) {
 
 	names := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	// v3 400 + v2 200：降级为 v2 结果（v3 不拖累）。
-	if len(calls) != 2 {
-		t.Fatalf("probe calls=%v want 2 (v3 attempted + v2 succeeded)", calls)
+	// 三路 v3 全 400（UA 门禁形态）+ v2 200：降级为 v2 结果（v3 不拖累）。
+	if len(calls) != 4 {
+		t.Fatalf("probe calls=%v want 4 (3 v3 UA routes attempted + v2 succeeded)", calls)
 	}
 	want := []string{"glm-5.2", "hy4-preview", "gpt-5.3-codex"}
 	if !sameStrings(names, want) {

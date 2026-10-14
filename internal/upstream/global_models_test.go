@@ -32,6 +32,22 @@ func globalModelsSrv(t *testing.T, calls *[]string, authz *string, respond func(
 	}))
 }
 
+// countPath 统计探测请求里某路径的出现次数。v3/config 现为**三路 UA** 并发
+// （desktop/IDE/CLI），企业家族按 /v2 → /console 顺序兜底，故断言须按路径计数
+// 而非总请求数——总请求数会随「v3 路数」这一实现细节变动，路径计数才是契约。
+func countPath(calls []string, path string) int {
+	n := 0
+	for _, c := range calls {
+		if c == path {
+			n++
+		}
+	}
+	return n
+}
+
+// v3RouteCalls /v3/config 固定三路 UA 的并发次数（见 probeGlobalModels）。
+const v3RouteCalls = 3
+
 // modelsResp 构造 /console|v2/enterprises/personal/models 形态响应（对象数组）。
 func modelsResp(ids ...string) string {
 	var sb strings.Builder
@@ -81,9 +97,10 @@ func TestFetchGlobalModelsProbePureDynamic(t *testing.T) {
 	if !strings.HasPrefix(srv.URL, "http://") {
 		t.Fatal("unexpected srv.URL")
 	}
-	// v3-config-merge：/v3/config（主）+ /v2（企业首选）各一次，v2 200 即不打 /console。
-	if len(calls) != 2 || !containsStr(calls, "/v3/config") || !containsStr(calls, "/v2/enterprises/personal/models") {
-		t.Fatalf("probe calls=%v want [/v3/config /v2/enterprises/personal/models]", calls)
+	// v3-config-merge：/v3/config 三路 UA 各一次 + /v2（企业首选）一次，v2 200 即不打 /console。
+	if countPath(calls, "/v3/config") != v3RouteCalls ||
+		countPath(calls, "/v2/enterprises/personal/models") != 1 {
+		t.Fatalf("probe calls=%v want %d×/v3/config + 1×/v2", calls, v3RouteCalls)
 	}
 	if gotAuthz != "Bearer at" {
 		t.Errorf("probe authz=%q want Bearer at", gotAuthz)
@@ -119,11 +136,11 @@ func TestFetchGlobalModelsFailureReturnsNil(t *testing.T) {
 
 	got := globalModelsClient(t, srv).FetchGlobalModels(globalAcct())
 
-	// v3 一路 + 企业家族两路（v2 500 → console 500）= 3 个请求。
-	if len(calls) != 3 || !containsStr(calls, "/v3/config") ||
-		!containsStr(calls, "/v2/enterprises/personal/models") ||
-		!containsStr(calls, "/console/enterprises/personal/models") {
-		t.Fatalf("fallback calls=%v want [/v3/config /v2/... /console/...]", calls)
+	// v3 三路 + 企业家族两路（v2 500 → console 500）。
+	if countPath(calls, "/v3/config") != v3RouteCalls ||
+		countPath(calls, "/v2/enterprises/personal/models") != 1 ||
+		countPath(calls, "/console/enterprises/personal/models") != 1 {
+		t.Fatalf("fallback calls=%v want %d×/v3 + /v2 + /console", calls, v3RouteCalls)
 	}
 	if len(got) != 0 {
 		t.Errorf("failure result=%v want empty (no static fallback)", got)
@@ -145,8 +162,8 @@ func TestFetchGlobalModelsCache(t *testing.T) {
 	first := c.FetchGlobalModels(globalAcct())
 	second := c.FetchGlobalModels(globalAcct())
 
-	if len(calls) != 2 {
-		t.Errorf("cache: probe calls=%d want 2 (v3+v2 once, second hit cache)", len(calls))
+	if n := len(calls); n != v3RouteCalls+1 {
+		t.Errorf("cache: probe calls=%d want %d (3 v3 UA + v2 once, second hit cache)", n, v3RouteCalls+1)
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("cached result differs from first")
@@ -168,9 +185,9 @@ func TestFetchGlobalModelsNegativeCache(t *testing.T) {
 	first := c.FetchGlobalModels(globalAcct())
 	second := c.FetchGlobalModels(globalAcct())
 
-	// 首次 = v3 + 企业家族（v2+console）= 3 个请求；负缓存内二次零新请求。
-	if len(calls) != 3 {
-		t.Errorf("negative cache: probe calls=%d want 3 (v3 + family attempted once)", len(calls))
+	// 首次 = v3 三路 + 企业家族（v2+console）= 5 个请求；负缓存内二次零新请求。
+	if n := len(calls); n != v3RouteCalls+2 {
+		t.Errorf("negative cache: probe calls=%d want %d (3 v3 UA + family attempted once)", n, v3RouteCalls+2)
 	}
 	if len(first) != 0 || len(second) != 0 {
 		t.Errorf("negative-cache results should be empty (no static fallback): %v %v", first, second)

@@ -163,10 +163,10 @@ func TestModelListTwoFamilies(t *testing.T) {
 	}
 
 	// 探测走 global base（httptest Host）+ Bearer 鉴权头；v3-config-merge 后单次探测
-	// = /v3/config + /v2 企业路并发（cnt=2，path 记录的是最近一次——两路之一）。
+	// = /v3/config 三路 UA + /v2 企业路并发（cnt=4，path 记录的是最近一次——四路之一）。
 	cnt, path, authz, host := cf.snapshot()
-	if cnt != 2 {
-		t.Errorf("probe cnt=%d want 2 (v3/config + v2 enterprise, concurrent)", cnt)
+	if cnt != 4 {
+		t.Errorf("probe cnt=%d want 4 (3×v3/config UA routes + v2 enterprise, concurrent)", cnt)
 	}
 	if path != "/v2/enterprises/personal/models" && path != "/v3/config" {
 		t.Errorf("probe path=%q want one of [/v2/enterprises/personal/models /v3/config]", path)
@@ -239,9 +239,9 @@ func TestModelListProbeCacheWithinTTL(t *testing.T) {
 
 	h.modelList()
 	cnt1, _, _, _ := cf.snapshot()
-	// v3-config-merge：单次探测 = v3/config + /v2 企业路并发 = 2 个请求。
-	if cnt1 != 2 {
-		t.Fatalf("first probe calls=%d want 2 (v3 + v2, concurrent)", cnt1)
+	// v3-config-merge：单次探测 = /v3/config 三路 UA + /v2 企业路并发 = 4 个请求。
+	if cnt1 != 4 {
+		t.Fatalf("first probe calls=%d want 4 (3×v3 UA + v2, concurrent)", cnt1)
 	}
 	h.modelList()
 	cnt2, _, _, _ := cf.snapshot()
