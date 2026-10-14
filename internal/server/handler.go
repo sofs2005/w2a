@@ -508,7 +508,47 @@ func (h *Handler) modelList() []map[string]any {
 			entry["credits_global"] = v
 		}
 	}
+	// 第三方目录客户端的兼容字段统一写出（见 addListingCompat）。
+	// 与上面 realms / credits 同样走收口循环：条目在 CN 分支、global 分支、并集去重
+	// 分支各有 append 点，收口一处即可全覆盖（含别名条目），不必逐个 append 点插。
+	for _, entry := range out {
+		addListingCompat(entry)
+	}
 	return out
+}
+
+// addListingCompat 补上第三方模型目录客户端要读的能力字段（issue #156：Magpie）。
+//
+// 它们不看我们自己的 supports_images / reasoning_supported_efforts，只看
+// modalities.input 里有没有 "image"、以及 supported_reasoning_levels 里每项的
+// effort。我们的字段是既有约定（面板与别的客户端在用），所以这里**只增不改**：
+// 两边同时输出，谁都能读。模型 ID 上的 cn:/global: 前缀保持不变——它区分版本，
+// 不能为了目录兜底而抹掉。
+//
+// 按需写字段：无图片能力不写 modalities、无档位不写 supported_reasoning_levels
+// （与 applyModelInfoFields 的「空值省略」同口径，未覆盖形态不编造）。
+func addListingCompat(entry map[string]any) {
+	if entry["supports_images"] == true {
+		entry["modalities"] = map[string]any{"input": []string{"text", "image"}}
+	}
+	var efforts []string
+	switch raw := entry["reasoning_supported_efforts"].(type) {
+	case []string:
+		efforts = raw
+	case []any:
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				efforts = append(efforts, s)
+			}
+		}
+	}
+	if len(efforts) > 0 {
+		levels := make([]map[string]any, 0, len(efforts))
+		for _, e := range efforts {
+			levels = append(levels, map[string]any{"effort": e})
+		}
+		entry["supported_reasoning_levels"] = levels
+	}
 }
 
 // mergeMissingFields 把 src 里 dst 尚未设置（或为空值）的字段补进 dst。
