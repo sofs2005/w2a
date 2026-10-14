@@ -357,8 +357,8 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 	// 日志频次：天然每请求至多一条——首次返回 nil 即解绑，后续轮转不再调入本路径
 	// （无需额外节流）；粘性续期中每个新请求一条，恰好是「余额仍在线下」的持续提醒。
 	if p.floorBlockedForModel(e, model, now) {
-		log.Printf("WARN: [pool] credit floor: sticky acct=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
-			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
+		log.Printf("WARN: [pool] credit floor: sticky acct=%s realm=%s model=%s credits=%d < floor=%d, unbind (paid model held out)",
+			logfmt.Label(e.a.UID, e.a.Nickname), e.a.Realm(), model, e.credits, p.creditFloorFor(e))
 		return nil
 	}
 	if p.inFlightFull(e) {
@@ -494,27 +494,27 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		// 成本台账（P1-anti-monopoly）：每模型一行（modelCost 内 TTL 未过期的
 		// 条目），运维据此自查「为什么总选它」；只读遍历零风险，过期即消失。
 		ModelCosts: p.modelCostsStatusLocked(e, now),
-		Realm:             e.a.Realm(),
-		Nickname:          e.a.Nickname,
-		Credits:           e.credits,
+		Realm:      e.a.Realm(),
+		Nickname:   e.a.Nickname,
+		Credits:    e.credits,
 		// Cooling 口径含连败降权（degradeUntil）：降权期账号不可选，运维在 /status
 		// 应看到它处于非健康态（CoolRemaining 取三截止最远者，与 healthy 或门同口径）。
-		Cooling: now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
-		Reason:            reason,
-		Disabled:          e.disabled,
-		ManualDisabled:    e.manualDisabled,
-		SuccessCount:      e.successCount,
-		ErrTotal:          e.errTotal,
-		CheckinDone:       e.lastCheckinDay == now.Format("2006-01-02"),
-		LastSuccessTime:   e.lastSuccess,
-		LastErrTime:       e.lastErr,
-		ConsecutiveFails:  e.consecutiveFails,
-		DegradeUntil:      e.degradeUntil,
-		Until:             e.until,
-		SoftStreak:        e.softStreak,
-		InFlight:          int(e.inFlight.Load()),
-		BreakerFails:      e.fails,
-		BreakerUntil:      e.breakerUntil,
+		Cooling:          now.Before(e.until) || now.Before(e.breakerUntil) || now.Before(e.degradeUntil),
+		Reason:           reason,
+		Disabled:         e.disabled,
+		ManualDisabled:   e.manualDisabled,
+		SuccessCount:     e.successCount,
+		ErrTotal:         e.errTotal,
+		CheckinDone:      e.lastCheckinDay == now.Format("2006-01-02"),
+		LastSuccessTime:  e.lastSuccess,
+		LastErrTime:      e.lastErr,
+		ConsecutiveFails: e.consecutiveFails,
+		DegradeUntil:     e.degradeUntil,
+		Until:            e.until,
+		SoftStreak:       e.softStreak,
+		InFlight:         int(e.inFlight.Load()),
+		BreakerFails:     e.fails,
+		BreakerUntil:     e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

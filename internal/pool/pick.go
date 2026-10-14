@@ -84,8 +84,8 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 		// 逐候选打日志会刷屏（热路径每请求×候选数），故只在拦空这一聚合点打一条。
 		// reqModel 为空时 floorBlocked 恒 false（计数 0），零误触发。
 		if floorBlockedN > 0 {
-			log.Printf("WARN: [pool] pick: all %d healthy candidates floor-blocked (model=%q floor=%d), trying fallback",
-				floorBlockedN, reqModel, p.creditFloor)
+			log.Printf("WARN: [pool] pick: all %d healthy candidates floor-blocked (model=%q floor_cn=%d floor_global=%d), trying fallback",
+				floorBlockedN, reqModel, p.creditFloorCN, p.creditFloorGlobal)
 		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
@@ -314,6 +314,10 @@ func betterExpiryPick(
 // PickByUIDForModel 粘性路径的单一事实来源）：floor>0 且账号触底
 // （credits < floor）且该模型**收费**时为真。
 //
+// floor 按**账号自身域**取（p.creditFloorFor）：cn 与 global 各有各的保底线
+// （配置 credit_floor_cn / credit_floor_global）。本判据的键与下方倍率查表同键，
+// 语义自洽——账号只会路由到自己域的上游、按该域计费，保底自然也该按该域算。
+//
 // 收费判据两级（任一成立即判收费 → 拦）：
 //  1. 本地实测台账（e.modelCostOf）：该号在该模型上实测 cost>0。
 //  2. 上游目录倍率（p.modelRateOf）：本地无观测/观测过期时的兜底。只看实测会让
@@ -341,7 +345,8 @@ func betterExpiryPick(
 // 调用方必须已持有 p.mu（读 e.credits / e.modelCost / p.modelRateOf；e.a.Realm()
 // 内部取 a.mu，与 pickInRealms 既有读法同为 p.mu → a.mu 序，无反向嵌套）。
 func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool {
-	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+	floor := p.creditFloorFor(e)
+	if floor <= 0 || model == "" || e.credits >= floor {
 		return false
 	}
 	// 1) 本地实测台账：最权威（真实扣费证据）。

@@ -12,12 +12,13 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// TestStatusCreditFloor /status 透出 pool 层的 credit_floor 生效值：
+// TestStatusCreditFloor /status 透出 pool 层的两域积分保底生效值：
 // 运维查账时一并看到保底线（结合 accounts[].credits 与 model_costs 即可判定
 // 某号为何对某模型不出票）。关闭（0）时也显式透出——缺失会让人误以为没记录。
+// credit_floor 兼容键 = 两域较大者（旧面板/客户端只读这个键）。
 func TestStatusCreditFloor(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999})
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 30)
 	h := NewHandler(Config{Pool: p, Upstream: upstream.New()})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
@@ -28,8 +29,14 @@ func TestStatusCreditFloor(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("status not json: %v", err)
 	}
+	if body["credit_floor_cn"] != float64(100) {
+		t.Errorf("credit_floor_cn=%v want 100", body["credit_floor_cn"])
+	}
+	if body["credit_floor_global"] != float64(30) {
+		t.Errorf("credit_floor_global=%v want 30", body["credit_floor_global"])
+	}
 	if body["credit_floor"] != float64(100) {
-		t.Errorf("credit_floor=%v want 100", body["credit_floor"])
+		t.Errorf("credit_floor(compat)=%v want 100 (max of two realms)", body["credit_floor"])
 	}
 }
 
@@ -43,8 +50,10 @@ func TestStatusCreditFloorZeroOff(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("status not json: %v", err)
 	}
-	if body["credit_floor"] != float64(0) {
-		t.Errorf("credit_floor=%v want 0 (off)", body["credit_floor"])
+	for _, k := range []string{"credit_floor", "credit_floor_cn", "credit_floor_global"} {
+		if body[k] != float64(0) {
+			t.Errorf("%s=%v want 0 (off)", k, body[k])
+		}
 	}
 }
 
@@ -67,7 +76,7 @@ func TestCreditFloorBlocksPaidRequest(t *testing.T) {
 
 	// 实验组：开 floor 100。
 	p := testPoolWith(&auth.Auth{UID: "poor", AccessToken: "at", ExpiresAt: 9999999999})
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetCredits("poor", 30)
 	p.NoteModelCost("poor", "paid-model", 2.9, 1000)
 	if a := p.PickExcludingForRealm(nil, "paid-model", ""); a != nil {
@@ -89,7 +98,7 @@ func TestCreditFloorBlocksPaidRequest(t *testing.T) {
 // 这是保底的立身之本——保完了就得还能用。
 func TestCreditFloorAllowsFreeRequest(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "poor", AccessToken: "at", ExpiresAt: 9999999999})
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetCredits("poor", 30)
 	p.NoteModelCost("poor", "free-model", 0, 1000)
 
@@ -107,7 +116,7 @@ func TestCreditFloorAllowsFreeRequest(t *testing.T) {
 // 触底 + 收费 → Acquire 仍可占名额（floor 只在选号层拦），释放幂等。
 func TestCreditFloorPersistsAcquireRelease(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "poor", AccessToken: "at", ExpiresAt: 9999999999})
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetCredits("poor", 30)
 	p.NoteModelCost("poor", "paid-model", 2.9, 1000)
 	p.SetMaxInFlight(2)

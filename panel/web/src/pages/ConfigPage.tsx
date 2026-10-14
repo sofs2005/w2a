@@ -545,16 +545,27 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
             </div>
             <div className="row">
               <div className="field" style={{ flex: 1 }}>
-                <label>积分保底 pool.credit_floor</label>
+                <label>国内积分保底 pool.credit_floor_cn</label>
                 <input
                   type="text"
-                  value={numStr('pool.credit_floor')}
-                  onChange={(e) => update('pool.credit_floor', numOrUndefined(e.target.value))}
-                  placeholder="0"
+                  value={numStr('pool.credit_floor_cn')}
+                  onChange={(e) => update('pool.credit_floor_cn', numOrUndefined(e.target.value))}
+                  placeholder="100"
+                />
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>国外积分保底 pool.credit_floor_global</label>
+                <input
+                  type="text"
+                  value={numStr('pool.credit_floor_global')}
+                  onChange={(e) => update('pool.credit_floor_global', numOrUndefined(e.target.value))}
+                  placeholder="30"
                 />
                 <div className="desc">
-                  余额低于该值的账号不再接<strong>收费</strong>模型（免费模型照常可用），防止收费请求把余额打穿。
-                  0 = 关闭。改后需重启网关生效。
+                  余额低于<strong>本域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
+                  防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
+                  留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
+                  紧急时可改小或改 0 放行，改后需重启网关生效。
                 </div>
               </div>
             </div>

@@ -133,17 +133,17 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
-		MaxInFlightGlobal  int     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
-		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
-		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
-		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
+		MaxInFlight        int    `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlightGlobal  int    `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 403 风控分档），0 = 回落 max_in_flight
+		BreakerThreshold   int    `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
+		BreakerCooldown    string `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
+		BreakerCooldownMax string `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
-		DegradeThreshold   int    `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
-		DegradeCooldownMax string `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
+		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
+		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
+		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
@@ -162,13 +162,21 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
-		// CreditFloor 积分保底：账号余额低于该值时，对收费模型不再参与选号——
-		// 防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到（最坏约 11.5
-		// 小时不可用）。收费判据两级：本地实测台账优先，无观测时用上游目录倍率
-		// 兜底（高价新模型全池无观测时不会绕过）。免费模型（实测 cost=0 或目录
-		// 倍率 0）不受限；签到回血越过 floor 自动恢复。
-		// 默认 0 = 关闭；负值钳 0。
-		CreditFloor int64 `json:"credit_floor"`
+		// CreditFloorCN / CreditFloorGlobal 积分保底（按域分档）：账号余额低于本域
+		// 保底值时，对收费模型不再参与选号——防止收费请求把余额打穿、连免费模型都
+		// 402 冷却到次日签到（最坏约 11.5 小时不可用）。收费判据两级：本地实测台账
+		// 优先，无观测时用上游目录倍率兜底（高价新模型全池无观测时不会绕过）。
+		// 免费模型（实测 cost=0 或目录倍率 0）不受限；签到回血越过保底自动恢复。
+		//
+		// 分域理由：国内外积分购买力与免费额度差异大，同一阈值两头不讨好。
+		// 默认 100 / 30（键缺席即取默认；显式写 0 = 关闭该域保底）；负值钳 0。
+		// 紧急时改小或改 0 重启即放行（保留分本就是"应急可用"的余额）。
+		CreditFloorCN     int64 `json:"credit_floor_cn"`
+		CreditFloorGlobal int64 `json:"credit_floor_global"`
+		// CreditFloor 已废弃：旧版单值保底（默认 0 = 关闭），被上面两个分域键取代。
+		// 仅为兼容旧配置保留——非 0 时按同值迁移到两域（显式写新键仍优先），
+		// 见 normalize。omitempty 使自动生成的配置只出现新键。
+		CreditFloor int64 `json:"credit_floor,omitempty"`
 		// StateFlush 池状态（state.json）后台落盘周期，如 "30m"。
 		//
 		// 余额扣减估算/成功错误计数/冷却截止这类**高频运行态**攒到周期末统一落盘；
@@ -205,6 +213,13 @@ type Config struct {
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（server.read_timeout）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
 }
+
+// 积分保底（pool.credit_floor_cn / credit_floor_global）的默认值。提为常量是因为
+// 旧键迁移要用它们判「该域仍是默认值、可以铺旧键」，见 normalize。
+const (
+	defaultCreditFloorCN     int64 = 100
+	defaultCreditFloorGlobal int64 = 30
+)
 
 // Default 默认配置。
 func Default() *Config {
@@ -253,6 +268,11 @@ func Default() *Config {
 	c.Pool.UnifiedRouting = true
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	// 积分保底按域分档默认：国内 100 / 国外 30（键缺席即取此默认，见 Load 的
+	// Default→Unmarshal 顺序；显式写 0 才关闭）。国外账号的免费额度与积分购买力
+	// 都低于国内，留 100 会把号压得太死。
+	c.Pool.CreditFloorCN = defaultCreditFloorCN
+	c.Pool.CreditFloorGlobal = defaultCreditFloorGlobal
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -525,9 +545,28 @@ func (c *Config) normalize() error {
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
 	}
-	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
-	if c.Pool.CreditFloor < 0 {
-		c.Pool.CreditFloor = 0
+	// 积分保底（按域分档）：默认 100/30 由 Default() 预置——Load 的顺序是
+	// Default → Unmarshal → applyEnv → normalize，故 JSON 里**键缺席**时字段保留
+	// 默认值、**显式写 0** 才落到 0（= 关闭该域）。这里不做空值回落（0 是合法值）。
+	//
+	// 旧键迁移：credit_floor 是已废弃的单值保底（旧默认 0 = 关闭）。仅在"显式配了
+	// 非 0"时把它当回退值铺过去，且**只铺仍是默认值的那个域**——显式写了新键
+	// （尤其显式写 0 关闭某域）的配置不被旧键顶掉。老部署升级后语义不突变。
+	if c.Pool.CreditFloor > 0 {
+		if c.Pool.CreditFloorCN == defaultCreditFloorCN {
+			c.Pool.CreditFloorCN = c.Pool.CreditFloor
+		}
+		if c.Pool.CreditFloorGlobal == defaultCreditFloorGlobal {
+			c.Pool.CreditFloorGlobal = c.Pool.CreditFloor
+		}
+	}
+	c.Pool.CreditFloor = 0 // 归一为关闭态：此后只有两个分域字段是事实来源
+	// 负值钳 0（= 关闭该域；负数阈值无意义，且会让 credits < floor 恒假而静默失效）。
+	if c.Pool.CreditFloorCN < 0 {
+		c.Pool.CreditFloorCN = 0
+	}
+	if c.Pool.CreditFloorGlobal < 0 {
+		c.Pool.CreditFloorGlobal = 0
 	}
 	// 池状态落盘周期：空值回落默认 30m（Default 已置；此兜底覆盖显式 ""）；
 	// "0" 是合法值（关闭后台落盘，仅靠退出时 Flush），不回落；负值钳 0 同关闭。

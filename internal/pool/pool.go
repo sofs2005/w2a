@@ -42,13 +42,19 @@ type Pool struct {
 	degradeThreshold   int
 	degradeCooldown    time.Duration
 	degradeCooldownMax time.Duration
-	// creditFloor 积分保底（SetCreditFloor 注入；0 = 关闭，缺省即现状）。
-	// 账号 credits < floor 时不再参与选号——防止收费请求把余额打穿、连免费模型都
-	// 402 冷却到次日签到。签到回血（SetCreditsDetailed）越过 floor 即自动恢复。
+	// creditFloorCN / creditFloorGlobal 积分保底（SetCreditFloor 注入；0 = 该域关闭）。
+	// 按**账号自身所属域**（e.a.Realm()，只有 "cn"/"global" 两值）分档取值，见
+	// creditFloorFor。账号 credits < 本域 floor 时不再参与选号——防止收费请求把余额
+	// 打穿、连免费模型都 402 冷却到次日签到（最坏约 11.5 小时不可用）。
+	// 签到回血（SetCreditsDetailed）越过 floor 即自动恢复。
 	// 全池触底且无免费模型可接时选号返回 nil（硬语义：宁 503 不打穿）。
-	// 收费与否的判据见 floorBlockedForRealmModel：本地实测台账优先，缺失时用上游
+	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游
 	// 目录倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
-	creditFloor int64
+	//
+	// 分域而非单值的理由：国内外积分购买力与免费额度差异大，同一阈值要么把国内号
+	// 留得太少（按 global 的 30 分）、要么把国外号压得太狠（按 cn 的 100 分）。
+	creditFloorCN     int64
+	creditFloorGlobal int64
 	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
 	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
@@ -211,22 +217,39 @@ func (p *Pool) SetDegrade(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 }
 
-// CreditFloor 透出生效的积分保底值（/status 用）。0 = 关闭。
-func (p *Pool) CreditFloor() int64 {
+// CreditFloors 透出生效的两域积分保底值（/status 用）。0 = 该域关闭。
+func (p *Pool) CreditFloors() (cn, global int64) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.creditFloor
+	return p.creditFloorCN, p.creditFloorGlobal
 }
 
-// SetCreditFloor 注入积分保底线（main 从 config 解析后调用）。
-// 0 = 关闭（缺省即现状，零回归）；负值非法保留原值（0）。
-// 语义见 Pool.creditFloor 字段注释。
-func (p *Pool) SetCreditFloor(n int64) {
+// SetCreditFloor 注入两域积分保底线（main 从 config 解析后调用）。
+// 0 = 该域关闭；负值非法保留原值。
+// 语义见 Pool.creditFloorCN 字段注释。
+func (p *Pool) SetCreditFloor(cn, global int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if n >= 0 {
-		p.creditFloor = n
+	if cn >= 0 {
+		p.creditFloorCN = cn
 	}
+	if global >= 0 {
+		p.creditFloorGlobal = global
+	}
+}
+
+// creditFloorFor 返回账号所属域的保底线（0 = 该域关闭）。
+//
+// 判据与 auth.realmLocked 的归一化严格对齐：那里对任何非 global 的输入都回 "cn"
+// （domain 后缀、realm 字段、globalEnabled 逃生门三者归一），故这里只需二分
+// ——"global" 取 global 值，其余一律取 cn 值。不要在这里另设"未知域"分支：
+// 那会是一条不可达的死代码（且误导读者以为存在第三种域）。
+// 调用方必须已持有 p.mu（或处于构造路径）。
+func (p *Pool) creditFloorFor(e *entry) int64 {
+	if e.a.Realm() == "global" {
+		return p.creditFloorGlobal
+	}
+	return p.creditFloorCN
 }
 
 // SetModelRateOf 注入上游目录积分倍率查表（main 用 upstream.Client.ModelRate 装配）。

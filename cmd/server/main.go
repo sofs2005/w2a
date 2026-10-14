@@ -139,9 +139,9 @@ func main() {
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
-	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
-	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
-	p.SetFlushInterval(cfg.StateFlushDur)                // 池状态落盘周期（pool.state_flush，默认 30m；0 = 关闭后台落盘）
+	p.SetCostExploreInterval(cfg.CostExploreIntervalDur)                 // costTier 探索窗口（issue #136，默认 30m；0 关停）
+	p.SetCreditFloor(cfg.Pool.CreditFloorCN, cfg.Pool.CreditFloorGlobal) // 积分保底按域分档（默认 100/30；0 = 该域关闭）
+	p.SetFlushInterval(cfg.StateFlushDur)                                // 池状态落盘周期（pool.state_flush，默认 30m；0 = 关闭后台落盘）
 
 	// 模型别名映射表：统一对外名 → 各域真实上游名（见 internal/aliases）。
 	// 启动即加载一次（缺失/空文件 = 空表，一切透传），之后由 startAliasWatcher 热加载。

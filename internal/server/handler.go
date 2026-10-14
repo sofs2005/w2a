@@ -190,6 +190,12 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
 	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
+	// 两域积分保底生效值（/status 透出；见下方 credit_floor_cn/global 键注释）。
+	floorCN, floorGlobal := h.cfg.Pool.CreditFloors()
+	floorCompat := floorCN // 兼容字段 = 两域较大者
+	if floorGlobal > floorCompat {
+		floorCompat = floorGlobal
+	}
 	// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
 	// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -205,10 +211,13 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 		},
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
-		// credit_floor 生效的积分保底值（0 = 关闭）。与 accounts[].credits +
-		// model_costs 对照即可判定「某号为何对某模型不出票」。零值也显式写出
-		// （运维口径：缺失会让人误以为没记录）。
-		"credit_floor": h.cfg.Pool.CreditFloor(),
+		// credit_floor_cn / credit_floor_global 生效的两域积分保底值（0 = 该域关闭）。
+		// 与 accounts[].credits + model_costs 对照即可判定「某号为何对某模型不出票」。
+		// 零值也显式写出（运维口径：缺失会让人误以为没记录）。
+		// credit_floor 为兼容字段 = max(两域)，供只读旧键的面板/客户端继续显示。
+		"credit_floor_cn":     floorCN,
+		"credit_floor_global": floorGlobal,
+		"credit_floor":        floorCompat,
 		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,

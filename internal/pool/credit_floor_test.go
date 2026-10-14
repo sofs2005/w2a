@@ -28,7 +28,7 @@ func TestCreditFloorBlocksPaidBelowFloor(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "poor"})
 	p.Add(&auth.Auth{UID: "rich"})
@@ -56,7 +56,7 @@ func TestCreditFloorAllowsFreeBelowFloor(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "poor"})
 	p.SetCredits("poor", 30)
@@ -78,7 +78,7 @@ func TestCreditFloorAllowsUnknownBelowFloor(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "poor"})
 	p.SetCredits("poor", 30)
@@ -99,7 +99,7 @@ func TestCreditFloorAllBelowReturnsNil(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.Add(&auth.Auth{UID: "a"})
 	p.Add(&auth.Auth{UID: "b"})
 	for _, uid := range []string{"a", "b"} {
@@ -118,7 +118,7 @@ func TestCreditFloorRecoversAfterCheckin(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "only"})
 	p.SetCredits("only", 30)
@@ -161,7 +161,7 @@ func TestCreditFloorBoundaryAtFloor(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.Add(&auth.Auth{UID: "edge"})
 	p.NoteModelCost("edge", "hy4-preview", 2.9, 1000)
@@ -179,7 +179,7 @@ func TestCreditFloorBoundaryAtFloor(t *testing.T) {
 // handler 侧解绑换号）。
 func TestCreditFloorStickyPathBlocked(t *testing.T) {
 	p := New("")
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.Add(&auth.Auth{UID: "sticky"})
 	p.SetCredits("sticky", 30)
 	p.NoteModelCost("sticky", "hy4-preview", 2.9, 1000)
@@ -210,7 +210,7 @@ func TestCreditFloorBlocksUnobservedPaidModelByCatalogRate(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	// 上游目录：kimi-k3-1 = x1.62 收费。
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"global": {"kimi-k3-1": "1.62"},
@@ -239,7 +239,7 @@ func TestCreditFloorUnobservedFreeModelStillAllowed(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"global": {"new-free": "0.00"},
@@ -262,7 +262,7 @@ func TestCreditFloorUnknownRateStillAllowed(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"global": {"known-paid": "3.31"}, // 目录里没有 unknown-model
@@ -285,7 +285,7 @@ func TestCreditFloorNoRateTableKeepsLegacyBehavior(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	// 不调 SetModelRateOf。
 
@@ -304,7 +304,7 @@ func TestCreditFloorLocalLedgerFreeBeatsCatalogPaid(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetRandomSource(func(n int64) int64 { return 0 })
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"global": {"hy4-preview-f": "0.29"}, // 目录牌价收费
@@ -336,7 +336,7 @@ func TestCreditFloorRateLookupUsesAccountRealm(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"cn":     {"dual-model": "2.00"}, // CN 侧收费
 		"global": {"dual-model": "0.00"}, // global 侧免费
@@ -370,7 +370,7 @@ func TestCreditFloorBlocksFallbackPath(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(150)
+	p.SetCreditFloor(150, 150)
 	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"kimi-k3": "1.62"}}))
 
 	poor := &auth.Auth{UID: "poor"}
@@ -391,7 +391,7 @@ func TestCreditFloorFallbackAllowsFreeModel(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(150)
+	p.SetCreditFloor(150, 150)
 	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"hy3": "0.00"}}))
 
 	poor := &auth.Auth{UID: "poor"}
@@ -411,7 +411,7 @@ func TestCreditFloorStickyBlockedByCatalogRate(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
 	p.SetCostExploreInterval(0)
-	p.SetCreditFloor(100)
+	p.SetCreditFloor(100, 100)
 	p.SetModelRateOf(rates(map[string]map[string]string{
 		"global": {"kimi-k3-1": "1.62"},
 	}))
@@ -428,5 +428,144 @@ func TestCreditFloorStickyBlockedByCatalogRate(t *testing.T) {
 	p.SetCredits("poor", 500)
 	if a := p.PickByUIDForModel("poor", "kimi-k3-1"); a == nil {
 		t.Fatal("回血越过 floor 后粘性号应恢复可选，got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 按域分档（credit_floor_cn / credit_floor_global）：保底线按账号自身域取，
+// 国内默认 100 / 国外默认 30，同一池里两类账号各按各的阈值判定。
+// ---------------------------------------------------------------------------
+
+// TestCreditFloorPerRealmBoundaries 两域阈值独立生效：credits=99 对 CN（floor=100）
+// 触底被拦，对 global（floor=30）仍充足照常放行——同一个号、同一个模型、同一个池，
+// 只有域不同，结果就应不同。
+func TestCreditFloorPerRealmBoundaries(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(100, 30)
+	p.SetModelRateOf(rates(map[string]map[string]string{
+		"cn":     {"m": "2.00"},
+		"global": {"m": "2.00"},
+	}))
+
+	cnAcct := &auth.Auth{UID: "cn-acct"}
+	cnAcct.SetRealm("cn")
+	gAcct := &auth.Auth{UID: "g-acct"}
+	gAcct.SetRealm("global")
+	p.Add(cnAcct)
+	p.Add(gAcct)
+	p.SetCredits("cn-acct", 99)
+	p.SetCredits("g-acct", 99)
+
+	// CN：99 < 100 → 拦（无候选 → nil）。
+	if a := p.PickExcludingForRealm(nil, "m", "cn"); a != nil {
+		t.Fatalf("CN 号 credits=99 < floor_cn=100 应被拦，got %v", a.UID)
+	}
+	// global：99 >= 30 → 放行。
+	if a := p.PickExcludingForRealm(nil, "m", "global"); a == nil || a.UID != "g-acct" {
+		t.Fatalf("global 号 credits=99 >= floor_global=30 应放行，got %v", a)
+	}
+}
+
+// TestCreditFloorPerRealmBoundaryAtFloor 边界：credits 恰好等于本域 floor 时不拦
+// （判据是 credits < floor，两域同一口径）。
+func TestCreditFloorPerRealmBoundaryAtFloor(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(100, 30)
+	p.SetModelRateOf(rates(map[string]map[string]string{
+		"cn":     {"m": "2.00"},
+		"global": {"m": "2.00"},
+	}))
+
+	cnAcct := &auth.Auth{UID: "cn-edge"}
+	cnAcct.SetRealm("cn")
+	gAcct := &auth.Auth{UID: "g-edge"}
+	gAcct.SetRealm("global")
+	p.Add(cnAcct)
+	p.Add(gAcct)
+	p.SetCredits("cn-edge", 100) // == floor_cn
+	p.SetCredits("g-edge", 30)   // == floor_global
+
+	if a := p.PickExcludingForRealm(nil, "m", "cn"); a == nil || a.UID != "cn-edge" {
+		t.Fatalf("CN 号 credits==floor_cn 不应被拦，got %v", a)
+	}
+	if a := p.PickExcludingForRealm(nil, "m", "global"); a == nil || a.UID != "g-edge" {
+		t.Fatalf("global 号 credits==floor_global 不应被拦，got %v", a)
+	}
+}
+
+// TestCreditFloorPerRealmIndependentDisable 单域关闭：floor=0 的域完全不受保底约束
+// （哪怕余额为 0），另一域照常拦。
+func TestCreditFloorPerRealmIndependentDisable(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(100, 0) // CN 保底、global 关闭
+	p.SetModelRateOf(rates(map[string]map[string]string{
+		"cn":     {"m": "2.00"},
+		"global": {"m": "2.00"},
+	}))
+
+	cnAcct := &auth.Auth{UID: "cn-zero"}
+	cnAcct.SetRealm("cn")
+	gAcct := &auth.Auth{UID: "g-zero"}
+	gAcct.SetRealm("global")
+	p.Add(cnAcct)
+	p.Add(gAcct)
+	p.SetCredits("cn-zero", 0)
+	p.SetCredits("g-zero", 0)
+
+	if a := p.PickExcludingForRealm(nil, "m", "cn"); a != nil {
+		t.Fatalf("CN 保底生效时 credits=0 应被拦，got %v", a.UID)
+	}
+	if a := p.PickExcludingForRealm(nil, "m", "global"); a == nil || a.UID != "g-zero" {
+		t.Fatalf("global 保底关闭（floor=0）时不应拦，got %v", a)
+	}
+}
+
+// TestCreditFloorFreeModelUnaffectedPerRealm 免费模型在两域都不受保底约束
+// （分域改造不得动到「保底保的是免费模型」这条既有语义）。
+func TestCreditFloorFreeModelUnaffectedPerRealm(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(100, 30)
+
+	cnAcct := &auth.Auth{UID: "cn-free"}
+	cnAcct.SetRealm("cn")
+	gAcct := &auth.Auth{UID: "g-free"}
+	gAcct.SetRealm("global")
+	p.Add(cnAcct)
+	p.Add(gAcct)
+	p.SetCredits("cn-free", 1)
+	p.SetCredits("g-free", 1)
+	// 两域均实测免费。
+	p.NoteModelCost("cn-free", "free-m", 0, 1000)
+	p.NoteModelCost("g-free", "free-m", 0, 1000)
+
+	if a := p.PickExcludingForRealm(nil, "free-m", "cn"); a == nil || a.UID != "cn-free" {
+		t.Fatalf("CN 触底号对免费模型应放行，got %v", a)
+	}
+	if a := p.PickExcludingForRealm(nil, "free-m", "global"); a == nil || a.UID != "g-free" {
+		t.Fatalf("global 触底号对免费模型应放行，got %v", a)
+	}
+}
+
+// TestCreditFloorUnknownRealmNormalizedToCN 域字段异常时按 auth 的归一化落到 CN 档。
+// 生产域只有 cn/global（auth.realmLocked 对任何非 global 输入都回 "cn"），本用例
+// 锚定 creditFloorFor 的判据与那个归一化严格对齐、不存在第三种分支。
+func TestCreditFloorUnknownRealmNormalizedToCN(t *testing.T) {
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(100, 30)
+
+	weird := &auth.Auth{UID: "weird"}
+	weird.SetRealm("ap") // 非 global → auth 归一为 "cn"
+	p.Add(weird)
+	if got := p.creditFloorFor(p.byUID["weird"]); got != 100 {
+		t.Fatalf("未知域归一为 cn 后应取 floor_cn=100，got %d", got)
 	}
 }

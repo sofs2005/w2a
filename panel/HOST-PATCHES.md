@@ -4,8 +4,9 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5–12 条；第 4 条已撤销（原前提失效，见该节）。
-（第 9–11 条与第 12 条均为本 fork 独有的新增能力/删除，同属「必须保留」。）
+当前须保留的改动为第 1–3 条、第 5–13 条；第 4 条已撤销（原前提失效，见该节）。
+（第 9–11 条与第 12 条均为本 fork 独有的新增能力/删除，第 13 条为跟随网关的键改名，
+同属「必须保留」。）
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
@@ -382,6 +383,25 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 `ops.go` / `config.go` 的任何改动冲突（尤其上游若增强官方价功能）。将来若想把该功能
 收回来，除恢复 pricing 包与上述后端接线外，**必须**在 `host/host.go` 里补 `PricingFile`
 的默认路径（`filepath.Join(dataDir, "pricing.json")`），否则按钮照旧恒灰。
+
+### 13. `web/src/pages/ConfigPage.tsx`（积分保底改为按域双值）
+
+**动机**：网关侧积分保底已从单值 `pool.credit_floor` 改为**按域分档**
+（`pool.credit_floor_cn` 默认 100 / `pool.credit_floor_global` 默认 30，见根仓库
+`cmd/server/config.go`）。旧单值键已废弃：网关只把它当**兼容迁移入口**（非 0 时铺到
+两域，且不覆盖显式新键），面板若继续写它，用户从界面「改保底」会**静默失效**
+（网关的迁移只在两域仍为默认值时生效，等于改不动）——这正是本次必须同步的原因。
+
+**改动**：把该卡片唯一的单值输入框换成两个（国内 / 国外），placeholder 分别为
+`100` / `30`。**留空 = 不写该键**（`numOrUndefined('')` → `undefined` → 保存时从文档
+移除该键 → 网关取默认）；**显式填 0 = 关闭该域**——这一区分依赖网关 `Default()` →
+`Unmarshal` 的顺序（键缺席保留默认、显式 0 落 0），已在网关侧测试钉住
+（`cmd/server/credit_floor_config_test.go` 的 `TestCreditFloorExplicitZeroDisables`
+与 `TestCreditFloorDefaultFromEmptyFile`）。
+
+**上游冲突面**：与第 7 条同在 `ConfigPage.tsx`，且就在「闲置补偿」行下方；上游若
+改动该卡片需一并重放。`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，
+`index.html` 需同步提交）。
 
 ## 纯新增、不会冲突的文件
 
