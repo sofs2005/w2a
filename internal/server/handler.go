@@ -1010,6 +1010,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11148「工具调用与工具结果不匹配」：与 11115/11135 同族——确定性的请求级
+			// 错误，同一份 body 换任何账号都会得到同样答复（历史配对断了就是断了），
+			// 轮转只会白扔健康号配额。立即透传上游原文回客户端，不罚号不轮转。
+			// error-passthrough：message 装上游 body 原文（含 code/requestId 与哪一对
+			// tool_call 对不上，客户端据此能定位自己发错的历史），不改成网关固定文案。
+			if kind == upstream.ErrToolCallMismatch {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
+				fail(acct.UID)
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch",
+					string(respBody), h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 5755fe3 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1304,6 +1317,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrImageInvalid:
 		// 图片格式/数据无效：请求的问题不是账号的问题（同一 body 换任何号都会
 		// 得到相同解析错误）。零动作，chatCompletions 已 fail-fast 透传。
+	case upstream.ErrToolCallMismatch:
+		// 11148「工具调用与工具结果不匹配」：同样是请求的问题不是账号的问题——
+		// 客户端重放了一段配对已断的历史，换号换不出不同结果。零动作
+		// （不冷却/不熔断/不 NoteError，同 ErrPromptTooLong 待遇），
+		// chatCompletions 已 fail-fast 透传原文，该分支只为文档完备。
 	case upstream.ErrBadParams:
 		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
 		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，

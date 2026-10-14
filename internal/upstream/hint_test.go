@@ -31,6 +31,7 @@ func TestGatewayHintKindMap(t *testing.T) {
 		{"12153 session dead", ErrSessionDead, `{"code":12153,"msg":"Offline user session not found"}`, "account session expired at upstream; the account is disabled until re-login"},
 		{"402 hard credit", ErrHardCredit, `{"code":1,"msg":"余额不足"}`, "account credits exhausted at upstream; waiting for daily check-in to restore"},
 		{"11102 model blocked", ErrModelBlocked, `{"code":11102,"msg":"model [glm-4.6v] service info not found"}`, "upstream has no such model on this backend; switch model or retry on another account"},
+		{"11148 tool call mismatch", ErrToolCallMismatch, `{"code":11148,"msg":"tool calls and tool results do not match"}`, "tool_call/tool_result pairing in the request history is broken; start a new conversation"},
 		{"content blocked", ErrContentBlocked, `{"code":11128,"msg":"blocked by security policy"}`, "request content was rejected by content policy; adjust the prompt and retry"},
 		// 未覆盖形态 → 空串（不带字段）。
 		{"ErrNone 无 hint", ErrNone, "", ""},

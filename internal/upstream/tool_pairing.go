@@ -11,25 +11,27 @@
 // 的条目让会话自愈，宁可丢一轮工具上下文，也好过整条会话死亡。
 package upstream
 
-// repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的非 tool 消息
-// 挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
+// repackToolResultBlocks 把插在 assistant.tool_calls 与其 tool 结果之间的
+// system/developer 通知挪到整组之后，保证同一批 tool_call 的结果在 wire 上连续。
 //
 // 背景：Codex 的 image_resize_notice 特性会把 <image_resize_notice> 作为一条
-// developer/system 消息插在 tool 输出后面。并行调用时它插在两份 tool 结果中间：
+// developer/system 消息插在 tool 输出附近。两种插法都会断裂配对：
 //
-//	assistant tool_calls=[c00 c01]
-//	tool c00
-//	developer <image_resize_notice>   <- 插在中间
-//	tool c01
+//	(a) 插在首个结果之前           (b) 插在并行结果之间
+//	assistant tool_calls=[c00 c01]     assistant tool_calls=[c00 c01]
+//	developer <notice>   <- 插在前面   tool c00
+//	tool c00                           developer <notice>   <- 插在中间
+//	tool c01                           tool c01
 //
 // OpenAI 兼容协议要求 tool 结果紧跟 assistant，中间插任何消息都算配对断裂，上游判
 // 11148（tool_call_sequence_broken）并顶死整条会话。这里只调顺序、不改内容：
 //
-//	assistant tool_calls=[c00 c01] | tool c00 | X | tool c01
-//	→ assistant tool_calls=[c00 c01] | tool c00 | tool c01 | X
+//	assistant tool_calls=[c00 c01] | X | tool c00 | Y | tool c01
+//	→ assistant tool_calls=[c00 c01] | tool c00 | tool c01 | X | Y
 //
 // 结果顺序保持不变（同批 tool_call 的原相对顺序 = 结果顺序），不引入新的顺序敏感
-// 问题。无插入消息时零改动零分配（返回原 slice）。
+// 问题。user / assistant 轮边界绝不跨越（那是真的换轮，不是插入物）。无插入消息时
+// 零改动零分配（返回原 slice）。
 func repackToolResultBlocks(messages []any) ([]any, bool) {
 	if len(messages) < 3 {
 		return messages, false
@@ -58,12 +60,11 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				}
 			}
 		}
-		// 收集紧随其后（允许被其他消息打断）的同批 tool 结果，按原相对顺序。
 		out = append(out, messages[i])
 		i++
 		var results []any
-		var between []any
-		sawNonTool := false
+		var notices []any
+		noticeBeforeLaterResult := false
 		for i < len(messages) {
 			mm, ok := messages[i].(map[string]any)
 			if !ok {
@@ -75,31 +76,34 @@ func repackToolResultBlocks(messages []any) ([]any, bool) {
 				if !want[id] {
 					break
 				}
-				results = append(results, messages[i])
-				if sawNonTool {
-					changed = true
+				if len(notices) > 0 {
+					noticeBeforeLaterResult = true
 				}
+				results = append(results, messages[i])
 				i++
 				continue
 			}
-			if len(results) == 0 {
-				break // assistant 后没有结果：交由 cleanupOrphanToolCalls 处理
+			// system/developer 通知可以出现在**首个结果之前**（Codex 的 URI guard 等），
+			// 也可以把并行结果切成两段。两种都要留在本组内、最后统一后移；
+			// 但绝不能跨过 user / assistant 轮边界——那是真的换轮，不是插入物。
+			if role == "system" || role == "developer" {
+				notices = append(notices, messages[i])
+				i++
+				continue
 			}
-			// 下一组 assistant.tool_calls 是新的组头，绝不能当插入物吞掉：一旦被收进
-			// between，它永远不再被外层循环当作组头处理，它自己那批结果也就永远得不
-			// 到重排（真实会话 msg[181] 正是这样漏掉的）。必须 break 交还外层循环。
-			if role == "assistant" {
-				if next, _ := mm["tool_calls"].([]any); len(next) > 0 {
-					break
-				}
-			}
-			// 同批结果尚未收齐时，中间消息视为插入物，暂存待后移。
-			between = append(between, messages[i])
-			sawNonTool = true
-			i++
+			break
+		}
+		if len(results) == 0 {
+			// assistant 后没有结果：通知原样留在原位，交由 cleanupOrphanToolCalls 处理。
+			out = append(out, notices...)
+			continue
+		}
+		// 只有「通知确实插在结果之间」才算改动；通知全在结果之后时零改动零分配。
+		if noticeBeforeLaterResult {
+			changed = true
 		}
 		out = append(out, results...)
-		out = append(out, between...)
+		out = append(out, notices...)
 	}
 	if !changed {
 		return messages, false

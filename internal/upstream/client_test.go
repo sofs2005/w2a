@@ -124,6 +124,22 @@ func TestClassify(t *testing.T) {
 		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
 		{400, `bad request`, ErrClient},
 		{429, ``, ErrSoftRate},
+		// 11148「工具调用与工具结果不匹配」：确定性的请求级错误（客户端重放了一段
+		// 配对已断的历史），同一 body 换任何账号答复相同 → 归 ErrToolCallMismatch，
+		// 不罚号不轮转，直接透传原文回客户端。
+		{400, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrToolCallMismatch},
+		{400, `tool calls and tool results do not match`, ErrToolCallMismatch},
+		{400, `{"extError":{"code":"tool_call_sequence_broken"}}`, ErrToolCallMismatch},
+		// code 11148 的 JSON 空白/引号容差（与 11135 同口径，走 codeMarker）。
+		{400, `{"code": 11148, "msg": "broken"}`, ErrToolCallMismatch},
+		{400, `{"code": "11148", "msg": "broken"}`, ErrToolCallMismatch},
+		{400, `{"error": {"code": 11148, "message": "broken"}}`, ErrToolCallMismatch},
+		// 只认 400：5xx 上的同码是服务端故障（该层在 11148 判定之前短路），
+		// 429 走限流语义——两者都不该被当成请求级错误而放弃轮转。
+		{500, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrServer},
+		{429, `{"code":11148,"msg":"tool calls and tool results do not match"}`, ErrSoftRate},
+		// 其他 code 不得被 11148 口径误伤（防过宽）。
+		{400, `{"code": 11149, "msg": "other"}`, ErrClient},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {

@@ -451,3 +451,65 @@ func TestRepackThenCleanupRealShape(t *testing.T) {
 	assertRepackPairsContiguous(t, msgs)
 	assertPairingSymmetric(t, msgs)
 }
+
+// TestRepackNoticeBeforeFirstResult 通知插在**首个**结果之前时也要后移。
+//
+// 这是上游补丁 0001 修的核心缺口：旧实现在 results 还为空时直接 break，通知被留在
+// assistant 与首个结果之间，配对依旧断裂 → 上游判 11148 顶死整条会话。
+func TestRepackNoticeBeforeFirstResult(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{
+		map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "f", "arguments": "{}"}},
+	}}
+	notice := map[string]any{"role": "developer", "content": "URI guard"}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	next := map[string]any{"role": "user", "content": "next"}
+
+	out, changed := repackToolResultBlocks([]any{call, notice, result, next})
+	if !changed {
+		t.Fatal("通知插在首个结果之前应触发重排")
+	}
+	if len(out) != 4 ||
+		reflect.ValueOf(out[0]).Pointer() != reflect.ValueOf(call).Pointer() ||
+		reflect.ValueOf(out[1]).Pointer() != reflect.ValueOf(result).Pointer() ||
+		reflect.ValueOf(out[2]).Pointer() != reflect.ValueOf(notice).Pointer() ||
+		reflect.ValueOf(out[3]).Pointer() != reflect.ValueOf(next).Pointer() {
+		t.Fatalf("顺序/内容不符：%#v", out)
+	}
+}
+
+// TestRepackNoticeAndTurnBoundaries 通知可跨首个结果与并行结果之间收集，
+// 但绝不跨越 user / assistant 轮边界。
+func TestRepackNoticeAndTurnBoundaries(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}, map[string]any{"id": "c2"}}}
+	dev := map[string]any{"role": "developer", "content": "dev"}
+	sys := map[string]any{"role": "system", "content": "system"}
+	r1 := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "one"}
+	r2 := map[string]any{"role": "tool", "tool_call_id": "c2", "content": "two"}
+	user := map[string]any{"role": "user", "content": "boundary"}
+	out, changed := repackToolResultBlocks([]any{call, dev, r1, sys, r2, user})
+	want := []any{call, r1, r2, dev, sys, user}
+	if !changed || !reflect.DeepEqual(out, want) {
+		t.Fatalf("changed=%v out=%#v want=%#v", changed, out, want)
+	}
+
+	// user 轮边界之前的通知不得被搬到下一轮的结果组里。
+	nextCall := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "later"}}}
+	laterResult := map[string]any{"role": "tool", "tool_call_id": "later", "content": "later"}
+	input := []any{call, dev, user, r1, nextCall, laterResult}
+	out, changed = repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("必须保留轮边界：changed=%v out=%#v", changed, out)
+	}
+}
+
+// TestRepackTrailingNoticeIsNoop 通知全在结果之后时零改动（不产生无谓重排）。
+func TestRepackTrailingNoticeIsNoop(t *testing.T) {
+	call := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "c1"}}}
+	result := map[string]any{"role": "tool", "tool_call_id": "c1", "content": "ok"}
+	notice := map[string]any{"role": "developer", "content": "notice"}
+	input := []any{call, result, notice}
+	out, changed := repackToolResultBlocks(input)
+	if changed || !reflect.DeepEqual(out, input) {
+		t.Fatalf("尾部通知应为空操作：changed=%v out=%#v", changed, out)
+	}
+}
