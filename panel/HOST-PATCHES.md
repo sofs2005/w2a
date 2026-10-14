@@ -399,6 +399,11 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 （`cmd/server/credit_floor_config_test.go` 的 `TestCreditFloorExplicitZeroDisables`
 与 `TestCreditFloorDefaultFromEmptyFile`）。
 
+**说明文字的放置**：该说明为两格共用，故**放在 `.row` 之外、自成一行**（包一层
+`.field` 以复用 `.field .desc` 样式）。不要把它塞回任一格内：`.row` 是
+`align-items: flex-end`（按底部对齐），多出说明的那一格会变高、把两格的 label 与
+输入框顶成垂直错位。重放本补丁时留意这一点。
+
 **上游冲突面**：与第 7 条同在 `ConfigPage.tsx`，且就在「闲置补偿」行下方；上游若
 改动该卡片需一并重放。`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，
 `index.html` 需同步提交）。

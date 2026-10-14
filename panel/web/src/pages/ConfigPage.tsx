@@ -561,12 +561,16 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                   onChange={(e) => update('pool.credit_floor_global', numOrUndefined(e.target.value))}
                   placeholder="30"
                 />
-                <div className="desc">
-                  余额低于<strong>本域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
-                  防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
-                  留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
-                  紧急时可改小或改 0 放行，改后需重启网关生效。
-                </div>
+              </div>
+            </div>
+            {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
+                .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
+            <div className="field">
+              <div className="desc">
+                余额低于<strong>所属域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
+                防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
+                两域各自独立取值，留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
+                紧急时可改小或改 0 放行，改后需重启网关生效。
               </div>
             </div>
           </div>
