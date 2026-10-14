@@ -713,6 +713,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
+	// 默认零值 Blocked=false = 按既有的「没有可用账号」口径报错。
+	var modelBlock pool.ModelBlockStatus
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// 按模型解析：同一个会话可能换模型，绑定号若在当前模型上被 6004 限额（对其他模型
@@ -872,6 +875,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			// 记下「是不是模型级阻塞」。选号返回 nil 有两种完全不同的成因：
+			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；
+			//   (b) 号都在，但每个号都对这个模型处于模型级冷却（11102/6004）。
+			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
+			// 在这里取一次快照，供下方错误构造区分。
+			modelBlock = h.cfg.Pool.ModelBlocked(bareModel)
 			// 选号失败 503 是"为什么没有可用号"的最大盲区（此前全静默，只留一行流水表格）。
 			// 带池计数：tried 小且 healthy>0 ⇒ 粘性/域过滤把号挡了；healthy==0 ⇒ 池枯竭。
 			// 每请求至多一条（此处 break 退出轮转），频率有界。
@@ -1228,6 +1237,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
 	// （无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	// ue 记录本轮是否真的拿到了上游错误对象。下方模型级阻塞分支据此判断
+	// 「这次是打到上游后的失败」还是「压根没打到上游」——见其注释。
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
 		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
@@ -1244,10 +1255,52 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				code = "waf_ip_blocked"
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
+		case upstream.ErrModelBlocked:
+			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
+			// code 此前停在默认的 no_healthy_account —— 那是「服务端过载」的语义，
+			// 客户端据此会不断重试，而真正该做的是换个模型。用 400 + 明确的 code
+			// 把不可重试的性质讲清楚。
+			code = "model_unavailable"
+			status = http.StatusBadRequest
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+		}
+	}
+	// 模型级阻塞覆盖上面的通用文案。
+	//
+	// 只在**没有上游错误原文**时才覆盖（ue == nil）：那条路径正是本判定的目标场景——
+	// 负缓存/限流窗口已写入，选号直接返回 nil，lastErr 为空，客户端此前只拿到笼统的
+	// no_healthy_account（503，读起来像「服务端过载」），于是不停重试。
+	//
+	// 有上游原文时不覆盖：那说明本轮真的打到过上游，原文比本地推断更权威（含
+	// requestId），且上方的 switch 已按 Kind 给出正确 code/status。
+	//
+	// 注意「模型级冷却」有两种性质，必须分开处置（见 pool.BlockCause）：
+	//   - 6004 限流：临时状态，等着就行。报 429 + 最早重置时刻，与上方
+	//     ErrSoftRate 分支同口径——不能报 model_unavailable 把「该等」说成「该换模型」。
+	//   - 11102 无此模型：重试永远失败，只能换模型。报 400 model_unavailable。
+	// 此前二者都被读成 no_healthy_account（issue #102），客户端既不知道该等
+	// 也不知道该换，只能按 5xx 不断重试。
+	if modelBlock.Blocked && ue == nil {
+		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
+		if !modelBlock.Until.IsZero() {
+			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
+		}
+		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
+			hint += "; upstream: " + s
+		}
+		if modelBlock.Cause == pool.BlockRateLimited {
+			// 限流：与上方 ErrSoftRate 同码同状态，客户端照旧「等一会儿再试」。
+			code = "rate_limit_exceeded"
+			msg = "rate limited: every account is cooling down this model, please retry after the reset time"
+			status = http.StatusTooManyRequests
+		} else {
+			// 不可用：不可重试语义，别让客户端按 5xx 自动重试（#81：503 → 重试 5 次）。
+			code = "model_unavailable"
+			msg = "model is unavailable on every account (per-model cooldown), try another model"
+			status = http.StatusBadRequest
 		}
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)

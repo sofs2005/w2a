@@ -278,6 +278,119 @@ func (p *Pool) BlockModelClear(uid, model string, also ...string) {
 	p.dirty.Store(true)
 }
 
+// BlockCause 说明全池模型级阻塞的**性质**——决定客户端该等还是该换模型。
+//
+// 为什么必须区分：6004（模型限流）与 11102（该后端无此模型）共用 modelCooldowns
+// 一张表，冷却期间选号都返回 nil。但前者是**临时**状态（等到上游重置墙钟即恢复），
+// 后者只能换模型。此前两者都报 no_healthy_account（「服务端过载」），客户端无从
+// 区分，只会不停重试。
+type BlockCause int
+
+const (
+	// BlockUnavailable 上游明确答复「该后端无此模型」（11102）：重试无意义，只能换模型。
+	//
+	// 取零值 = 判不出性质时的兜底侧，理由见 blockCauseOf：把不可重试误报成可等待，
+	// 客户端会一直等在永不到期的窗口上；反过来代价只是多提示一句换个模型。
+	BlockUnavailable BlockCause = iota
+	// BlockRateLimited 全池都在该模型的上游限流窗口内（6004 带重置墙钟）：临时状态，
+	// 正确处置是等到 ResetAt。换模型也能用，但不该被说成「模型不可用」。
+	BlockRateLimited
+)
+
+// blockCauseOf 判定一条模型级冷却的性质。判据按可靠性排序，任一命中即足够：
+//
+//  1. ResetAt 非零 → 限流。只有 6004 带得上游重置墙钟（11102 无重置文案，ResetAt
+//     恒零值，见 modelCooldown.ResetAt 注释）；该字段跨持久化往返保全（persist.go
+//     的 ModelCooldowns 存取两侧都带 ResetAt），重启后判据不失效。
+//  2. reason 以 "6004" 开头 → 限流。防御分支：6004 只经 CooldownSoftForModel 的
+//     重置墙钟分支写入、必带 ResetAt，理论上走不到这里；但条目可能来自旧版本落盘
+//     的 state.json——那里若 ResetAt 缺失，仅凭零值会把限流误判成「模型不可用」。
+//  3. 兜底 → 不可用。11102 条目恒由 BlockModelBackoff 以 upstream.ModelBlockReason
+//     写入，与该判断一致；取零值也是判不出时的安全侧（见 BlockUnavailable 注释）。
+func blockCauseOf(mc modelCooldown) BlockCause {
+	if !mc.ResetAt.IsZero() {
+		return BlockRateLimited
+	}
+	if strings.HasPrefix(mc.Reason, "6004") {
+		return BlockRateLimited
+	}
+	return BlockUnavailable
+}
+
+// ModelBlockStatus 描述某模型在全池范围内因模型级冷却而不可选的情况。
+type ModelBlockStatus struct {
+	Blocked bool      // true = 每个非禁用账号都对该模型处于冷却中
+	Cause   BlockCause // 阻塞性质：限流（该等）还是不可用（该换模型）
+	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
+	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
+	Count   int       // 因此被挡的账号数
+}
+
+// ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
+//
+// 为什么需要它：选号失败时客户端只会拿到 no_healthy_account（「没有可用账号」），
+// 但真实原因常常是「号都在、只是都对这个模型关闭」。两者对调用方的处置完全不同
+// ——前者该等，后者换个模型才有用——此前却无法区分：首次请求还能看到上游原文
+// （lastErr 非空），一旦负缓存写入，后续请求 lastErr 为空，就只剩「池子没号」。
+// 上游原文与解封时间在那里被丢掉。
+//
+// 跨域判定：调用方失败前已依次尝试过各域，所以只要有**任意**账号还能服务该模型，
+// 就不能算全池阻塞 —— 此时返回 Blocked=false，让上层继续用原有的
+// no_healthy_account 文案（选号失败另有原因：在途占满/积分保底/账号级冷却）。
+//
+// 口径必须与选号一致：用 modelCooled（与 healthyForModel 同一谓词），不直接查 map，
+// 将来该谓词加了豁免（如只审计不拦截的条目）这里自动跟随。
+//
+// 注意 Blocked 不等于「模型不可用」：6004（限流，会自行到期）同样写 modelCooldowns、
+// 同样让选号返回 nil。调用方必须再看 Cause 分别处置，别一律报 model_unavailable。
+func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
+	if model == "" {
+		return ModelBlockStatus{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+
+	var st ModelBlockStatus
+	rateLimited := false
+	for _, e := range p.byUID {
+		if e.disabled || e.manualDisabled {
+			continue // 停用号不参与：它的不可用与模型无关
+		}
+		if !e.modelCooled(now, model) {
+			// 还有账号能服务这个模型 → 不是模型级阻塞。
+			return ModelBlockStatus{}
+		}
+		st.Count++
+		mc, ok := e.modelCooldowns[model]
+		if !ok {
+			continue
+		}
+		if blockCauseOf(mc) == BlockRateLimited {
+			// 只要有一个号是「限流」，整体性质就是限流：限流窗口会自行到期，
+			// 说「等到 X」对客户端成立；而报「模型不可用」会把它推去换模型，
+			// 掩盖了本可以等回来的事实。
+			rateLimited = true
+		}
+		if st.Reason == "" {
+			st.Reason = mc.Reason
+		}
+		// 取最早解封：那才是「再等多久值得重试」的答案。
+		if !mc.Until.IsZero() && (st.Until.IsZero() || mc.Until.Before(st.Until)) {
+			st.Until = mc.Until
+		}
+	}
+	if st.Count == 0 {
+		// 池里压根没有非停用账号：这是「真的没号」，不是模型问题。
+		return ModelBlockStatus{}
+	}
+	st.Blocked = true
+	if rateLimited {
+		st.Cause = BlockRateLimited
+	}
+	return st
+}
+
 // CooldownSoftRate 429/限流文案的**账号级**软冷却入口（handler.applyErrorPolicy 调用）。
 //
 // 语义：
