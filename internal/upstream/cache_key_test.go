@@ -109,9 +109,12 @@ func TestInjectPromptCacheKey_Format(t *testing.T) {
 	}
 }
 
-// TestInjectPromptCacheKey_EmptyConversation 覆盖任务用例 3 边界：
-// 无 conversation_id 且无会话标识 → 生成键含 uid8 但 conversationHash 段为定值（不复用前缀）。
-// 不应报错、不应空串（key 非空）。
+// TestInjectPromptCacheKey_EmptyConversation 边界：无 conversation_id、无入参会话标识、
+// 无 user_id、无首条 user 文本 → 仍生成非空键（含 uid8 隔离段）。
+//
+// 注意本用例的 body 是 `{"messages":[]}`——**没有 user 消息**，故第 4 条兜底
+// （StickyFallbackKey 取首条 user 文本）也派生不出会话段，convHex 落定值。
+// 这是刻意的下限：判不出会话就不猜（不编造会话标识）。
 func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	uid := "user-abc-123"
 	in := `{"model":"glm-5.2","messages":[]}`
@@ -125,6 +128,85 @@ func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	}
 	if !strings.Contains(got, "user-abc") {
 		t.Fatalf("expected uid8 in key, got=%q", got)
+	}
+}
+
+// TestInjectPromptCacheKey_NoConversationFallsBackToSession 无 conversation_id 与
+// 无入站会话标识时，用**首条 user 消息**派生的会话级键兜底（fork linguo2625469
+// 20254d8 报告的 bug 的我们侧修法）。
+//
+// 为什么必须有：Anthropic / Claude Code 流量既无 conversation_id 也无
+// X-Conversation-ID，不兜底则 convHex 退化成「只由 uid 决定的定值」= 每账号一个
+// 恒定 cache key，同账号下所有会话共用一个上游前缀缓存槽互相覆盖 → 命中不稳定、
+// 常整段 miss。修法是按会话区分，而不是按账号恒定。
+//
+// 四条断言各挡一类回归：
+//   - 同会话（同首条 user 文本）两次出站 → 同键（否则每次请求都 miss，优化归零）；
+//   - 不同会话（首条 user 文本不同）→ 不同键（这正是本修的核心：会话间不再互相覆盖）；
+//   - 跨账号同会话 → 不同键（uid8 硬隔离不得被兜底路径绕过）；
+//   - 会话内追加历史（首条不变、末尾新增）→ 仍同键（兜底取的是首条而非末条）。
+func TestInjectPromptCacheKey_NoConversationFallsBackToSession(t *testing.T) {
+	uid := "user-abc-123"
+	convA := `{"model":"glm-5.2","messages":[{"role":"user","content":"first question"}]}`
+	convB := `{"model":"glm-5.2","messages":[{"role":"user","content":"another question"}]}`
+
+	ka := extractCacheKey(t, InjectPromptCacheKey([]byte(convA), uid, ""))
+	ka2 := extractCacheKey(t, InjectPromptCacheKey([]byte(convA), uid, ""))
+	if ka != ka2 {
+		t.Fatalf("same session produced different keys: %q vs %q", ka, ka2)
+	}
+	kb := extractCacheKey(t, InjectPromptCacheKey([]byte(convB), uid, ""))
+	if ka == kb {
+		t.Fatalf("different sessions produced same key %q（会话间仍互相覆盖）", ka)
+	}
+	// 跨账号：同一会话文本换账号必须换键（uid 是硬隔离因子）。
+	kc := extractCacheKey(t, InjectPromptCacheKey([]byte(convA), "other-user-999", ""))
+	if ka == kc {
+		t.Fatalf("cross-account key collision: both=%q", ka)
+	}
+	// 会话内追加历史：首条 user 不变 → 键不变。
+	grown := `{"model":"glm-5.2","messages":[{"role":"user","content":"first question"},` +
+		`{"role":"assistant","content":"answer"},{"role":"user","content":"follow up"}]}`
+	kd := extractCacheKey(t, InjectPromptCacheKey([]byte(grown), uid, ""))
+	if ka != kd {
+		t.Fatalf("key changed as history grew: %q vs %q（兜底取首条 user，不该随追加漂移）", ka, kd)
+	}
+}
+
+// TestInjectPromptCacheKey_UserIDSuppressesFallback body 带 user_id 时**不**走
+// 首条 user 兜底——StickyFallbackKey 的抑制契约（user 维度粒度过粗，会把一个
+// user 的全部并行对话钉到同一缓存槽，比按账号恒定好不了多少）。
+//
+// 抑制后回落定值键：可接受的下限（判不出来就不猜），关键是**不得**因为带了
+// user_id 就借首条 prompt 重新获得会话粒度。
+func TestInjectPromptCacheKey_UserIDSuppressesFallback(t *testing.T) {
+	uid := "user-abc-123"
+	a := `{"model":"glm-5.2","user_id":"u-1","messages":[{"role":"user","content":"q1"}]}`
+	b := `{"model":"glm-5.2","user_id":"u-1","messages":[{"role":"user","content":"q2"}]}`
+
+	ka := extractCacheKey(t, InjectPromptCacheKey([]byte(a), uid, ""))
+	kb := extractCacheKey(t, InjectPromptCacheKey([]byte(b), uid, ""))
+	if ka != kb {
+		t.Fatalf("user_id body must fall back to a constant key, got %q vs %q（兜底绕过了抑制契约）", ka, kb)
+	}
+	if ka == "" {
+		t.Fatal("key must still be injected (non-empty)")
+	}
+}
+
+// TestInjectPromptCacheKey_ExplicitConversationBeatsFallback 显式 conversation_id
+// 优先于首条 user 兜底：两者都在场时按 conversation_id 分键（不因 prompt 文本相同
+// 而合并两个不同会话）。
+func TestInjectPromptCacheKey_ExplicitConversationBeatsFallback(t *testing.T) {
+	uid := "user-abc-123"
+	// 同一段 prompt 文本，但 conversation_id 不同 → 必须分键。
+	a := `{"model":"glm-5.2","conversation_id":"c-1","messages":[{"role":"user","content":"same"}]}`
+	b := `{"model":"glm-5.2","conversation_id":"c-2","messages":[{"role":"user","content":"same"}]}`
+
+	ka := extractCacheKey(t, InjectPromptCacheKey([]byte(a), uid, ""))
+	kb := extractCacheKey(t, InjectPromptCacheKey([]byte(b), uid, ""))
+	if ka == kb {
+		t.Fatalf("explicit conversation_id ignored in favor of prompt fallback: both=%q", ka)
 	}
 }
 
