@@ -1350,7 +1350,17 @@ func (c *Client) modelsPath(a *auth.Auth) string {
 // 来源：harness buddy.ts:547-555。三类规则：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
 //   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
+//   - tags 含生成类标签（图片/视频）：生成走各自专用端点，作为对话模型选上去只会
+//     报 code=11102，非本网关用途。
+//
+// 生成类标签随上游目录扩充，不能只认 text-to-image。fork linguo2625469 7b24e22
+// （2026-10-02 实测其 global 账号的桌面端 UA 目录）报出 seedance 系视频模型
+// （tags 带 text-to-video / image-to-video）与 gpt-image 系（image-to-image，该
+// 系列同时带 text-to-image，故旧规则已覆盖）。我们无 global 号可自行复测这批
+// 新标签，但谓词语义是确定的：这些 tag 标识生成端点专属模型，与对话无关——旧规则
+// 只拦 text-to-image，视频模型会混进对话目录、被选中后报 11102。
+//
+// 本函数 CN 与 global 共用，新标签对两域同时生效（两侧都由 parsex 侧按 tags 过滤）。
 func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
@@ -1362,7 +1372,8 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 		return true
 	}
 	for _, t := range tags {
-		if t == "text-to-image" {
+		switch t {
+		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 			return true
 		}
 	}
