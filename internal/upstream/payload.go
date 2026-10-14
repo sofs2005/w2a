@@ -55,6 +55,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	//   - 翻译后删别名字段（上游 Go struct 未知字段宽松，但留着徒增 body 体积与
 	//     排障噪音）。
 	translateMaxCompletionTokens(obj)
+	// 必须紧随翻译之后：别名 1 → 已译成 max_tokens=1，此处才能一并抬到下限。
+	clampMinMaxTokens(obj)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
 	if _, has := obj["stream_options"]; !has {
@@ -134,6 +136,97 @@ func translateMaxCompletionTokens(obj map[string]any) {
 		if v > 0 {
 			obj["max_tokens"] = int64(v)
 		}
+	}
+}
+
+// gptDefaultMinMaxTokens GPT 系模型在**无本仓库实测下限**时的保守抬升下限。
+//
+// 为什么是 16：fork（linguo2625469）对 gpt-6-sol / gpt-6-luna / gpt-5.6-sol 三个
+// 型号实测——max_tokens 15 → 400 code=11133 model_param_invalid，16 → 200。该下限
+// 已被同源分叉验证过，作为「有实测」型号之外 GPT 系的兜底值是唯一有证据支撑的选择。
+const gptDefaultMinMaxTokens = 16
+
+// gptMinMaxTokensByModel 逐模型 max_tokens 下限（本仓库实测优先，覆盖兜底值）。
+//
+// gpt-5.4 是**本仓库自己的实测**（commit c6e849f，真实账号锚定）：要求 ≥100，
+// 否则 400 code=11133 integer_below_min_value。它与 fork 那三个型号不是同一档——
+// 15/16 的边界在 gpt-5.4 上仍是失败区间（16..99 全被拒）。若照搬 fork 的一刀切 16，
+// gpt-5.4 依旧切不过去，正是这次要修的症状。两处实测不冲突，是**不同型号不同下限**。
+//
+// 已知上限侧无需处理：本表最大值 100 远低于任一 gpt 型号的 maxOutput（128000）。
+var gptMinMaxTokensByModel = map[string]int64{
+	"gpt-5.4": 100,
+}
+
+// bareModelName 剥掉 realm 前缀（cn:/global:）并归一大小写与空白，只留模型名本体。
+//
+// 剥前缀是必须的，且**必须在查下限表之前**：出站 body 是裸名，但错误路径可能带
+// "global:gpt-5.4" 进来；若按原串查表，gpt-5.4 会漏掉自己的 100 下限、错落 16 兜底。
+func bareModelName(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.IndexByte(m, ':'); i >= 0 {
+		m = m[i+1:]
+	}
+	return m
+}
+
+// isGPTFamily 判断模型是否属 GPT 系（下限规则只作用于它）。
+func isGPTFamily(model string) bool {
+	return strings.HasPrefix(bareModelName(model), "gpt-")
+}
+
+// minMaxTokensFor GPT 系模型接受的 max_tokens 下限；非 GPT 系返回 0（不钳）。
+func minMaxTokensFor(model string) int64 {
+	bare := bareModelName(model)
+	if !strings.HasPrefix(bare, "gpt-") {
+		return 0
+	}
+	if m, ok := gptMinMaxTokensByModel[bare]; ok {
+		return m
+	}
+	return gptDefaultMinMaxTokens
+}
+
+// clampMinMaxTokens 把 GPT 系过小的 max_tokens 抬到该模型的下限。
+//
+// 背景：上游 GPT 系对过小 max_tokens 一律 400 code=11133 model_param_invalid
+// （详见两个下限常量上的实测注释）。Claude Code 等客户端用 /model 切换时会先发
+// max_tokens 极小的探针请求，全号轮转同样被拒——11133 在本仓库落 Classify 的
+// ErrClient 兜底（只换号不避让），于是客户端拿到 503，模型永远切不过去。
+// 账号与 body 其余部分无关，换号无用，只能在发送前修。
+//
+// 抬升只放宽输出上限、不改语义：上游返回 ≤max_tokens 个 token 都是合法答复，
+// 客户端自行按需截断；而未修的话请求直接失败。
+//
+// **只钳正数**——与 translateMaxCompletionTokens 的 0/null/负数口径保持一致：
+//   - 0 / null：语义是「未设置」，上游回落到默认输出上限（实测 32000）。钳到 16
+//     等于把默认上限砍成 16，把能正常工作的请求改坏（比不修更糟）；
+//   - 负数：非法值，上游应报 11101 参数错。伪造出一个合法值会把「客户端发了垃圾」
+//     这个真实问题藏起来；
+//   - 非数值（字符串等畸形）：同样原样透传，由上游报错，不编造。
+//
+// 调用点紧跟在 translateMaxCompletionTokens 之后：别名 max_completion_tokens=1
+// 先被译成 max_tokens=1，此处才能一并抬升（顺序颠倒会漏掉别名形态）。
+func clampMinMaxTokens(obj map[string]any) {
+	model, _ := obj["model"].(string)
+	floor := minMaxTokensFor(model)
+	if floor <= 0 {
+		return
+	}
+	var v int64
+	switch n := obj["max_tokens"].(type) {
+	case float64:
+		v = int64(n)
+	case int64:
+		v = n
+	case int:
+		v = int64(n)
+	default:
+		return // 字段不存在 / null / 非数值：不钳（见上方口径）
+	}
+	if v > 0 && v < floor {
+		obj["max_tokens"] = floor
+		log.Printf("WARN: [upstream] max_tokens floored model=%s %d -> %d", model, v, floor)
 	}
 }
 
