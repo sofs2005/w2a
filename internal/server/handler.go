@@ -1081,26 +1081,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		h.cfg.Pool.NoteSuccess(acct.UID)
-		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
-		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
-		h.cfg.Pool.BlockModelClear(acct.UID, bareModel, outModel)
-		// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
-		// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
-		if stickyKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(stickyKey, acct.UID)
-		}
+		// 成功判定与粘性绑定**延后到真成功之后**（见下方流式/非流式两路各自的收口）。
+		// 上游「200 已开流 + 一帧 error」是真实形态（6004 限流、内容拦截、审核）：
+		// 此前在读第一帧之前就 NoteSuccess + 清 11102 负缓存 + 绑粘性，被限流的号
+		// 被记成健康，粘性把会话钉死在它身上，后续每一轮都打同一个限流号。
 		if peek.Stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
+			// 流尾三态收敛所需的观察量：首个上游 error 帧原文（旁路观察者采集）。
+			var errFrame string
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
+			}), upstream.WithErrorFrameObserver(func(payload string) {
+				if errFrame == "" {
+					errFrame = payload // 只处置首个 error 帧，其余照常透传
+				}
 			}))
-			if upstream.IsEmptyStreamError(sErr) {
+			// 流尾三态：error 帧 → 按帧内容处置账号；空流 → 502 观测；正常结束 → 记成功。
+			// 三态互斥且只命中一个（空流无有效帧、error 帧算有效帧，故不会同时成立）。
+			switch {
+			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
 				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
@@ -1109,6 +1113,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			case errFrame != "":
+				// 上游「200 + error 帧」：这是**失败**不是成功，HTTP 头已发无法改状态码，
+				// 但账号处置必须做——被限流/被拦的号若记成健康并绑上粘性，会话会被钉死
+				// 在它身上，后续每一轮都打同一个坏号（粘性命中优先于选号评分，坏号不会
+				// 因评分低被跳过）。applyErrorPolicy 按帧分类记账（6004 模型级限流写
+				// modelCooldowns 且切模型豁免；内容拦截/请求级错误零动作），
+				// 不记成功、不清 11102 负缓存、不绑粘性。
+				kind := upstream.FrameKind(errFrame)
+				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil, outModel)
+				st.status = http.StatusServiceUnavailable // 观测上按失败计（区别于空流的 502）
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame in 200 stream kind=%s payload=%s",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+			default:
+				// 真成功：这一跳读完且上游没报错，才记成功并让粘性跟上。
+				h.noteChatSuccess(acct.UID, bareModel, outModel, stickyKey)
 			}
 			st.ttfb = stats.TTFB()
 			// usage 缺失时保留 chatStat.toks 的 -1 哨兵（观测缺失 → 显示 "-"），
@@ -1149,6 +1168,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
+		// 非流式成功收口：口径与流式 default 分支对齐（见 noteChatSuccess 注释）。
+		// 非流式不存在「200 + error 帧」形态——上游错误走 status>=400 分支，
+		// 聚合失败走上方 err != nil → 502；能走到这里就是真成功。
+		h.noteChatSuccess(acct.UID, bareModel, outModel, stickyKey)
 		st.toks = completionTokens(resp)
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
@@ -1228,6 +1251,33 @@ func rotateBackoff(i int, ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// noteChatSuccess 记一次**真成功**：NoteSuccess 清连败/熔断 + 清 11102 负缓存 +
+// 粘性重绑，三件事是一个整体，只在「上游确实交付了内容」之后调用。
+//
+// 调用点必须晚于任何可能失败的上游交互：
+//   - 流式：StreamHintWithObserver 收流结束后的 default 分支（无 error 帧、非空流）；
+//   - 非流式：Aggregate 成功、writeJSON 之后。
+//
+// 为什么不能提前到「上游回了 200、还没读帧」时做：上游存在「200 已开流 + 一帧 error」
+// 的真实形态（6004 模型级限流、内容拦截、审核），HTTP 头是 200 但内容交付失败。
+// 提前记成功会把被限流的号标记成健康；提前绑粘性会把会话钉死在该号上，多轮对话
+// 每一跳都打同一个坏号（粘性命中优先于选号评分，坏号不会因评分低被跳过）。
+//
+// BlockModelClear 同理必须在成功后清：11102 是「该后端无此模型」的负缓存，只有
+// 实测成功才能证明该 (账号, 模型) 可用；失败流/空流清掉它会把避让抹掉，下一轮
+// 又去撞同一个不可用组合。
+func (h *Handler) noteChatSuccess(uid, bareModel, outModel, stickyKey string) {
+	h.cfg.Pool.NoteSuccess(uid)
+	// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
+	// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
+	h.cfg.Pool.BlockModelClear(uid, bareModel, outModel)
+	// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
+	// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
+	if stickyKey != "" && h.cfg.Session != nil {
+		h.cfg.Session.Bind(stickyKey, uid)
+	}
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
