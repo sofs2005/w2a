@@ -20,6 +20,32 @@ import (
 	"time"
 )
 
+// generationSeconds 生成耗时（秒）= 端到端耗时 - 首 token 等待（TTFB）。
+//
+// 为什么要减：不减的话，首 token 等待越长、报告的吐字速率被压得越低。同一模型换个
+// 上游或网络，TTFB 从 0.3s 涨到 2s，速率能凭空掉一半——读起来像「模型变慢了」，
+// 其实只是排队久了。
+//
+// ttfb<=0 表示**没有观测**（非流式回复天然没有「首个 data 帧」）：此时不猜、不扣
+// ——凭空假定一个 TTFB 会把分母推向零、把速率抬成虚高，比不扣更糟。同理 ttfb 不小于
+// 总耗时时（时钟粒度、或 TTFB 落在计时终点之后）退回端到端耗时，避免零/负分母。
+//
+// 控制台流水行（logging.go 的 tok/s 列）与用量账本（accumulateMetric 的 genSecSum，
+// 供面板 TokensPerSec）都走这一个函数：两处各算一遍时口径漂移过一次（流水行漏扣
+// TTFB、与面板数字对不上），共用是防再次分叉的唯一办法。
+func generationSeconds(totalMS float64, ttfb time.Duration) float64 {
+	if totalMS <= 0 {
+		return 0
+	}
+	gen := totalMS
+	if ttfb > 0 {
+		if g := totalMS - float64(ttfb.Milliseconds()); g > 0 {
+			gen = g
+		}
+	}
+	return gen / 1000.0
+}
+
 // metricsCap 模型键容量上限。上游目录规模远小于此值；上限只为兜底异常模型名。
 const metricsCap = 512
 
@@ -90,12 +116,8 @@ func accumulateMetric(mm *modelMetrics, s *chatStat, total time.Duration) {
 		mm.cacheMiss += int64(s.cacheMiss)
 		mm.cacheWrite += int64(s.cacheWr)
 		// 生成吞吐分母：总耗时减去 TTFB（纯生成时间）。TTFB 缺失时退回总耗时。
-		gen := totalMS
-		if s.ttfb > 0 {
-			gen = totalMS - float64(s.ttfb.Milliseconds())
-		}
-		if gen > 0 {
-			mm.genSecSum += gen / 1000.0
+		if gen := generationSeconds(totalMS, s.ttfb); gen > 0 {
+			mm.genSecSum += gen
 		}
 	}
 	if s.hasCredit {
