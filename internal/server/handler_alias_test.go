@@ -158,3 +158,46 @@ func TestChatAliasStickyAcrossRealms(t *testing.T) {
 		t.Errorf("粘性绑定不得被解绑，got uid=%q ok=%v binds=%v", uid, ok, st.binds)
 	}
 }
+
+// TestChatAliasRecordsOutboundInStats 端到端：别名请求经**真实 handler** 跑完后，
+// 出站物理名落进 /v1/stats 的分域条目（不只是 metrics 单元层能算对）。
+//
+// 这条用例存在的理由：outModel 的赋值点在轮转循环内（handler.go 的 rewriteModel
+// 旁边），而记账在 chatStat.done() 里——两处任一漏接线，单元测试仍会全绿，
+// 面板上那一列却永远是「同名」。别名有没有生效在生产上此前完全不可观测
+// （行键与流水行只回显入站名、响应体 model 是上游回显），故这条不能省。
+func TestChatAliasRecordsOutboundInStats(t *testing.T) {
+	resetMetricsForTest(t)
+	auth.SetGlobalEnabled(true)
+	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
+	cf := newRealmFake(t)
+	store := aliasStoreForTest(t, `{"aliases":[{"name":"my-model","cn":"cn-phys","global":"gl-phys"}]}`)
+
+	p := testPoolWith(&auth.Auth{UID: "cn1", AccessToken: "at_cn", Domain: "www.codebuddy.cn", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: cf.up, GlobalEnabled: true, Aliases: store})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"my-model","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("alias chat code=%d body=%s", rec.Code, rec.Body)
+	}
+
+	// 行键是**入站**名（my-model），出站名只出现在 out_models 里。
+	snap := MetricsSnapshotOf()
+	var row *ModelStatPayload
+	for i := range snap.Models {
+		if snap.Models[i].Model == "my-model" {
+			row = &snap.Models[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("统计里没有 my-model 行：%+v", snap.Models)
+	}
+	if len(row.Realms) != 1 || row.Realms[0].Realm != "cn" {
+		t.Fatalf("应只有一条 cn 明细，got %+v", row.Realms)
+	}
+	if got := row.Realms[0].OutModels; len(got) != 1 || got[0] != "cn-phys" {
+		t.Errorf("出站名未落进统计（面板「出站模型」列会恒显示同名）: got %v want [cn-phys]", got)
+	}
+}

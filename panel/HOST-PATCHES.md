@@ -4,9 +4,9 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5–13 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5–14 条；第 4 条已撤销（原前提失效，见该节）。
 （第 9–11 条与第 12 条均为本 fork 独有的新增能力/删除，第 13 条为跟随网关的键改名，
-同属「必须保留」。）
+第 14 条为别名可观测性（新增统计列），同属「必须保留」。）
 
 本次（`9413e70` → `a26cd0f`）上游带来「模型与倍率」「积分到期」两页、CSRF
 反代修复（#7）、外部渠道账号积分补齐（#8），以及 `deploy/nginx.conf.example`。
@@ -408,6 +408,63 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 改动该卡片需一并重放。`panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，
 `index.html` 需同步提交）。
 
+## 14. 统计页「出站模型」列：网关 `/v1/stats` 增 `out_models` + `StatsPage.tsx`
+
+**动机**：模型别名（第 8 条）此前**不可观测**。想回答「我配的别名到底生效没有」，
+三条现成通道全都答不了：
+
+- 统计表的行键、网关流水行都只回显**入站**名（客户端写的那串），别名改写在出站侧，
+  两处都看不到；
+- 响应体里的 `model` 是**上游回显**——上游会把自己的别名规范化掉（请求 `xxx-f`
+  也回 `xxx`），于是「网关改写了」与「网关没改写」在上游看到的完全相同；
+- 结果是：别名生效 / 不生效在面板上长得一模一样，只能靠 CPA 之类的外部工具反推，
+  而那次反推的结论恰好又是上游规范化造成的假象。
+
+**改动**：
+
+1. 网关 `internal/server/logging.go`：`chatStat` 增 `outModel`（出站物理名）。
+   赋值点与 `realm` 同处（`handler.go` 的 `rewriteModel` 旁，选号成功之后）——
+   选号失败 503 时保持空串，与 `realm` 同一条件。
+2. 网关 `internal/server/metrics.go`：`modelMetrics` 增 `outModels map[string]bool`
+   （**出站名集合**）；`accumulateMetric` 收集、`addMetric` 并集；`RealmStat` 增
+   `OutModels []string \`json:"out_models,omitempty"\``，由新增的 `outModelsOf` 填充。
+   - **落在域子条目而不是父条目**：出站名由选中账号的域决定，同一对外名在 cn 与
+     global 可映射到两个不同物理名；放在父条目上只剩一个并集，正好丢掉要查的东西。
+     这也是 `RealmStat` 唯一一个跨域字段（其余标识字段都归父条目，见该结构体注释）。
+   - **只在「出站名 ≠ 裸名」时输出**（`outModelsOf` 把空串与等于裸名的都滤掉，
+     滤空返回 nil）：非别名请求出站名 == 裸名，输出纯属噪音。**故普通请求的载荷与
+     本字段引入前逐字节一致**——面板靠「字段缺席」把「确认未改写（同名）」与
+     「网关没上报」区分开，恒输出空数组会让每条请求都被读成"改写过了"。
+3. `internal/gateway/client.go`（**上游文件，需重放**）：`RealmStat` 增 `OutModels`。
+   同第 8～10 条的坑——白名单结构体，漏声明即**静默丢弃**（`realms`、`credits`
+   在本项目已各出过一次；本次漏了的话症状正是那一列恒显示「同名」，即"没走别名"，
+   恰好是这一列要回答的问题本身）。
+4. `web/src/types.ts` / `web/src/pages/StatsPage.tsx`：`RealmStat` 增 `out_models`；
+   「按模型明细」表在「域」右侧插入**出站模型**列（新增 `OutModelCell` 组件）。
+   显示口径：
+   - 有值 → 高亮显示物理名（多值逗号并列，正常 1 个）；
+   - 缺席 → 低调显示**「同名」**（= 出站名就是裸名，没走别名改写）。**不留空**：
+     留空会与"网关没上报"混淆；
+   - 降级行（老网关整段缺 `realms`，连域都不知道）→ 显示 `—`。这里**不能**显示
+     「同名」——那是"确认未改写"的断言，而我们并没有这个观测。
+   另在「指标说明」卡片补一条 `出站模型` 说明。
+
+**回归测试**：网关 `internal/server/metrics_test.go` 新增三条——
+`TestMetricsOutModelsOnlyWhenRewritten`（别名请求输出、非别名与未路由都不输出）、
+`TestMetricsOutModelsPerRealm`（落在域子条目：cn 侧 `kimi-k3-1` 输出、global 侧
+与裸名同名不输出）、`TestMetricsOutModelsOmittedFromJSON`（非别名请求 JSON 里
+不含 `out_models`，别名请求序列化为 `["al-phys"]`）。
+`handler_alias_test.go` 新增 `TestChatAliasRecordsOutboundInStats`——端到端跑真实
+handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与记账点（`chatStat.done()`）
+任一处漏接线，单元测试仍会全绿而面板恒显示「同名」，故这条不能省。
+面板侧 `internal/api/stats_test.go`（**新文件**）的 `TestStatsOutModelsPassthrough`
+钉住 `out_models` 的**双向**存活（解码 + 编码），并断言未改写域不凭空多出该键。
+
+**上游冲突面**：`client.go` 是新增字段；`StatsPage.tsx` 的按模型明细表格整块由第 11
+条重写过，本条又插了一列（表头与 `StatRow` 各一处）——上游若重写该表格需两条一起重放；
+`types.ts` 增字段。网关侧 `metrics.go` 是**本 fork 独有**的实现，`logging.go` /
+`handler.go` 各加一处赋值。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
@@ -418,6 +475,7 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 | `internal/ops/aliasfile.go` | 见第 8 条。 |
 | `internal/api/alias_test.go` | 见第 8 条。 |
 | `internal/api/models_test.go` | 见第 8 条（`realms` 透传回归）。 |
+| `internal/api/stats_test.go` | 见第 14 条（`out_models` 透传回归）。 |
 | `internal/api/account_ledger_test.go` | 见第 9 条（账号台账透传回归）。 |
 | `web/src/pages/ModelAliases.tsx` | 见第 8 条。 |
 | `web/src/SuggestInput.tsx` | 见第 8 条（自绘候选下拉，替代被密码管理器抢占的 `<datalist>`）。 |

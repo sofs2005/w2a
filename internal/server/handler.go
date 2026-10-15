@@ -913,6 +913,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		// 出站物理名：与 body 改写同一处赋值（选号成功之后）。别名生效时它与入站名
+		// 不同，是「别名有没有生效」唯一的直接证据——响应体的 model 是上游回显
+		// （上游会把自己的别名规范化掉），流水行与统计行都只回显入站名。
+		st.outModel = outModel
 		// 记账域：本请求实际落在哪个域的账号上（不是请求体前缀——前缀只说"允许打哪"，
 		// 实际落在哪由选号决定）。/v1/stats 的按域分账靠它，见 metricsStore 注释。
 		// 赋值点在此（选号成功之后）：选号失败 503 时保持空串，独立成组。

@@ -77,6 +77,19 @@ type modelMetrics struct {
 	// 老路径（无账号上下文：选号失败 503、模型名解析不出）记 ""，独立成组，
 	// 不并进任何一侧——编造归属比空着更糟。
 	realm string
+
+	// outModels 该条目**实际发出去的**物理模型名集合（别名映射后）。
+	//
+	// 为什么要有它：行键（裸名）与流水行都只回显**入站**名，别名是否生效在别处
+	// 完全不可见——响应体的 model 是上游回显（上游会把自己的别名规范化掉，请求
+	// -f 变体也回 canonical 名），于是「配了别名但没生效」与「生效了」在面板上
+	// 长得一模一样。记下出站名后，hy4-preview 行会显示 hy4-preview-f，
+	// 一眼可辨。
+	//
+	// 用集合而非单值：同一条目内出站名理论上恒为一个（出站名由账号域决定，
+	// 而条目已经按域分开了），集合只是兜底——比如别名文件在请求之间被热改。
+	// 空串（未路由 / 非别名请求未赋值）不入集合，输出侧据「集合为空」退回不显示。
+	outModels map[string]bool
 }
 
 // accumulateMetric 把一次请求的观测累加进一个累加器。抽成独立函数是为了让
@@ -122,6 +135,15 @@ func accumulateMetric(mm *modelMetrics, s *chatStat, total time.Duration) {
 	}
 	if s.hasCredit {
 		mm.credit += s.credit
+	}
+
+	// 出站名集合：只在有观测时建 map（普通请求恒为空，不为此分配）。
+	// 这里记的是**物理名**，与 s.model（入站名）无关，故不做任何归一。
+	if s.outModel != "" {
+		if mm.outModels == nil {
+			mm.outModels = make(map[string]bool, 1)
+		}
+		mm.outModels[s.outModel] = true
 	}
 
 	mm.lastSeen = time.Now()
@@ -273,6 +295,7 @@ type ModelStatPayload struct {
 // RealmStat 单个域的统计明细。字段集是所有按域派生量都有的那些（均值、比率、
 // 吞吐、扣费），不含 Model/Bare/Realms/LastSeen 这些跨域的标识与记账字段——
 // 它们属于父条目，子条目重复输出只会让前端困惑该信哪一个。
+// （OutModels 是例外：它按定义就是域内的，故留在这一层，见其注释。）
 type RealmStat struct {
 	// Realm "cn" 或 "global"；"" = 请求未被路由到任何账号（选号失败、模型名解析不出）。
 	Realm string `json:"realm"`
@@ -297,6 +320,22 @@ type RealmStat struct {
 
 	Credit       float64 `json:"credit"`
 	CreditPerReq float64 `json:"credit_per_req"`
+
+	// OutModels 该域**实际发出去的**物理模型名（别名映射后），按字典序。
+	//
+	// 这是「别名是否生效」唯一的直接证据，也是排查「我配了别名但上游收到的是原名」
+	// 这类问题的唯一入口：行键（父条目的 Bare）与流水行都只回显**入站**名，响应体的
+	// model 又是上游回显（上游会把自己的别名规范化掉，请求 -f 变体也回 canonical 名），
+	// 三处都看不出出站名。
+	//
+	// 落在**域子条目**而不是父条目：出站名由选中账号的域决定，同一对外名在 cn 与
+	// global 可以映射到两个不同的物理名——把它放在父条目上就只剩一个并集，
+	// 正好丢掉「哪一域映射到了什么」这个要查的东西。
+	//
+	// 只在**与裸名不同**时才输出（见 outModelsOf）：非别名请求出站名 == 裸名，
+	// 输出一遍纯属噪音；未路由（选号失败 503）压根没有出站名。故 omitempty 之后，
+	// 普通请求的载荷与本字段引入前逐字节一致。
+	OutModels []string `json:"out_models,omitempty"`
 }
 
 // MetricsSnapshotOf 生成当前聚合快照。models 按请求数降序（面板表格默认序）。
@@ -333,7 +372,9 @@ func MetricsSnapshotOf() MetricsSnapshot {
 			mm := perRealm[realm]
 			addMetric(&tot, mm)
 			addMetric(&row, mm)
-			subs = append(subs, realmStatOf(realm, mm))
+			sub := realmStatOf(realm, mm)
+			sub.OutModels = outModelsOf(mm, bare)
+			subs = append(subs, sub)
 		}
 		rowPayload := deriveModelStat(bare, &row)
 		rowPayload.Bare = bare
@@ -348,6 +389,30 @@ func MetricsSnapshotOf() MetricsSnapshot {
 		}
 		return out.Models[i].Model < out.Models[j].Model
 	})
+	return out
+}
+
+// outModelsOf 把某域累加器里记下的**出站**物理名整理成待输出的列表。
+//
+// 两条过滤，都是为了让这个字段只在真有信息时出现：
+//   - 空串（未路由 / 旧路径未赋值）与**等于裸名**的（非别名请求：出站名就是裸名本身）
+//     一律剔除——它们不携带任何「别名做了什么」的信息；
+//   - 剔完为空 → 返回 nil，配合 omitempty 让普通请求的载荷与引入本字段前逐字节一致。
+//
+// 排序：map 遍历无序，不排序会让同一行的列表每次刷新换序（与 metricRealmOrder 同因）。
+// 正常只有 1 个元素，排序是为别名文件在请求之间被热改这种边角兜底。
+func outModelsOf(mm *modelMetrics, bare string) []string {
+	var out []string
+	for name := range mm.outModels {
+		if name == "" || name == bare {
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -389,6 +454,12 @@ func addMetric(dst, src *modelMetrics) {
 	dst.cacheMiss += src.cacheMiss
 	dst.cacheWrite += src.cacheWrite
 	dst.credit += src.credit
+	for m := range src.outModels {
+		if dst.outModels == nil {
+			dst.outModels = make(map[string]bool, len(src.outModels))
+		}
+		dst.outModels[m] = true
+	}
 	if src.lastSeen.After(dst.lastSeen) {
 		dst.lastSeen = src.lastSeen
 	}

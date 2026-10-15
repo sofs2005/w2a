@@ -500,6 +500,14 @@ export interface RealmStat {
   cache_hit_rate: number
   credit: number
   credit_per_req: number
+  /**
+   * 该域**实际发出去的**物理模型名（别名映射后），按字典序。
+   *
+   * 网关只在「出站名 ≠ 裸名」时下发（即真的发生了别名改写），普通请求恒缺席。
+   * 排查「配了别名但上游收到的是原名」唯一的数据来源：行键与流水行都只回显入站名，
+   * 响应体的 model 又是上游回显（上游会把自己的别名规范化掉），三处都看不出出站名。
+   */
+  out_models?: string[] | null
 }
 
 /**

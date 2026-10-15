@@ -299,3 +299,107 @@ func TestMetricsSingleDomainStillTagged(t *testing.T) {
 		t.Errorf("单域条目也应序列化 realms（含域徽章信息），得到 %s", raw)
 	}
 }
+
+// ─── 出站模型名（别名是否生效的唯一直接证据）────────────────────────────
+//
+// 行键（裸名）与流水行都只回显**入站**名，响应体的 model 又是上游回显（上游会把
+// 自己的别名规范化掉），三处都看不出网关到底发了什么。以下用例钉住 out_models 的
+// 三个关键性质：只在真的改写时出现、落在**域子条目**、普通请求载荷逐字节不变。
+
+// TestMetricsOutModelsOnlyWhenRewritten 只有「出站名 ≠ 裸名」才输出 out_models：
+// 非别名请求（出站名 == 裸名）与未路由请求（没有出站名）都不得输出。
+func TestMetricsOutModelsOnlyWhenRewritten(t *testing.T) {
+	resetMetricsForTest(t)
+
+	// 别名请求：入站 hy4-preview，出站 hy4-preview-f。
+	recordChatMetric(&chatStat{
+		model: "hy4-preview", outModel: "hy4-preview-f",
+		realm: "cn", mode: "sync", status: 200,
+	}, time.Second)
+	// 非别名请求：出站名就是入站名。
+	recordChatMetric(&chatStat{
+		model: "glm-5.2", outModel: "glm-5.2",
+		realm: "cn", mode: "sync", status: 200,
+	}, time.Second)
+	// 未路由（选号失败 503）：根本没有出站名。
+	recordChatMetric(&chatStat{
+		model: "ghost", outModel: "",
+		realm: "", mode: "sync", status: 503,
+	}, time.Second)
+
+	snap := MetricsSnapshotOf()
+
+	aliased := findModelRow(t, snap, "hy4-preview")
+	if len(aliased.Realms) != 1 {
+		t.Fatalf("hy4-preview 应只有一条 cn 明细，got %+v", aliased.Realms)
+	}
+	if got := aliased.Realms[0].OutModels; len(got) != 1 || got[0] != "hy4-preview-f" {
+		t.Errorf("别名请求应记下出站名 hy4-preview-f，got %v", got)
+	}
+
+	plain := findModelRow(t, snap, "glm-5.2")
+	if got := plain.Realms[0].OutModels; got != nil {
+		t.Errorf("非别名请求（出站名==裸名）不得输出 out_models，got %v", got)
+	}
+
+	ghost := findModelRow(t, snap, "ghost")
+	if got := ghost.Realms[0].OutModels; got != nil {
+		t.Errorf("未路由请求没有出站名，不得输出 out_models，got %v", got)
+	}
+}
+
+// TestMetricsOutModelsPerRealm 出站名落在**域子条目**：同一对外名在两域映射到不同
+// 物理名时，各自显示各自的——并到父条目上就只剩一个并集，正好丢掉要查的东西。
+func TestMetricsOutModelsPerRealm(t *testing.T) {
+	resetMetricsForTest(t)
+
+	recordChatMetric(&chatStat{
+		model: "kimi-k3", outModel: "kimi-k3-1",
+		realm: "cn", mode: "sync", status: 200,
+	}, time.Second)
+	recordChatMetric(&chatStat{
+		model: "kimi-k3", outModel: "kimi-k3",
+		realm: "global", mode: "sync", status: 200,
+	}, time.Second)
+
+	snap := MetricsSnapshotOf()
+	row := findModelRow(t, snap, "kimi-k3")
+	if len(row.Realms) != 2 {
+		t.Fatalf("应有 cn/global 两行，got %+v", row.Realms)
+	}
+	// cn 出站 kimi-k3-1（与裸名不同 → 输出）；global 出站 kimi-k3（== 裸名 → 不输出）。
+	if got := row.Realms[0].OutModels; len(got) != 1 || got[0] != "kimi-k3-1" {
+		t.Errorf("cn 域出站名应为 kimi-k3-1，got %v", got)
+	}
+	if got := row.Realms[1].OutModels; got != nil {
+		t.Errorf("global 域出站名与裸名同名，不得输出，got %v", got)
+	}
+}
+
+// TestMetricsOutModelsOmittedFromJSON 普通请求的载荷必须与引入本字段**前逐字节
+// 一致**（omitempty + 过滤到 nil）：面板据此把「同名」与「网关没上报」区分开，
+// 若恒输出空数组，老面板/新面板都会把每条请求读成"别名生效过"。
+func TestMetricsOutModelsOmittedFromJSON(t *testing.T) {
+	resetMetricsForTest(t)
+
+	recordChatMetric(&chatStat{model: "plain", outModel: "plain", realm: "cn", mode: "sync", status: 200}, time.Second)
+	snap := MetricsSnapshotOf()
+	raw, err := json.Marshal(snap.Models[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "out_models") {
+		t.Errorf("非别名请求不得序列化 out_models（否则面板读不出「未改写」），得到 %s", raw)
+	}
+
+	// 对照：别名请求必须序列化出来，且是数组形态。
+	recordChatMetric(&chatStat{model: "al", outModel: "al-phys", realm: "cn", mode: "sync", status: 200}, time.Second)
+	snap = MetricsSnapshotOf()
+	raw, err = json.Marshal(findModelRow(t, snap, "al"))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"out_models":["al-phys"]`) {
+		t.Errorf("别名请求应序列化 out_models:[\"al-phys\"]，得到 %s", raw)
+	}
+}

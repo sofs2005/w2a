@@ -34,10 +34,20 @@ type chatStat struct {
 	// realm 本次请求实际落在哪个域的账号上（acct.Realm()，"cn"/"global"）。
 	// 空 = 未被路由（选号失败 503、模型名解析不出）——stats 的「按域分账」靠它，
 	// 留空而不是猜一个域，见 metricsStore 注释。
-	realm  string
-	ttfb   time.Duration
-	toks   int // <0 表示 usage 缺失 → 显示 "-"
-	status int
+	realm string
+	// outModel 实际写进出站 body 的物理模型名（route.Outbound 的结果）。
+	//
+	// model 是**入站**名（客户端写的那串），本字段是**出站**名——别名映射生效时两者
+	// 不同（hy4-preview → hy4-preview-f），这正是「别名有没有生效」唯一的直接证据：
+	// 响应体里的 model 是上游回显（会被上游自己规范化掉）、流水行与统计行都只回显入站名，
+	// 都不含这个信息。
+	//
+	// 空 = 未被路由（选号失败 503 / 模型名解析不出），与 realm 同一条件：
+	// 赋值点就在 rewriteModel 旁边（选号成功之后）。
+	outModel string
+	ttfb     time.Duration
+	toks     int // <0 表示 usage 缺失 → 显示 "-"
+	status   int
 
 	// metrics 采集字段（供 /v1/stats 聚合）：全部来自上游 usage，缺失时保持零值
 	// 并由 hasUsage 区分「缺观测」与「显式 0」——与成本账本同一纪律。

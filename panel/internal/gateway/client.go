@@ -529,6 +529,17 @@ type RealmStat struct {
 
 	Credit       float64 `json:"credit"`
 	CreditPerReq float64 `json:"credit_per_req"`
+
+	// OutModels 该域**实际发出去的**物理模型名（别名映射后），按字典序。
+	//
+	// 排查「配了别名但上游收到的是原名」唯一的数据来源：统计表的行键、流水行都只
+	// 回显**入站**名，响应体的 model 又是上游回显（上游会把自己的别名规范化掉），
+	// 三处都看不出出站名。
+	//
+	// 与 realms 同坑：未声明字段 encoding/json 会**静默丢弃**，症状只是那一列永远
+	// 空白（本项目 realms / credits 已各出过一次）。网关只在出站名 ≠ 裸名时下发，
+	// 故普通请求恒缺席 → nil。
+	OutModels []string `json:"out_models,omitempty"`
 }
 
 // Stats 网关 /v1/stats 响应。

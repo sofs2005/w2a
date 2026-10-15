@@ -58,6 +58,35 @@ function statRealmBadge(realm: RealmStat['realm']): string {
 }
 
 /**
+ * 出站模型名单元格：显示该域**实际发出去的**物理名（别名映射后）。
+ *
+ * 为什么要有这一列：统计表的行键、网关流水行都只回显**入站**名，响应体里的 model
+ * 又是上游回显（上游会把自己的别名规范化掉，请求 -f 变体也回 canonical 名）——
+ * 于是「配了别名且生效」与「配了别名但没生效」在面板上长得一模一样，只能靠 CPA
+ * 之类的外部工具反推。网关现在把出站名记进统计，这里直接摊开。
+ *
+ * 网关只在「出站名 ≠ 裸名」时下发（真的发生了改写），故：
+ *   - 缺席 = 这条请求没走别名（出站名就是裸名本身）→ 显示一个低调的「同名」，
+ *     而不是留空——留空会让人以为"网关没上报"，与"确实没改写"混淆；
+ *   - 有值 = 别名生效，用 accent 色标出来，一眼可辨。
+ * 多值（同一裸名在两域映射到不同物理名）用逗号并列，正常只有 1 个。
+ */
+function OutModelCell({ names }: { names?: string[] | null }) {
+  if (!names || names.length === 0) {
+    return (
+      <span className="text-faint" style={{ fontSize: 11 }} title="出站名与裸名相同：本次请求未走别名改写">
+        同名
+      </span>
+    )
+  }
+  return (
+    <div className="mono text-accent" style={{ fontSize: 11.5 }}>
+      {names.join(', ')}
+    </div>
+  )
+}
+
+/**
  * 一行明细：父行（裸名合计）或某个域的明细行。
  *
  * 父行不单独渲染任何数值列——用户要的是「每个裸名下按域分两行」，父行的合计
@@ -108,6 +137,15 @@ function StatRow({ model }: { model: ModelStat }) {
               <span className={`badge ${realm === null ? 'badge-dim' : statRealmBadge(realm)}`}>
                 {realm === null ? '未标注域' : statRealmLabel(realm)}
               </span>
+            </td>
+            <td>
+              {/* 降级行（老网关整段缺 realms）连域都不知道，更不知道出站名——
+                  显示 "—" 而不是 "同名"：后者是"确认未改写"，我们并没有这个观测。 */}
+              {realm === null ? (
+                <span className="text-faint">—</span>
+              ) : (
+                <OutModelCell names={v.out_models} />
+              )}
             </td>
             <td className="num">
               {fmtNum(v.requests)}
@@ -503,6 +541,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
                 <tr>
                   <th>模型</th>
                   <th>域</th>
+                  <th>出站模型</th>
                   <th className="num">请求</th>
                   <th className="num">首字</th>
                   <th className="num">吞吐</th>
@@ -553,6 +592,18 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <dd>
             显示<strong>裸名</strong>（不含 cn:/global: 前缀）与整个模型的合计请求数、
             最近一次请求时间。这些是跨域的量，故用跨行的单元格承载，不跟着每个域重复。
+          </dd>
+          <dt>出站模型</dt>
+          <dd>
+            该域<strong>实际发给上游</strong>的物理模型名，由别名映射（面板「模型别名」页）
+            按选中账号的域改写而来。显示<strong>「同名」</strong>表示这次请求没走别名改写
+            ——出站名就是裸名本身；显示具体名字（高亮）表示别名生效了。
+            <div style={{ marginTop: 4 }}>
+              这一列是「别名有没有生效」唯一的直接证据：模型列与网关流水行都只回显
+              <strong>你请求的名字</strong>，而响应体里的 model 是<strong>上游回显</strong>
+              （上游会把自己的别名规范化掉，请求 <code>xxx-f</code> 变体也回
+              <code>xxx</code>），三处都看不出网关到底发了什么。
+            </div>
           </dd>
           <dt>统计范围</dt>
           <dd>
