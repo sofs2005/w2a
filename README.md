@@ -130,6 +130,52 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - 共享同一账号池；**裸模型名走全池统一调度**（见下节），`cn:` / `global:` 前缀可把请求**钉死**在指定域；`global.enabled` 可一键锁死纯 CN 部署
 - 国际版支持注册激活、地区完善、一次性 trial 加油包领取（`./trial.sh`）
 
+### 出站代理（按域分）
+
+网关常部署在**国内服务器**上：访问国外上游域（`www.workbuddy.ai`）需要代理，而访问
+国内域（`copilot.tencent.com` / `codebuddy.cn`）直连更快——一刀切的全局代理两头不
+讨好。故代理**按域分档**，与 `pool.credit_floor_cn/global` 同一先例：
+
+```json
+"proxy": {
+  "cn":     "",
+  "global": "socks5://127.0.0.1:7890"
+}
+```
+
+- **scheme 白名单**：`http` / `https` / `socks5` / `socks5h`，形如
+  `scheme://[用户名:密码@]主机:端口`。账号密码内嵌在 URL 里（HTTP 代理转成
+  `Proxy-Authorization: Basic`，SOCKS5 走 RFC 1929 用户名密码认证）。
+  `socks5` 与 `socks5h` 在本实现里**行为相同**（都交由代理解析域名）——国内部署访问
+  国外域名时这更可靠，两个写法都接受只是兼容书写习惯。
+- **两域独立**：只配 `global` 时 `cn` 仍直连。**空 = 不显式配置**，回落
+  `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量，再空则直连——故**不配本段
+  的既有部署行为逐字节不变**。
+- **填了就不看环境变量**，也**不叠加 `NO_PROXY`**：给了某域的代理就是「这域走这个
+  代理」，再叠一层排除规则会让「到底走没走代理」变成不可预测的状态。
+- **models.dev 跟随 global**：`/v1/models` 的 `context_length` 兜底要拉 models.dev
+  （国外站），配了 `proxy.global` 时一并经该代理——它与账号无关，纯粹是「这个域名
+  在国外」。
+- **登录 CLI 同样认这份配置**：`cmd/login` 按 `--realm` 读 `config.json` 的
+  `proxy.<realm>`。国内用户首次登录国际版账号时网关往往还没起、环境变量也未必设，
+  配置文件里的代理是此时唯一可达路径。
+- **非法 URL 不 fail-fast**：scheme 不在白名单 / 缺 host / userinfo 形态错 → 启动时
+  WARN 并置空回落，**不阻止网关启动**（一个错字段不该让网关起不来）。只清空出错的
+  那一域，另一域不受牵连。
+- **env 覆盖**：`WB2A_PROXY_CN` / `WB2A_PROXY_GLOBAL`（与其余 `WB2A_*` 同序：文件之后应用）。
+- **改动需重启进程生效**（与其余全局设置一致，无 watcher）。
+- **`/status` 脱敏透出**：`proxy.cn.enabled` / `proxy.global.{enabled,scheme,addr}`——
+  只给 scheme 与主机端口，**用户名密码绝不进 `/status`**（那是运维端点，可能被截图、
+  被采集）。且报告的是**真正接上去的**代理，而非配置里写了什么。
+- **面板同机部署即可共用**：面板自身的上游探测（余额 / 模型 / 签到）走环境变量
+  （面板没有独立的 proxy 配置段），同机部署时 `HTTP_PROXY` 一处生效覆盖两边；
+  面板的「配置」页可直接编辑上面这段。
+
+> **账号级代理**（`auths/*.json` 顶层手写 `"proxy": "socks5://..."`）本期只**预留
+> 字段**：网关会解析它、并在每次 token 续期落盘时原样写回（面板保存账号、重新登录
+> 也都不会丢），但**尚无调度逻辑读它**——留口子给将来「某些号走特定出口」。注意它是
+> 域级代理的补充而非替代：目前真正生效的仍是 `proxy.cn` / `proxy.global`。
+
 ### 统一调度与模型别名
 
 裸模型名（如 `glm-5.2`）**不区分域**：国内版与国际版账号进同一个候选池，跑同一套
@@ -675,6 +721,8 @@ go build ./... workbuddy2api-gui/... && go test ./... workbuddy2api-gui/...
 |---|---|---|
 | Web 管理面板 | [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)（`git subtree` 引入） | MIT |
 | 面板前端依赖 | React / TypeScript / Vite 等，见 `panel/web/package.json` | 各自协议 |
+| `golang.org/x/net`（仅 `proxy` 子包） | [`golang.org/x/net`](https://pkg.go.dev/golang.org/x/net)（SOCKS5 出站代理，标准库无此实现） | BSD-3-Clause |
 
 再分发本仓库（含二进制镜像）时，请一并保留 `panel/LICENSE` 与 `panel/README.md` 中的原作者版权声明。
-本项目对面板的修改清单见 [`panel/HOST-PATCHES.md`](panel/HOST-PATCHES.md)。
+本项目对面板的修改清单见 [`panel/HOST-PATCHES.md`](panel/HOST-PATCHES.md)（2026-10-15 起面板源码
+直接维护，该文件定位为「差异清单」而非重放脚本，见其开头的维护方式说明）。

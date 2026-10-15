@@ -87,6 +87,11 @@ func newDialer() *net.Dialer {
 //     环境变量不生效，**改代理须重启进程**——与其它出站参数（超时等）同口径。
 //     这既是标准库的既定行为，也是本网关「配置改动需重启」的既有约定（见
 //     config 里各 restart 注记），不另造热加载。
+//
+// 按域分档（proxy.cn / proxy.global，见 proxy.go）：CN 侧（本函数）保持不变；
+// global 侧由 newTransportGlobal 在**本函数的产物**上覆盖 Proxy/DialContext，
+// 连接层加固参数一个不丢。显式配置优先于环境变量，未配置则回落本函数的环境变量
+// 语义——故「不配 proxy 段」的部署与历史行为逐字节一致。
 func newTransport() *http.Transport {
 	dialer := newDialer()
 	return &http.Transport{
@@ -103,6 +108,30 @@ func newTransport() *http.Transport {
 		IdleConnTimeout:       idleConnTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
+}
+
+// newTransportGlobal 构造 global 域专用 Transport（按域分代理的 global 侧）。
+//
+// proxyURL 语义：
+//   - 空 / 非法 → 与 newTransport() 完全一致（回落 HTTP_PROXY/HTTPS_PROXY 环境
+//     变量，再空则直连）。非法值静默回落是**刻意**的：config.normalize 已在启动
+//     时校验并 WARN 过，运行期再报一次只会重复噪音。
+//   - 合法 → 在加固后的 Transport 上接入该代理（见 proxy.go applyProxy）。
+//
+// 为什么要独立 Transport 而非「一个 Transport + 按 req 动态选代理」：连接池隔离。
+// 代理路径与直连路径的 RTT、半死概率、TLS 指纹完全不同，混在一个池里会让
+// roundTripCloseIdle 的清池误伤另一条腿；且 ResponseHeaderTimeout 等参数无法
+// 按域调优。代价是连接池数量翻倍（MaxIdleConns=100 上限，可接受）。
+func newTransportGlobal(proxyURL string) *http.Transport {
+	tr := newTransport()
+	u, err := ParseProxyURL(proxyURL)
+	if err != nil || u == nil {
+		return tr // 空 = 环境变量语义；非法 = 已 WARN 过，回落
+	}
+	if err := applyProxy(tr, u); err != nil {
+		return newTransport() // 理论上不可达（scheme 已过白名单），保险起见回落
+	}
+	return tr
 }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、

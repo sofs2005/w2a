@@ -672,6 +672,29 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
+	// HTTPGlobal / ChatHTTPGlobal global 域（realm=global）专用 client 对，
+	// 与 CN 对同构：HTTPGlobal 有总时长、ChatHTTPGlobal 无（SSE），域内两者共享
+	// 同一 *http.Transport 实例（连接池不重复，与 CN 对同款）。
+	//
+	// 存在理由是**按域分代理**（config proxy 段，见 proxy.go）：global 域常需经代理
+	// 出网（国内部署访问 www.workbuddy.ai），而 CN 域直连。两域各持一个 Transport，
+	// 连接池天然隔离——代理路径与直连路径的半死概率、RTT 完全不同，混在一个池里
+	// 会让 roundTripCloseIdle 的清池误伤另一条腿。
+	//
+	// 未配置代理时 global 侧仍持一个独立 Transport（参数与 CN 侧逐字相同、都是
+	// ProxyFromEnvironment 语义）。这不是浪费：Transport 的连接池本就按 host 分桶，
+	// CN 与 global 是不同 host，永远不可能共享连接，故拆分对既有行为零影响。
+	//
+	// 选择入口是 httpFor / chatHTTPFor（按账号 realm 分发），业务代码不应直接读这两个字段。
+	HTTPGlobal     *http.Client
+	ChatHTTPGlobal *http.Client
+
+	// ProxyCN / ProxyGlobal 生效的出站代理描述（scheme://host，**已脱敏不含密码**），
+	// 由 SetProxies 写入，供 /status 透出与启动日志。空 = 该域未显式配置代理
+	// （回落 HTTP_PROXY/HTTPS_PROXY 环境变量，再空则直连）。
+	ProxyCN     string
+	ProxyGlobal string
+
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
@@ -757,15 +780,110 @@ type Client struct {
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测，参数见 transport.go）。
+//
+// CN 与 global 各持一对 client（见 Client.HTTPGlobal 注释），域内两个 client 共享
+// 同一 *http.Transport（连接池不重复）。默认两域都未配代理，故两个 Transport 的参数
+// 逐字相同；main.go 装配时按 config proxy 段调 SetProxies 给 global 侧换上带代理的
+// Transport。
 func New() *Client {
 	tr := newTransport()
+	trGlobal := newTransport() // global 侧同域共享一个 Transport（与 CN 侧同款，见 setRealmProxy）
 	return &Client{
 		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTPGlobal:           &http.Client{Timeout: 120 * time.Second, Transport: trGlobal},
+		ChatHTTPGlobal:       &http.Client{Timeout: 0, Transport: trGlobal},
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",
 	}
+}
+
+// SetProxies 按域装配出站代理（config proxy 段；空串 = 该域不显式配代理）。
+//
+// 语义（与 proxy.go 的注释一致）：
+//   - cn 为空：CN 侧保持 newTransport() 的现状（ProxyFromEnvironment）——**零回归**，
+//     不重建、不替换，连对象身份都不变。
+//   - cn 非空：CN 侧换成带该代理的 Transport（此时环境变量代理被显式配置覆盖）。
+//   - global 同理。global 未配而 cn 配了，则 global 仍是 ProxyFromEnvironment 语义
+//     （fallback，不是「跟随 cn」——两域独立）。
+//
+// 非法 URL 静默回落（config.normalize 已在启动时 WARN 过，这里再报只是重复噪音）。
+// 幂等：可重复调用，每次都按当前参数重建（供测试与将来的重载用）。
+//
+// 调用时机：必须在任何业务请求之前（main.go 的装配段），因为替换 Transport 会让
+// 已建连接失效——运行期热换会打断在途请求。
+func (c *Client) SetProxies(cn, global string) {
+	c.setRealmProxy(false, cn)
+	c.setRealmProxy(true, global)
+}
+
+// setRealmProxy 装配单个域的代理。cnURL/globalURL 语义见 SetProxies。
+func (c *Client) setRealmProxy(global bool, proxyURL string) {
+	u, err := ParseProxyURL(proxyURL)
+	desc := ""
+	if err != nil {
+		// 非法：WARN 一次并回落（不替换 Transport，保持环境变量语义）。
+		log.Printf("WARN: [upstream] proxy.%s 非法，回落环境变量代理: %v", realmName(global), err)
+	} else {
+		desc = ProxyDesc(u)
+	}
+
+	httpClient := c.HTTP
+	chatClient := c.ChatHTTP
+	if global {
+		httpClient, chatClient = c.HTTPGlobal, c.ChatHTTPGlobal
+	}
+	if u != nil {
+		tr := newTransportGlobal(proxyURL)
+		httpClient.Transport = tr
+		chatClient.Transport = tr // 同域内共享同一 Transport（连接池不重复，与 CN 侧同款）
+	}
+	if global {
+		c.ProxyGlobal = desc
+	} else {
+		c.ProxyCN = desc
+	}
+}
+
+// realmName 仅供日志措辞（"cn"/"global"）。
+func realmName(global bool) string {
+	if global {
+		return "global"
+	}
+	return "cn"
+}
+
+// httpFor 按账号 realm 选短 RPC client（refresh / FetchModels / 签到 / 上报等）。
+// a 为 nil（无账号上下文的探测）或 realm 非 global 时回落 CN 侧。
+func (c *Client) httpFor(a *auth.Auth) *http.Client {
+	if c.HTTPGlobal != nil && c.globalOn(a) {
+		return c.HTTPGlobal
+	}
+	return c.HTTP
+}
+
+// chatHTTPFor 按账号 realm 选聊天 client；未设置 Global 对时回落 CN 侧（测试常只注入 HTTP）。
+func (c *Client) chatHTTPFor(a *auth.Auth) *http.Client {
+	if c.ChatHTTPGlobal != nil && c.globalOn(a) {
+		return c.ChatHTTPGlobal
+	}
+	return c.chatHTTP()
+}
+
+// ModelsDevHTTP models.dev 兜底拉取（国外站）专用的 client：优先 global 侧
+// （配了 proxy.global 时它能经代理拉取，与 global 账号同一诉求），否则回落 CN 侧。
+//
+// 注意它**不**看账号 realm——models.dev 与账号无关，纯粹是「这个域名在国外」。
+// 故只要配了 proxy.global 就走 global Transport，与当前处理的是哪个账号无关。
+//
+// 消费方是 handler 的 /v1/models 列表（ContextWindowListingV4 / MaxOutputTokensListingV4
+// 的 client 参数），那里没有账号上下文，故不能走 httpFor。
+func (c *Client) ModelsDevHTTP() *http.Client {
+	if c.HTTPGlobal != nil && c.ProxyGlobal != "" {
+		return c.HTTPGlobal
+	}
+	return c.HTTP
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
@@ -1002,8 +1120,10 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+//
+// a 用于按 realm 选 client（global 域可能经代理出网）；a 为 nil 时回落 CN 侧。
+func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1083,7 +1203,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(a, req)
 	if err != nil {
 		return err
 	}
@@ -1184,14 +1304,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		chatClient := c.chatHTTPFor(a)
+		resp, err := chatClient.Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
-			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固第 5 件）：
+			// 传输层失败 → 清空该域连接池的空闲连接（连接层加固第 5 件）：
 			// 失败连接可能仍留在空闲池里，下一个请求会继续捡到它（kongjianguan
 			// 实测：仅靠 IdleConnTimeout 等过期不够，主动清池才断根）。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			// 用 chatClient.Transport（而非固定 CN 侧）：global 域的清池不该误伤 CN 池。
+			roundTripCloseIdle(chatClient.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1483,7 +1605,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1697,7 +1819,7 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}

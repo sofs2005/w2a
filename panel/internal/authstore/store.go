@@ -250,7 +250,7 @@ func (s *Store) Save(a *Account) error {
 			"domain":       a.Domain,
 		},
 	}
-	// 保留本包未建模的键（auth.realm、顶层 device_token 等，见 preserve.go）。
+	// 保留本包未建模的键（auth.realm、顶层 device_token / proxy 等，见 preserve.go）。
 	// 必须在写盘前合并：Save 是整份覆盖，不合并就会把网关写入的字段抹掉。
 	mergeMissingKeys(doc, readExistingDoc(p))
 	raw, err := json.MarshalIndent(doc, "", "  ")

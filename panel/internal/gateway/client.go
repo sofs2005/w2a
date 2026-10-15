@@ -172,6 +172,11 @@ func New(baseURL string, apiKey func() string, timeout time.Duration) *Client {
 				MaxIdleConns:        50,
 				MaxIdleConnsPerHost: 10,
 				IdleConnTimeout:     90 * time.Second,
+				// 出站代理：本 client 打的是**本机网关**（127.0.0.1 / localhost），
+				// http.ProxyFromEnvironment 对回环地址恒直连（Go 的 httpproxy 内置
+				// 豁免），故此处加上它只为与同目录其余出站路径口径一致——万一有人把
+				// 网关地址配成远端域名，代理设置也能生效。正常部署下这一行不改变任何行为。
+				Proxy: http.ProxyFromEnvironment,
 			},
 		},
 	}

@@ -1,14 +1,17 @@
 // preserve.go 写回凭证时保留本包未建模的键。
 //
 // 为什么需要：面板的 Save 是**从自己的 struct 重建整份文档**再覆盖原文件，而磁盘上
-// 的凭证还带着面板没有字段的键 —— 网关的 SaveAtomic 会写 auth.realm 与顶层
-// device_token（见 workbuddy2api/internal/auth/auth.go），面板两者都不建模。
-// 于是用户在面板点一次「刷新」（refreshAccount → store.Save）就会把它们从磁盘上抹掉：
+// 的凭证还带着面板没有字段的键 —— 网关的 SaveAtomic 会写 auth.realm、顶层
+// device_token 与顶层 proxy（见 workbuddy2api/internal/auth/auth.go），面板三者
+// 都不建模。于是用户在面板点一次「刷新」（refreshAccount → store.Save）就会把它们
+// 从磁盘上抹掉：
 //
 //   - realm：网关能从 domain 反推（BackfillRealm），下次自身刷新时会补回，可自愈；
-//   - device_token：**不可反推**，丢失即永久失去该账号的 X-Device-Token 风控头。
+//   - device_token：**不可反推**，丢失即永久失去该账号的 X-Device-Token 风控头；
+//   - proxy：**不可反推**（账号级出站代理，手写配置），丢失即静默回落到域级代理，
+//     表现为「这个号突然不走专用出口了」，且没有任何报错——最难查的一类。
 //
-// 因此这里按「保留未知键」而非「补两个硬编码字段」来修：前者对上游今后新增的键
+// 因此这里按「保留未知键」而非「补三个硬编码字段」来修：前者对上游今后新增的键
 // 同样有效，不会每加一个字段就要改一次面板。
 package authstore
 

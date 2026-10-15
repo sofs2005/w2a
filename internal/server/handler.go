@@ -198,6 +198,11 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	}
 	// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
 	// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
+	// 两域出站代理描述（脱敏；空 = 该域未显式配代理）。Upstream 为 nil 的测试装配下取空。
+	cnProxyDesc, globalProxyDesc := "", ""
+	if h.cfg.Upstream != nil {
+		cnProxyDesc, globalProxyDesc = h.cfg.Upstream.ProxyCN, h.cfg.Upstream.ProxyGlobal
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accounts":       h.cfg.Pool.List(),
 		"total":          total,
@@ -223,7 +228,32 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
+		// proxy 出站代理生效状态（按域分档，config proxy 段）。**脱敏**：只给
+		// enabled/scheme/addr，用户名密码绝不进 /status——这是运维端点，可能被截图、
+		// 被采集、被写进日志。scheme+addr 已足够核对「是不是我设的那个代理」。
+		//
+		// 数据源是 upstream.Client 自身（SetProxies 写入的 ProxyCN/ProxyGlobal），
+		// 而非 config：这样 /status 报告的是**真正接上去的**代理，而不是「配置里写了
+		// 什么」——配置非法被 normalize 置空时，这里如实显示未启用。
+		"proxy": map[string]any{
+			"cn":     proxyStatusEntry(cnProxyDesc),
+			"global": proxyStatusEntry(globalProxyDesc),
+		},
 	})
+}
+
+// proxyStatusEntry 把脱敏代理描述（"scheme://host:port"，空 = 未显式配置）
+// 拆成 /status 的字段对象。空描述只给 enabled=false（不编造 scheme/addr）。
+func proxyStatusEntry(desc string) map[string]any {
+	if desc == "" {
+		return map[string]any{"enabled": false}
+	}
+	scheme, addr, ok := strings.Cut(desc, "://")
+	if !ok {
+		// 理论上不可达（ProxyDesc 恒带 "://"）；兜底只报 enabled，不吐半截串。
+		return map[string]any{"enabled": true}
+	}
+	return map[string]any{"enabled": true, "scheme": scheme, "addr": addr}
 }
 
 // countsMapFrom 把 CountsDetailed 五元组编码为 /status realm_totals 的字段对象。
@@ -391,8 +421,8 @@ func (h *Handler) modelList() []map[string]any {
 		// 拉到后写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(id, mi.ContextWindow, h.cfg.Upstream.HTTP)
-		if mo, ok := upstream.MaxOutputTokensListingV4(id, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+		entry["context_length"] = upstream.ContextWindowListingV4(id, mi.ContextWindow, h.cfg.Upstream.ModelsDevHTTP())
+		if mo, ok := upstream.MaxOutputTokensListingV4(id, mi.MaxTokens, h.cfg.Upstream.ModelsDevHTTP()); ok {
 			entry["max_output_tokens"] = mo
 		}
 		// 上游模型对象全字段透出（name/描述/标签/倍率/能力旗标等，空值省略）。
@@ -443,8 +473,8 @@ func (h *Handler) modelList() []map[string]any {
 				noteCredits(id, "global", mi.Credits)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
-			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
-			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
+			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.ModelsDevHTTP())
+			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.ModelsDevHTTP()); ok {
 				entry["max_output_tokens"] = mo
 			}
 			if efforts, def := upstream.EffortListing("global", id, globalEfforts[id], globalDefaults[id]); efforts != nil {
@@ -483,7 +513,7 @@ func (h *Handler) modelList() []map[string]any {
 				"created":        1753600000,
 				"owned_by":       "workbuddy",
 				"aliased":        true,
-				"context_length": upstream.ContextWindowListingV4(e.Name, 0, h.cfg.Upstream.HTTP),
+				"context_length": upstream.ContextWindowListingV4(e.Name, 0, h.cfg.Upstream.ModelsDevHTTP()),
 			})
 		}
 	}

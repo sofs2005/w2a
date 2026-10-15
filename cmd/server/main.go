@@ -24,6 +24,14 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
+// descOrDirect 代理描述的空值兜底（日志措辞用）：空串 = 未显式配置该域代理。
+func descOrDirect(desc string) string {
+	if desc == "" {
+		return "(未配置，走环境变量)"
+	}
+	return desc
+}
+
 // modelJSONPath 由 state.json 路径推导 model.json 路径（同目录同名换缀）：
 // 两者同为数据目录持久化物（Docker ./data volume），配套而非各自配置。
 // state 路径为空（纯内存测试形态）→ 空 = 禁用 model.json 落盘（内存 + 种子仍可用）。
@@ -190,6 +198,15 @@ func main() {
 
 	up := upstream.New()
 
+	// 出站代理（按域分档，config proxy 段）：CN / global 各自可配，空 = 回落
+	// HTTP_PROXY/HTTPS_PROXY 环境变量（零回归）。必须在下面所有业务装配之前调用——
+	// 它替换 global 侧的 Transport，晚于任何在途请求会打断连接。
+	up.SetProxies(cfg.Proxy.CN, cfg.Proxy.Global)
+	if cfg.Proxy.CN != "" || cfg.Proxy.Global != "" {
+		log.Printf("INFO: [upstream] 出站代理已启用 cn=%q global=%q（改配置需重启）",
+			descOrDirect(up.ProxyCN), descOrDirect(up.ProxyGlobal))
+	}
+
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
 	// （实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
@@ -198,9 +215,16 @@ func main() {
 
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
+	// global 侧同款：两域超时口径一致（代理引入的额外 RTT 不该改变业务超时语义）。
+	up.HTTPGlobal.Timeout = up.HTTP.Timeout
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
 	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
 	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
+		tr.ResponseHeaderTimeout = up.HeaderTimeout
+	}
+	// global 侧 Transport 同步（SetProxies 刚换过它，此处是新实例；即使未配代理
+	// 也要同步，保证两域参数逐字一致）。
+	if tr, ok := up.ChatHTTPGlobal.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = up.HeaderTimeout
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。

@@ -265,6 +265,92 @@ func TestUpstreamEnvOverride(t *testing.T) {
 	}
 }
 
+// TestProxyDefaultsEmpty 未配 proxy 段时两域均为空串 = 回落环境变量代理（零回归）。
+func TestProxyDefaultsEmpty(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Proxy.CN != "" || c.Proxy.Global != "" {
+		t.Errorf("proxy defaults want empty, got cn=%q global=%q", c.Proxy.CN, c.Proxy.Global)
+	}
+}
+
+// TestProxyParsedFromFile 合法 URL 原样保留（不做归一化改写——用户写的串要能原样回显）。
+func TestProxyParsedFromFile(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"proxy":{"cn":"http://proxy.corp:3128","global":"socks5://alice:pw@10.0.0.1:1080"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Proxy.CN != "http://proxy.corp:3128" {
+		t.Errorf("proxy.cn=%q", c.Proxy.CN)
+	}
+	if c.Proxy.Global != "socks5://alice:pw@10.0.0.1:1080" {
+		t.Errorf("proxy.global=%q", c.Proxy.Global)
+	}
+}
+
+// TestProxyInvalidFallsBackToEmpty 非法 URL 置空回落而非 fail-fast：一个错字段不该让
+// 网关起不来（与既有 normalize 口径一致）。**只清空出错的那一域**，另一域不受牵连。
+func TestProxyInvalidFallsBackToEmpty(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"bad scheme", `ftp://10.0.0.1:1080`},
+		{"no host", `socks5://`},
+		{"empty user", `http://:pw@10.0.0.1:3128`},
+		{"with path", `http://10.0.0.1:3128/proxy`},
+		{"unparseable", `http://[::1`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fp := filepath.Join(dir, "c.json")
+			os.WriteFile(fp, []byte(`{"proxy":{"cn":"`+tc.raw+`","global":"http://ok.corp:3128"}}`), 0o600)
+			c, err := Load(fp)
+			if err != nil {
+				t.Fatalf("invalid proxy must not fail load: %v", err)
+			}
+			if c.Proxy.CN != "" {
+				t.Errorf("proxy.cn=%q want empty (invalid input must fall back)", c.Proxy.CN)
+			}
+			if c.Proxy.Global != "http://ok.corp:3128" {
+				t.Errorf("proxy.global=%q want untouched（一域出错不牵连另一域）", c.Proxy.Global)
+			}
+		})
+	}
+}
+
+// TestProxyEnvOverride WB2A_PROXY_CN / WB2A_PROXY_GLOBAL 覆盖文件值（与其余 env 同序：
+// env 在文件之后应用）。env 值同样过 normalize 校验。
+func TestProxyEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_PROXY_CN", "socks5://env-cn:1080")
+	t.Setenv("WB2A_PROXY_GLOBAL", "socks5h://env-global:1080")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Proxy.CN != "socks5://env-cn:1080" {
+		t.Errorf("proxy.cn=%q want env value", c.Proxy.CN)
+	}
+	if c.Proxy.Global != "socks5h://env-global:1080" {
+		t.Errorf("proxy.global=%q want env value", c.Proxy.Global)
+	}
+}
+
+// TestProxyEnvInvalidAlsoFallsBack env 传了非法值同样只置空不报错（校验口径单一来源）。
+func TestProxyEnvInvalidAlsoFallsBack(t *testing.T) {
+	t.Setenv("WB2A_PROXY_GLOBAL", "://nope")
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("invalid env proxy must not fail load: %v", err)
+	}
+	if c.Proxy.Global != "" {
+		t.Errorf("proxy.global=%q want empty", c.Proxy.Global)
+	}
+}
+
 // TestRetiredTravelIntervalKeyIgnored 退役的 travel_interval_minutes 键按未知字段忽略，不报错。
 func TestRetiredTravelIntervalKeyIgnored(t *testing.T) {
 	dir := t.TempDir()

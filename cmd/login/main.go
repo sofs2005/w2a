@@ -311,8 +311,17 @@ func runOnce(base, origin, realm string, client *http.Client) {
 	file := filepath.Join(authDir, "workbuddy-"+tb.UID+".json")
 	a.FilePath = file
 
+	// 重新登录是**整份覆盖**（SaveAtomic 从结构体重建文档），故先读回旧文件里
+	// 手写的账号级 proxy / device_token 一并带上——否则「重新登录一次」就把它们
+	// 悄悄抹掉了（面板侧的 preserve.go 只护住面板自己的保存路径，护不到这里）。
+	carriedProxy := carryPreservedFields(a, file)
+
 	if _, statErr := os.Stat(file); statErr == nil {
-		fmt.Fprintf(out, "账号已存在（uid=%s），将覆盖更新凭证\n", tb.UID)
+		carried := ""
+		if carriedProxy {
+			carried = "（已保留原有账号级代理配置）"
+		}
+		fmt.Fprintf(out, "账号已存在（uid=%s），将覆盖更新凭证%s\n", tb.UID, carried)
 	} else {
 		fmt.Fprintf(out, "新账号（uid=%s），新增 auth 文件\n", tb.UID)
 	}
@@ -340,6 +349,26 @@ func runOnce(base, origin, realm string, client *http.Client) {
 	fmt.Fprintln(out, "============================================================")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "重启服务加载新账号：docker compose restart")
+}
+
+// carryPreservedFields 把已存在 auth 文件里**本流程不产生**的字段带进 a，供随后的
+// SaveAtomic 整份覆盖时不丢：账号级 proxy（手写配置，本期无调度逻辑）与 device_token
+// （容器内无 Turing SDK，由宿主注入，丢了不可反推）。
+//
+// 返回是否带上了账号级代理（供提示语措辞）。文件不存在 / 不可读 / 解析失败都静默跳过
+// 并返回 false：重新登录本身可能就是在修一个损坏的文件，此时不该被旧内容挡住。
+func carryPreservedFields(a *auth.Auth, file string) bool {
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		return false
+	}
+	old, err := auth.Parse(raw)
+	if err != nil {
+		return false
+	}
+	a.Proxy = old.Proxy
+	a.DeviceToken = old.DeviceToken
+	return old.Proxy != ""
 }
 
 // doCheckin 首次签到（幂等）。失败仅提示，不阻断——调度器每日 09:00/21:00 会重试。
@@ -396,8 +425,24 @@ func main() {
 	}
 	base, origin := realmConfig(realm)
 	// newLoginClient（oauth.go）= 上游此处的 cookiejar + 30s 超时，每个流程独立 jar
-	// （多账号登录互不串会话）。
-	client := newLoginClient()
+	// （多账号登录互不串会话）。代理按 realm 取自 config.json 的 proxy 段（env
+	// WB2A_PROXY_<REALM> 优先）——国内用户首次登录 global 账号时网关可能还没起，
+	// 配置文件里的代理是此时唯一可达路径。
+	proxyURL := proxyForRealm(realm, envOr("CONFIG_FILE", "./config.json"))
+	client, err := newLoginClient(proxyURL)
+	if err != nil {
+		// 代理配置错就该立刻报错：登录是交互式工具，静默回落直连会让用户
+		// 对着「连不上」白等一轮，而根因（URL 写错）其实一眼可见。
+		fatal("代理配置（proxy.%s）无效: %v", realm, err)
+	}
+	if proxyURL != "" {
+		// 用脱敏描述而非原始 URL：代理串里内嵌账号密码，而这一行会进终端回滚、
+		// 被截图、被贴进 issue。scheme+host 已足够确认「是不是我设的那个代理」。
+		// 解析失败不会走到这里（上面 fatal 已拦），故忽略错误。
+		if u, perr := upstream.ParseProxyURL(proxyURL); perr == nil && u != nil {
+			fmt.Fprintf(os.Stderr, "（经代理出站: %s）\n", upstream.ProxyDesc(u))
+		}
+	}
 
 	// 无子命令 = 单命令登录（容器内 `--entrypoint /app/login` 无参数直接可用）
 	if len(rest) < 1 {

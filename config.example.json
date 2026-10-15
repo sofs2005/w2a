@@ -47,6 +47,10 @@
     "chat_base": "",
     "billing_base": ""
   },
+  "proxy": {
+    "cn": "",
+    "global": ""
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,

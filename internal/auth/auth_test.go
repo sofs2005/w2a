@@ -140,6 +140,87 @@ func TestSaveAtomicPreservesDeviceToken(t *testing.T) {
 	}
 }
 
+// TestParseAccountProxy 嵌套形与扁平形 auth 文件的顶层 proxy 键（账号级出站代理）
+// 均被解析。本期只保留不调度，但**必须解析**——见下方 roundtrip 测试的说明。
+func TestParseAccountProxy(t *testing.T) {
+	nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1},"account":{"uid":"u1"},"proxy":"socks5://10.0.0.1:1080"}`)
+	sa, err := Parse(nested)
+	if err != nil {
+		t.Fatalf("nested parse: %v", err)
+	}
+	if sa.Proxy != "socks5://10.0.0.1:1080" {
+		t.Errorf("nested Proxy = %q want socks5://10.0.0.1:1080", sa.Proxy)
+	}
+
+	flat := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u2","proxy":"http://user:pw@proxy.corp:3128"}`)
+	fa, err := Parse(flat)
+	if err != nil {
+		t.Fatalf("flat parse: %v", err)
+	}
+	if fa.Proxy != "http://user:pw@proxy.corp:3128" {
+		t.Errorf("flat Proxy = %q", fa.Proxy)
+	}
+
+	// 未写该键 = 空串（老文件零回归：无代理）。
+	none := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u3"}`)
+	na, err := Parse(none)
+	if err != nil {
+		t.Fatalf("plain parse: %v", err)
+	}
+	if na.Proxy != "" {
+		t.Errorf("absent proxy should be empty, got %q", na.Proxy)
+	}
+}
+
+// TestSaveAtomicPreservesAccountProxy 账号级 proxy 必须**熬过** token 续期落盘。
+//
+// 这是本字段最容易被做错的地方：SaveAtomic 是从结构体重建整份文档再覆盖文件，
+// 不写回 = 用户手写的 proxy 键在下一次保活刷新（每日 22:00 全量）时被静默删除。
+// 「只留个 JSON 键不写代码」在这里等于「写下去必丢」，故本测试是口子成立的前提。
+func TestSaveAtomicPreservesAccountProxy(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-px.json")
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1,
+		UID: "u1", Proxy: "socks5://10.0.0.1:1080", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("reparse: %v", err)
+	}
+	if b.Proxy != "socks5://10.0.0.1:1080" {
+		t.Errorf("roundtrip Proxy = %q want socks5://10.0.0.1:1080", b.Proxy)
+	}
+}
+
+// TestSaveAtomicOmitsEmptyAccountProxy 空 proxy 不写键（与 device_token 同款：
+// 不在无该字段的旧文件里引入空键，保持插件可读形状一致）。
+func TestSaveAtomicOmitsEmptyAccountProxy(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-nopx.json")
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, UID: "u1", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if bytesContainsKey(raw, "proxy") {
+		t.Errorf("empty Proxy should not introduce a proxy key: %s", raw)
+	}
+}
+
+// bytesContainsKey 判断 JSON 里是否出现顶层键（粗判，够本用例用：键名加引号）。
+func bytesContainsKey(raw []byte, key string) bool {
+	return strings.Contains(string(raw), `"`+key+`"`)
+}
+
 // TestLoadDirBackfillsRealm 存量迁移：LoadDir 加载目录时对空 realm 的 auth 自动
 // backfill + SaveAtomic；已有 realm 的保持原值（不被 domain 覆盖）；文件全部带标识。
 func TestLoadDirBackfillsRealm(t *testing.T) {

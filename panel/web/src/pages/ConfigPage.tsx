@@ -615,6 +615,48 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
 
           <div className="card">
             <div className="card-head">
+              <h2>出站代理（按域分）</h2>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label>国内域代理</label>
+                <input
+                  type="text"
+                  value={str('proxy.cn')}
+                  onChange={(e) => update('proxy.cn', e.target.value)}
+                  placeholder="留空 = 直连 / 走环境变量"
+                />
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>国外域代理</label>
+                <input
+                  type="text"
+                  value={str('proxy.global')}
+                  onChange={(e) => update('proxy.global', e.target.value)}
+                  placeholder="如 socks5://127.0.0.1:7890"
+                />
+              </div>
+            </div>
+            {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
+                .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
+            <div className="field">
+              <div className="desc">
+                格式 <span className="mono">scheme://[用户名:密码@]主机:端口</span>，支持
+                <span className="mono"> http</span> / <span className="mono">https</span> /
+                <span className="mono"> socks5</span> / <span className="mono">socks5h</span>。
+                国内域指 copilot.tencent.com / codebuddy.cn，国外域指 www.workbuddy.ai
+                （含 models.dev）。<strong>两域独立</strong>：只配国外域时国内域仍直连。
+                留空 = 回落 <span className="mono">HTTP_PROXY</span> /
+                <span className="mono"> HTTPS_PROXY</span> 环境变量，再空则直连；
+                填了就<strong>只走该代理</strong>（不叠加 NO_PROXY）。
+                国外域填本机 clash/v2ray 端口（如 <span className="mono">socks5://127.0.0.1:7890</span>）
+                即可让国内服务器上的国际版账号跑通。<strong>改后需重启网关生效</strong>。
+              </div>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-head">
               <h2>会话粘性与功能开关</h2>
             </div>
             <div className="row">

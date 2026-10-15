@@ -31,17 +31,33 @@ type Auth struct {
 	//
 	// 命名注记：Go 不允许字段与方法同名，持久化字段用未导出 realm，计算访问器用
 	// 导出的 Realm()（跨包调用全部走方法）。Parse/SaveAtomic/login 在包内读写字段。
-	realm          string
-	UID            string
-	EnterpriseID   string
-	Nickname       string
-	FilePath       string // 来源文件；refresh 后原子写回此处
+	realm        string
+	UID          string
+	EnterpriseID string
+	Nickname     string
+	FilePath     string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// Proxy 本账号专属出站代理（形如 "socks5://user:pass@host:1080"），来源 auth 文件的
+	// 顶层 proxy 键。**本期只做「保留」不做「调度」**：网关按域分代理（config 的
+	// proxy.cn / proxy.global）已覆盖常规诉求，本字段是留给「某些号走特定出口」的
+	// 口子（如给某个号单独挂一条落地 IP）。
+	//
+	// ⚠️ 为什么必须真的解析 + 写回，而不是「只留个 JSON 键」：SaveAtomic 是从
+	// Auth 结构体**重建整份文档**再覆盖文件的（见其注释），不在结构体里的键会被
+	// 静默抹掉。手写的 proxy 键若无人解析，下一次 token 续期（保活任务每日 22:00
+	// 全量刷新）就会把它连根删掉——那不是「预留的口子」，是「写下去必丢的坑」。
+	// 故此处与 DeviceToken 同款：Parse 读进来、SaveAtomic 非空时写回。
+	//
+	// 与 DeviceToken 的区别：DeviceToken 有消费方（出站请求头），Proxy 暂无——
+	// 结构体里存着、文件里留着，等调度侧实现后直接读它即可（届时注意与
+	// config proxy 段的优先级：账号级应优先于域级）。
+	Proxy string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -261,6 +277,8 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
+			// Proxy 顶层 proxy（账号级出站代理；本期只保留不调度，见 Auth.Proxy 注释）。
+			Proxy string `json:"proxy"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -275,6 +293,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
+			Proxy:        n.Proxy,
 		}
 	} else {
 		var f struct {
@@ -287,6 +306,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID string `json:"enterpriseId"`
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
+			Proxy        string `json:"proxy"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -301,6 +321,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
+			Proxy:        f.Proxy,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -339,6 +360,12 @@ func (a *Auth) SaveAtomic() error {
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
+	}
+	// Proxy 同款（非空才写）：本函数是从结构体重建整份文档，不写回 = 下次续期时
+	// 把用户手写的账号级代理静默删掉。本期没有消费方，但「保留」正是这个口子的
+	// 全部意义（见 Auth.Proxy 注释）。
+	if a.Proxy != "" {
+		doc["proxy"] = a.Proxy
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

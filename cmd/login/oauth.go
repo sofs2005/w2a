@@ -14,7 +14,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"os"
+	"strings"
 	"time"
+
+	"workbuddy2api/internal/upstream"
 )
 
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
@@ -28,9 +32,55 @@ const (
 )
 
 // newLoginClient 每个流程独立 cookie jar（多账号登录互不串会话）。
-func newLoginClient() *http.Client {
+//
+// proxyURL 非空时经该代理出站（config.json 的 proxy.<realm> 段，见 proxyForRealm）；
+// 空 = 直连（login 是短命 CLI，不接 HTTP_PROXY 环境变量的隐式语义——用户显式配了
+// 才走代理，避免「宿主机碰巧设了全局代理」把登录引到意外路径）。
+func newLoginClient(proxyURL string) (*http.Client, error) {
 	jar, _ := cookiejar.New(nil)
-	return &http.Client{Timeout: 30 * time.Second, Jar: jar}
+	c := &http.Client{Timeout: 30 * time.Second, Jar: jar}
+	if strings.TrimSpace(proxyURL) == "" {
+		return c, nil
+	}
+	tr, err := upstream.ProxyTransportFor(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	c.Transport = tr
+	return c, nil
+}
+
+// proxyForRealm 读 config.json 的 proxy 段取该 realm 的代理 URL；env 优先
+// （WB2A_PROXY_CN / WB2A_PROXY_GLOBAL，与网关 applyEnv 同名同序）。
+//
+// 读不到 config.json 不是错误：login 常在网关尚未部署时首次运行，此时无代理配置
+// 是正常状态（回落直连）。JSON 里 proxy 段的键名与网关 config.go 的 Proxy 结构体
+// 对齐（cn / global）。
+func proxyForRealm(realm, configPath string) string {
+	envKey := "WB2A_PROXY_CN"
+	if realm == realmGlobal {
+		envKey = "WB2A_PROXY_GLOBAL"
+	}
+	if v := os.Getenv(envKey); v != "" {
+		return v
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Proxy struct {
+			CN     string `json:"cn"`
+			Global string `json:"global"`
+		} `json:"proxy"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return "" // 配置损坏由网关启动时报错，login 侧静默回落直连
+	}
+	if realm == realmGlobal {
+		return doc.Proxy.Global
+	}
+	return doc.Proxy.CN
 }
 
 // commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。

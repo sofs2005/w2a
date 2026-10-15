@@ -274,6 +274,12 @@ func New(timeout time.Duration) *Client {
 				MaxIdleConns:        50,
 				MaxIdleConnsPerHost: 10,
 				IdleConnTimeout:     90 * time.Second,
+				// 出站代理：面板的上游探测（余额/模型/签到）打的是上游域，与网关同一
+				// 诉求——国内部署访问 www.workbuddy.ai 需代理。面板自身没有 proxy 配置
+				// 段（配置只有网关那份 config.json），故沿用环境变量：面板与网关通常
+				// 同机部署，HTTP_PROXY/HTTPS_PROXY 一处生效即覆盖两边。
+				// 需要按域精细分档时走网关侧（config proxy 段），面板探测不参与选号。
+				Proxy: http.ProxyFromEnvironment,
 			},
 		},
 		Timeout: timeout,

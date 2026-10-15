@@ -158,7 +158,7 @@ func TestIsWafBlocked(t *testing.T) {
 	}{
 		{403, "", true},
 		{403, "<html>blocked</html>", true},
-		{403, `{"code":1}`, false},               // 有 "code": 字段
+		{403, `{"code":1}`, false},                // 有 "code": 字段
 		{403, `{"msg":"request illegal"}`, false}, // 有 "msg": 字段（且该文案本就该走 accountFault）
 		{402, "", false},                          // 非 403
 		{429, "", false},
@@ -865,6 +865,157 @@ func TestNewTransportHardening(t *testing.T) {
 	// 6. DisableKeepAlives 必须保持 false：与连接复用意图相反，不吸收（报告说明）。
 	if tr.DisableKeepAlives {
 		t.Error("DisableKeepAlives must stay false (keep-alive reuse is intentional)")
+	}
+}
+
+// TestNewTransportHardeningAppliesToGlobal 加固参数必须同样覆盖 global 侧 Transport
+// （按域分代理引入了第二、第三个 Transport 实例；任何一处漏掉加固 = 半死连接在
+// global 路径上重新出现，而 global 恰恰是最常经代理、最易半死的一侧）。
+func TestNewTransportHardeningAppliesToGlobal(t *testing.T) {
+	c := New()
+	for _, tc := range []struct {
+		name string
+		cl   *http.Client
+	}{
+		{"HTTPGlobal", c.HTTPGlobal},
+		{"ChatHTTPGlobal", c.ChatHTTPGlobal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cl == nil {
+				t.Fatal("client is nil")
+			}
+			tr, ok := tc.cl.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("Transport type=%T", tc.cl.Transport)
+			}
+			if tr.TLSNextProto == nil {
+				t.Error("TLSNextProto must be non-nil empty map to disable HTTP/2")
+			}
+			if _, registered := tr.TLSNextProto["h2"]; registered {
+				t.Error("TLSNextProto must not register h2")
+			}
+			if tr.TLSHandshakeTimeout != 10*time.Second {
+				t.Errorf("TLSHandshakeTimeout=%v want 10s", tr.TLSHandshakeTimeout)
+			}
+			if tr.ResponseHeaderTimeout != 60*time.Second {
+				t.Errorf("ResponseHeaderTimeout=%v want 60s", tr.ResponseHeaderTimeout)
+			}
+			if tr.IdleConnTimeout != 30*time.Second {
+				t.Errorf("IdleConnTimeout=%v want 30s", tr.IdleConnTimeout)
+			}
+			if tr.MaxIdleConns != 100 || tr.MaxIdleConnsPerHost != 20 {
+				t.Errorf("pool sizes=(%d, %d) want (100, 20)", tr.MaxIdleConns, tr.MaxIdleConnsPerHost)
+			}
+			if tr.DisableKeepAlives {
+				t.Error("DisableKeepAlives must stay false")
+			}
+		})
+	}
+}
+
+// TestGlobalClientsShareOneTransportPerRealm 同域内 HTTP 与 ChatHTTP 共享一个
+// Transport（连接池不重复），但**跨域必须不同**（否则代理路径与直连路径共池，
+// roundTripCloseIdle 会误伤另一条腿——这正是分域 Transport 的存在理由）。
+func TestGlobalClientsShareOneTransportPerRealm(t *testing.T) {
+	c := New()
+	if c.ChatHTTPGlobal.Transport != c.HTTPGlobal.Transport {
+		t.Error("within global realm, ChatHTTPGlobal and HTTPGlobal must share one *http.Transport")
+	}
+	if c.ChatHTTP.Transport != c.HTTP.Transport {
+		t.Error("within CN realm, ChatHTTP and HTTP must share one *http.Transport")
+	}
+	if c.HTTP.Transport == c.HTTPGlobal.Transport {
+		t.Error("CN and global must NOT share a Transport (connection pools must be isolated)")
+	}
+}
+
+// TestSetProxiesLeavesCNUntouchedWhenUnset 零回归核心断言：未配 proxy.cn 时 CN 侧
+// Transport **对象身份都不变**（不是「重建了一个参数相同的」，而是根本没碰）。
+func TestSetProxiesLeavesCNUntouchedWhenUnset(t *testing.T) {
+	c := New()
+	cnTr := c.HTTP.Transport
+	cnChatTr := c.ChatHTTP.Transport
+	globalTr := c.HTTPGlobal.Transport
+
+	c.SetProxies("", "socks5://10.0.0.1:1080")
+
+	if c.HTTP.Transport != cnTr || c.ChatHTTP.Transport != cnChatTr {
+		t.Error("CN transport must be untouched when proxy.cn is empty")
+	}
+	if c.ProxyCN != "" {
+		t.Errorf("ProxyCN = %q, want empty", c.ProxyCN)
+	}
+	if c.HTTPGlobal.Transport == globalTr {
+		t.Error("global transport should have been replaced when proxy.global is set")
+	}
+	if c.ProxyGlobal != "socks5://10.0.0.1:1080" {
+		t.Errorf("ProxyGlobal = %q, want socks5://10.0.0.1:1080", c.ProxyGlobal)
+	}
+}
+
+// TestSetProxiesInvalidFallsBackWithEmptyDesc 非法 URL 不替换 Transport 且描述为空
+// （normalize 已 WARN；运行期再报只是噪音）。
+func TestSetProxiesInvalidFallsBackWithEmptyDesc(t *testing.T) {
+	c := New()
+	before := c.HTTPGlobal.Transport
+	c.SetProxies("", "ftp://nope:1")
+	if c.HTTPGlobal.Transport != before {
+		t.Error("invalid proxy URL should not replace the transport")
+	}
+	if c.ProxyGlobal != "" {
+		t.Errorf("ProxyGlobal = %q, want empty on invalid input", c.ProxyGlobal)
+	}
+}
+
+// TestHTTPForRoutesByRealm 按 realm 选 client：global 账号走 Global 对，
+// CN 账号/无账号走 CN 对，GlobalEnabled=false 时全部回落 CN 对。
+func TestHTTPForRoutesByRealm(t *testing.T) {
+	c := New()
+	cnTr, globalTr := c.HTTP.Transport, c.HTTPGlobal.Transport
+	cnChatTr, globalChatTr := c.ChatHTTP.Transport, c.ChatHTTPGlobal.Transport
+	c.GlobalEnabled = true
+
+	globalAcct := &auth.Auth{AccessToken: "at", UID: "u-global"}
+	globalAcct.SetRealm("global")
+	cnAcct := &auth.Auth{AccessToken: "at", UID: "u-cn"}
+	cnAcct.SetRealm("cn")
+
+	if c.httpFor(globalAcct).Transport != globalTr {
+		t.Error("global account should use HTTPGlobal")
+	}
+	if c.httpFor(cnAcct).Transport != cnTr {
+		t.Error("cn account should use HTTP")
+	}
+	if c.httpFor(nil).Transport != cnTr {
+		t.Error("nil account should fall back to HTTP")
+	}
+	if c.chatHTTPFor(globalAcct).Transport != globalChatTr {
+		t.Error("global account should use ChatHTTPGlobal for chat")
+	}
+	if c.chatHTTPFor(cnAcct).Transport != cnChatTr {
+		t.Error("cn account should use ChatHTTP for chat")
+	}
+
+	// 逃生门：GlobalEnabled=false → 即便账号 realm=global 也走 CN 对。
+	c.GlobalEnabled = false
+	if c.httpFor(globalAcct).Transport != cnTr {
+		t.Error("GlobalEnabled=false must force global accounts onto the CN client")
+	}
+	if c.chatHTTPFor(globalAcct).Transport != cnChatTr {
+		t.Error("GlobalEnabled=false must force global accounts onto the CN chat client")
+	}
+}
+
+// TestModelsDevHTTPPrefersGlobalOnlyWhenProxied models.dev 是国外站：配了
+// proxy.global 就走 global Transport（借代理连通），否则回落 CN 侧。
+func TestModelsDevHTTPPrefersGlobalOnlyWhenProxied(t *testing.T) {
+	c := New()
+	if got := c.ModelsDevHTTP(); got != c.HTTP {
+		t.Error("without proxy.global, models.dev should use the CN client")
+	}
+	c.SetProxies("", "http://proxy.corp:3128")
+	if got := c.ModelsDevHTTP(); got != c.HTTPGlobal {
+		t.Error("with proxy.global, models.dev should use the global client (proxied)")
 	}
 }
 

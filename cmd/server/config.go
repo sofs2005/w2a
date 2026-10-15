@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/upstream"
 )
 
 // Config 顶层配置。
@@ -70,6 +72,37 @@ type Config struct {
 		ChatBase    string `json:"chat_base"`
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
+
+	// Proxy 出站代理（按域分档）。与 global 段形成对偶：global 段定义「去哪」，
+	// 本段定义「怎么去」。
+	//
+	// 动机：网关常部署在国内服务器上，访问国外上游域（www.workbuddy.ai）需要代理，
+	// 而国内域（copilot.tencent.com / codebuddy.cn）直连更快——一刀切的全局代理两头
+	// 不讨好。此前只有 HTTP_PROXY/HTTPS_PROXY 环境变量可用，无法分域。
+	//
+	// 取值形如：
+	//   "http://user:pass@proxy.corp:3128"
+	//   "socks5://user:pass@10.0.0.1:1080"    （socks5h 同义，见 upstream/proxy.go）
+	//
+	// 语义：
+	//   - 空 = 该域**不显式配置**，回落 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量
+	//     （再空则直连）。故「不配本段」的既有部署行为逐字节不变——零回归。
+	//   - 非空 = 该域显式走该代理，此时**不看**环境变量，也**不套用** NO_PROXY
+	//     （给了某域的代理就是「这域走这个代理」，再叠一层排除规则会让「到底走没走
+	//     代理」变成不可预测的状态）。
+	//   - 两域独立：只配 global 时 CN 仍走环境变量，不是「跟随 global」。
+	//
+	// 另：models.dev（国外站，/v1/models 的 context_length 兜底）在配了 global 时
+	// 一并走 global 代理——它与账号无关，纯粹是「这个域名在国外」。
+	//
+	// 非法 URL（scheme 不在白名单 / 缺 host / userinfo 形态错）在 normalize 阶段
+	// WARN 并置空回落，**不** fail-fast——一个错字段不该让网关起不来。改动需重启进程。
+	Proxy struct {
+		// CN 国内域（copilot.tencent.com / codebuddy.cn）出站代理；空 = 回落环境变量。
+		CN string `json:"cn"`
+		// Global 国外域（www.workbuddy.ai）+ models.dev 出站代理；空 = 回落环境变量。
+		Global string `json:"global"`
+	} `json:"proxy"`
 
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
@@ -420,6 +453,12 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
 	}
+	if v := os.Getenv("WB2A_PROXY_CN"); v != "" {
+		c.Proxy.CN = v
+	}
+	if v := os.Getenv("WB2A_PROXY_GLOBAL"); v != "" {
+		c.Proxy.Global = v
+	}
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
 	}
@@ -589,6 +628,22 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	// 出站代理（proxy.cn / proxy.global）：空串合法（= 回落环境变量）。非空则校验，
+	// 非法**不 fail-fast** 而是 WARN + 置空回落——理由见 Proxy 字段注释：代理配错
+	// 最坏是「走直连」（与不配等效），而 fail-fast 会让一个笔误把整个网关挡住。
+	// 校验口径与运行期共用 upstream.ParseProxyURL（避免两处漂移）。
+	if c.Proxy.CN != "" {
+		if _, err := upstream.ParseProxyURL(c.Proxy.CN); err != nil {
+			log.Printf("WARN: [config] proxy.cn 非法，按未配置处理（回落环境变量代理）: %v", err)
+			c.Proxy.CN = ""
+		}
+	}
+	if c.Proxy.Global != "" {
+		if _, err := upstream.ParseProxyURL(c.Proxy.Global); err != nil {
+			log.Printf("WARN: [config] proxy.global 非法，按未配置处理（回落环境变量代理）: %v", err)
+			c.Proxy.Global = ""
+		}
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
