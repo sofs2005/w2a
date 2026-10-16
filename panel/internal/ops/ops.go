@@ -143,11 +143,15 @@ type creditCache struct {
 
 // Service 业务操作聚合入口。
 type Service struct {
-	cfg    *config.Config
-	store  *authstore.Store
-	gw     *gateway.Client
-	up     *upstream.Client
-	tasks  *TaskManager
+	cfg   *config.Config
+	store *authstore.Store
+	gw    *gateway.Client
+	up    *upstream.Client
+	tasks *TaskManager
+	// admin 网关侧账号管理能力（停用/启用/复活）。宿主同进程部署时经
+	// SetAccountAdmin 注入；独立面板模式下为 nil，三个操作返回 ErrAdminUnavailable。
+	// 定义见 account_admin.go。
+	admin  AccountAdmin
 	logins *LoginManager
 
 	mu      sync.RWMutex
@@ -576,25 +580,6 @@ func describeAccountLoadError(uid string, err error) error {
 		}
 		return fmt.Errorf("读取账号 %s 失败：%v", shortUID(uid), err)
 	}
-}
-
-// DisableAccount 手动停用账号（摘出对话流量）。日常任务（签到/保活/猫猫）照常，
-// 只有对话选号不再用该号——语义完全在网关侧实现（pool.manualDisabled），
-// 面板只做转发，不复制判断。
-func (s *Service) DisableAccount(ctx context.Context, uid, reason string) (*gateway.AdminState, error) {
-	if err := s.ensureWritable(); err != nil {
-		return nil, err
-	}
-	return s.gw.DisableAccount(ctx, uid, reason)
-}
-
-// EnableAccount 解除手动停用。只解 manualDisabled 位，不复活系统禁用——
-// 返回的 AdminState.Disabled 若仍为真，说明账号还被系统判死，需另行处理。
-func (s *Service) EnableAccount(ctx context.Context, uid string) (*gateway.AdminState, error) {
-	if err := s.ensureWritable(); err != nil {
-		return nil, err
-	}
-	return s.gw.EnableAccount(ctx, uid)
 }
 
 // Checkin 对单账号执行签到 + 余额刷新。

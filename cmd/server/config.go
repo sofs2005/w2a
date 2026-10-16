@@ -52,13 +52,9 @@ type Config struct {
 
 	Schedule config.Schedule `json:"schedule"`
 
-	// Admin 运维管理端点开关（issue #138/#118）。默认**关闭**：管理能力默认不暴露，
-	// 避免「开了网关就等于开了账号管理面」。开启后
-	// /admin/accounts/{uid}/{disable,enable,revive} 可用；鉴权与 /status 同源
-	// （withAuth + 同一个 api_key，不另立管理密钥）。
-	Admin struct {
-		Enabled bool `json:"enabled"` // 默认 false
-	} `json:"admin"`
+	// 注：旧版的 `admin` 段（admin.enabled，控制网关 /admin/accounts/* 端点）已删除。
+	// 那组端点已下线，账号停用/启用/复活改由面板进程内直调账号池，没有开关可配。
+	// 旧 config.json 里的 "admin": {...} 键作为未知字段被静默忽略，无需迁移。
 
 	Global struct {
 		// Enabled global realm 路由开关。缺省 true：Realm() 正常把 realm=global/
@@ -490,11 +486,7 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_STATE_FLUSH"); v != "" {
 		c.Pool.StateFlush = v
 	}
-	if v := os.Getenv("WB2A_ADMIN_ENABLED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			c.Admin.Enabled = b
-		}
-	}
+	// 注：WB2A_ADMIN_ENABLED 随 admin 段一并删除，设置了也不再被读取（管理面已下线）。
 }
 
 func (c *Config) normalize() error {
@@ -647,13 +639,6 @@ func (c *Config) normalize() error {
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen
-	}
-	// fail-fast（设计 supplement §4.1）：admin.enabled=true 且 api_key 为空 = 未鉴权的
-	// mutation 端点（disable/revive 是可用性操作，风险高于 /status 读泄漏），拒绝启动。
-	// 校验放 applyEnv 之后：env 覆盖（WB2A_ADMIN_ENABLED / WB2A_API_KEY）与 config
-	// 两条入口最终状态一致拦截。
-	if c.Admin.Enabled && strings.TrimSpace(c.APIKey) == "" {
-		return fmt.Errorf("admin.enabled=true 但 api_key 为空：请设置 api_key 或将 admin.enabled 置 false")
 	}
 	// 排程段归一（空数组回落默认、ActivityReportCount 归一、小时范围校验）
 	// 由 internal/config 统一实现，cmd/server 与 cmd/activity 共用同一份语义。

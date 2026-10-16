@@ -60,9 +60,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{uid}/refresh", s.handleAccountRefresh)
 	mux.HandleFunc("POST /api/accounts/{uid}/travel", s.handleAccountTravel)
 	mux.HandleFunc("POST /api/accounts/{uid}/credits", s.handleAccountCredits)
-	// 停用/启用：摘出或恢复对话流量（日常任务照常）。转发网关 /admin 端点。
+	// 停用/启用/复活：摘出或恢复对话流量（日常任务照常）。经 ops 的进程内
+	// AccountAdmin 接口直达网关的池，**不经 HTTP**——网关侧已无 /admin 端点。
 	mux.HandleFunc("POST /api/accounts/{uid}/disable", s.handleAccountDisable)
 	mux.HandleFunc("POST /api/accounts/{uid}/enable", s.handleAccountEnable)
+	mux.HandleFunc("POST /api/accounts/{uid}/revive", s.handleAccountRevive)
 
 	// ── 批量任务 ──────────────────────────────────────────
 	mux.HandleFunc("POST /api/tasks/checkin", s.handleBatchCheckin)
@@ -221,7 +223,7 @@ func (s *Server) handleAccountCredits(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAccountDisable 手动停用账号（摘出对话流量，日常任务照常）。
-// reason 从可选 JSON body 读取；空体/非 JSON 都不拒绝（网关侧会补默认值）。
+// reason 从可选 JSON body 读取；空体/非 JSON 都不拒绝（ops 侧会补默认值）。
 func (s *Server) handleAccountDisable(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Reason string `json:"reason"`
@@ -241,6 +243,16 @@ func (s *Server) handleAccountDisable(w http.ResponseWriter, r *http.Request) {
 // handleAccountEnable 解除手动停用（只解手动位，不复活系统禁用）。
 func (s *Server) handleAccountEnable(w http.ResponseWriter, r *http.Request) {
 	st, err := s.svc.EnableAccount(r.Context(), r.PathValue("uid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// handleAccountRevive 解除系统自动禁用（不动手动停用位）。
+func (s *Server) handleAccountRevive(w http.ResponseWriter, r *http.Request) {
+	st, err := s.svc.ReviveAccount(r.Context(), r.PathValue("uid"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -831,6 +843,8 @@ func writeError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "code": "read_only"})
 	case errors.Is(err, ops.ErrDangerousDisabled):
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": err.Error(), "code": "dangerous_ops_disabled"})
+	case errors.Is(err, ops.ErrAccountNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 	default:
 		msg := err.Error()
 		status := http.StatusInternalServerError

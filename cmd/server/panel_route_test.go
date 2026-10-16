@@ -5,8 +5,9 @@
 // HTML」。这类缺陷用状态码断言抓不到（200 看起来是成功），只能断言**响应体不是
 // HTML**——本文件正是这么做的。
 //
-// 真实事故：/admin/ 未路由给网关时，POST /admin/accounts/<uid>/disable 返回控制台
-// 首页 HTML + 200，cmd/acct 与面板的停用/恢复按钮全部静默失效。
+// 真实事故：/admin/ 曾未路由给网关时，POST /admin/accounts/<uid>/disable 返回控制台
+// 首页 HTML + 200，停用/恢复按钮全部静默失效。那组端点现已下线（面板改走进程内
+// 直通），本文件反向钉住「/admin/ 不得再落到面板兜底」。
 package main
 
 import (
@@ -26,7 +27,6 @@ func newTestRootHandler(t *testing.T) http.Handler {
 	cfg.Listen = "127.0.0.1:17863" // loopbackURL 需要可解析的 host:port
 	cfg.AuthDir = filepath.Join(dir, "auths")
 	cfg.StateFile = filepath.Join(dir, "data", "state.json")
-	cfg.Admin.Enabled = true
 
 	cfgPath := filepath.Join(dir, "config.json")
 
@@ -37,7 +37,9 @@ func newTestRootHandler(t *testing.T) http.Handler {
 		w.WriteHeader(http.StatusTeapot) // 哨兵状态码：见到它即证明路由到了网关
 	})
 
-	h, err := newRootHandler(cfg, cfgPath, gw)
+	// 第 4 参（账号池）传 nil：本测试不校验进程内桥，nil 会让面板保持「未接入」，
+	// 恰好也钉住「池缺失时装配不 panic」。
+	h, err := newRootHandler(cfg, cfgPath, gw, nil)
 	if err != nil {
 		t.Fatalf("newRootHandler: %v", err)
 	}
@@ -60,10 +62,6 @@ func TestGatewayPathsReachGateway(t *testing.T) {
 		{"GET", "/v1/models", "模型列表"},
 		{"POST", "/v1/chat/completions", "OpenAI 兼容主端点"},
 		{"GET", "/v1/stats", "请求统计"},
-		// 运维端点：漏配时会被面板 SPA 回落吞掉（200 + HTML），按钮静默失效。
-		{"POST", "/admin/accounts/someuid/disable", "账号停用"},
-		{"POST", "/admin/accounts/someuid/enable", "账号恢复"},
-		{"POST", "/admin/accounts/someuid/revive", "账号复活"},
 	}
 	for _, tc := range paths {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -106,6 +104,35 @@ func TestTrimSlashRoutesReachGateway(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if rec.Header().Get("X-Gateway-Handler") != "1" {
 			t.Errorf("%s 未到达网关（尾斜杠形态应由 trimSlash 转发）", path)
+		}
+	}
+}
+
+// TestAdminNamespaceIsGone 反向钉桩：账号管理端点已从网关下线，/admin/ 必须拿到
+// 明确的 404 —— 既不能到达网关（旧路由加回来），也不能落到面板 SPA 兜底
+// （200 + HTML 会让人以为还能用）。
+//
+// 对应的能力迁到面板 /api/accounts/{uid}/{disable,enable,revive}（进程内直调池），
+// 由 panel/internal/api 的测试覆盖。
+func TestAdminNamespaceIsGone(t *testing.T) {
+	h := newTestRootHandler(t)
+
+	for _, path := range []string{
+		"/admin/accounts/someuid/disable",
+		"/admin/accounts/someuid/enable",
+		"/admin/accounts/someuid/revive",
+	} {
+		req := httptest.NewRequest("POST", path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Header().Get("X-Gateway-Handler") == "1" {
+			t.Errorf("%s 到达了网关：管理面不应再注册（应改为面板进程内直通）", path)
+		}
+		if rec.Code != http.StatusNotFound {
+			body, _ := io.ReadAll(rec.Body)
+			t.Errorf("%s status=%d want 404（落进面板 SPA 兜底会变成 200 + HTML，看着像还能用）body 前 120 字节=%q",
+				path, rec.Code, truncate(body, 120))
 		}
 	}
 }

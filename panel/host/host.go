@@ -42,6 +42,10 @@ type Options struct {
 	// DataDir 面板自有数据的落盘目录（配置备份、登录凭据）。
 	// 通常传网关 state_file 所在目录（Docker 里是持久化的 ./data）。
 	DataDir string
+	// Admin 网关侧账号管理能力（停用/启用/复活）。宿主同进程部署时传入
+	// 由 *pool.Pool 适配的实现；独立面板模式留 nil，三个操作会明确报
+	// 「当前部署形态不支持」而不是静默失败。
+	Admin panelops.AccountAdmin
 	// Version 面板版本，仅用于展示。
 	Version string
 }
@@ -104,6 +108,11 @@ func New(opts Options) (http.Handler, error) {
 	gw := panelgateway.New(pcfg.GatewayURL, func() string { return pcfg.GatewayAPIKey }, pcfg.Timeout())
 	up := panelupstream.New(pcfg.Timeout())
 	svc := panelops.New(pcfg, store, gw, up)
+	// 账号管理（停用/启用/复活）走进程内接口，不经网关 HTTP——nil 时保持
+	// 「未接入」状态，三个操作会明确报错（独立面板模式）。
+	if opts.Admin != nil {
+		svc.SetAccountAdmin(opts.Admin)
+	}
 
 	static, err := panelwebui.Handler()
 	if err != nil {

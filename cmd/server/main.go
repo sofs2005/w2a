@@ -319,15 +319,14 @@ func main() {
 		PromptText:   cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
-		// 运维管理端点开关（config admin.enabled，默认 false）。
-		AdminEnabled: cfg.Admin.Enabled,
 		// 模型别名表（热加载；nil 时 handler 按无别名运行）。
 		Aliases: aliasStore,
 	})
 
 	// 单端口对外：网关 handler 与面板 handler 合成一个 mux（见 panel.go）。
 	// 装配失败不让网关跟着起不来 —— 面板是附属能力，降级为「仅网关」并明确告警。
-	rootHandler, err := newRootHandler(cfg, *cfgPath, h)
+	// p 一并传入：面板的停用/启用/复活需要进程内直达账号池（网关侧已无 /admin 端点）。
+	rootHandler, err := newRootHandler(cfg, *cfgPath, h, p)
 	if err != nil {
 		log.Printf("WARN: [panel] 面板装配失败，本次仅提供网关接口: %v", err)
 		rootHandler = h

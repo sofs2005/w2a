@@ -70,7 +70,7 @@ func TestResolveGatewayListenForms(t *testing.T) {
 		{`{"listen":"::"}`, "http://127.0.0.1:7863"},        // 裸 :: （手工切冒号会拼出非法基址）
 		{`{"listen":"localhost:9999"}`, "http://localhost:9999"},
 		// 非数字非地址的整串按 host 处理（normalizeListen 语义：SplitHostPort 失败且
-		// 非纯数字 → 视为 host，缺端口补默认）。与 cmd/acct 逐字一致。
+		// 非纯数字 → 视为 host，缺端口补默认）。
 		{`{"listen":"bad"}`, "http://bad:7863"},
 		{`{}`, "http://127.0.0.1:7863"}, // 缺字段 → 默认端口
 	}
@@ -658,8 +658,8 @@ func TestValidateFlags(t *testing.T) {
 	}
 }
 
-// TestNormalizeListen 与 cmd/acct 的 TestNormalizeListen 同表：两处实现必须逐字
-// 一致，任一处的 IPv6 边界先走样都会导致同机两个工具解析出不同地址。
+// TestNormalizeListen 覆盖 normalizeListen 的地址归一表：IPv6 边界先走样会导致
+// 工具解析出连不上的地址。
 func TestNormalizeListen(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{":7863", "http://127.0.0.1:7863"},

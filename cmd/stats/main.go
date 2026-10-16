@@ -159,7 +159,7 @@ func validateFlags(watch time.Duration, jsonOut bool, sortKey string) error {
 // 优先级（地址）：-server flag > WB2A_URL > config.json 的 listen。
 // key 来源：WB2A_API_KEY > config.json 的 api_key。
 //
-// 与 cmd/acct 的 resolveTarget 同口径：-server 只覆盖**地址**，key 仍从配置文件读
+// 口径：-server 只覆盖**地址**，key 仍从配置文件读
 // ——否则「只想指定地址」的用户会意外丢掉鉴权（实测 401）。
 func resolveGateway(serverOverride string) (baseURL, apiKey string, err error) {
 	cfgPath := os.Getenv("WB2A_CONFIG")
@@ -175,7 +175,7 @@ func resolveGateway(serverOverride string) (baseURL, apiKey string, err error) {
 		if uerr := json.Unmarshal(raw, &cfg); uerr != nil {
 			return "", "", fmt.Errorf("解析 %s 失败: %w", cfgPath, uerr)
 		}
-		// 环境变量优先于文件（与 cmd/acct 一致）。
+		// 环境变量优先于文件。
 		apiKey = cfg.APIKey
 		if k := os.Getenv("WB2A_API_KEY"); k != "" {
 			apiKey = k
@@ -208,7 +208,8 @@ func resolveGateway(serverOverride string) (baseURL, apiKey string, err error) {
 // `strings.LastIndex(listen, ":")` 会把 "::" 切成 host=":" port=""，拼出
 // "http://::7863" 这种非法基址。
 //
-// 与 cmd/acct 的同名函数逐字一致：两处若各写一份，IPv6 边界会有一处先走样。
+// 本函数是 cmd/stats 的单一来源：调用方一律经它解析，避免 IPv6 边界两处各写一份
+// 后先在一处走样。
 func normalizeListen(listen string) string {
 	listen = strings.TrimSpace(listen)
 	if listen == "" {

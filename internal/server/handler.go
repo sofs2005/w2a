@@ -52,10 +52,6 @@ type Config struct {
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
 
-	// AdminEnabled 运维管理端点开关（config admin.enabled，默认 false）。
-	// 关闭时 /admin/* 一律 404（而非 403——不向外暴露"这里存在管理面"）。
-	AdminEnabled bool
-
 	// Aliases 模型别名映射表（可选；nil = 无别名，一切模型名原样透传）。
 	// 统一对外名 → 各域真实上游名，见 internal/aliases。热加载由 cmd/server 的
 	// 别名文件监听负责，handler 只读当前快照（Store 内部 atomic 发布，读路径无锁）。
@@ -116,17 +112,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
 	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
-	// 运维管理端点（默认关闭，config admin.enabled 开启后生效）。
-	// 路径用 {uid} 通配而非查询参数：uid 是账号身份，放进路径便于审计与直观。
-	// 条件注册而非 handler 内 404（设计 supplement §2.3）：未注册的路由对未鉴权
-	// 探测回 mux 默认纯文本 404、对 GET 探测无 405+Allow 头，与真 404 完全不可
-	// 区分——路由一旦注册，"带 key 得 401 / GET 得 405 / JSON 信封 404" 三者都会
-	// 暴露管理面存在。
-	if cfg.AdminEnabled {
-		h.mux.HandleFunc("POST /admin/accounts/{uid}/disable", h.withAuth(h.adminAccountDisable))
-		h.mux.HandleFunc("POST /admin/accounts/{uid}/enable", h.withAuth(h.adminAccountEnable))
-		h.mux.HandleFunc("POST /admin/accounts/{uid}/revive", h.withAuth(h.adminAccountRevive))
-	}
+	// 注：账号停用/启用/复活（原 POST /admin/accounts/{uid}/*）已从网关注册表移除。
+	// 那组端点与 /v1 共用同一把 api_key，任何持有 key 的下游都能把账号摘出选号池；
+	// 现在改由面板经进程内接口直调池（panel/internal/ops.AccountAdmin →
+	// cmd/server/panel.go 的 poolAdmin），本进程不再暴露该管理面。
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	return h
 }

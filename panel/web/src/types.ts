@@ -183,7 +183,7 @@ export interface OpResult {
   data?: Record<string, unknown>
 }
 
-/** 停用/启用的操作回显（网关 /admin 端点响应）。 */
+/** 停用/启用/复活的回显（面板 /api/accounts/{uid}/* 进程内直调账号池）。 */
 export interface AdminState {
   uid: string
   manual_disabled: boolean

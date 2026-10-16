@@ -121,20 +121,35 @@ export default function Accounts({ session }: { session: SessionInfo }) {
   }
 
   /** runSingle 执行单账号操作并展示结果。 */
-  const runSingle = async (a: Account, action: 'checkin' | 'refresh' | 'travel' | 'credits' | 'disable' | 'enable') => {
+  const runSingle = async (
+    a: Account,
+    action: 'checkin' | 'refresh' | 'travel' | 'credits' | 'disable' | 'enable' | 'revive',
+  ) => {
     setBusyUid(a.uid)
     setNotice(null)
     try {
-      if (action === 'disable' || action === 'enable') {
-        const st = action === 'disable' ? await api.accountDisable(a.uid) : await api.accountEnable(a.uid)
+      if (action === 'disable' || action === 'enable' || action === 'revive') {
+        const st =
+          action === 'disable'
+            ? await api.accountDisable(a.uid)
+            : action === 'enable'
+              ? await api.accountEnable(a.uid)
+              : await api.accountRevive(a.uid)
         setNotice({
           kind: 'ok',
           text:
             action === 'disable'
               ? `${displayName(a)}：已摘出对话流量（签到等日常任务照常）`
-              : st.disabled
-                ? `${displayName(a)}：已恢复选号，但账号仍被系统禁用，需先解决故障`
-                : `${displayName(a)}：已恢复选号`,
+              : action === 'enable'
+                ? st.disabled
+                  ? `${displayName(a)}：已恢复选号，但账号仍被系统禁用，需先解决故障`
+                  : `${displayName(a)}：已恢复选号`
+                : // revive 只解系统禁用位；若号仍被手动摘出，得明说，否则看着像没生效。
+                  st.manual_disabled
+                  ? `${displayName(a)}：已解除系统禁用，但仍处于手动停用（选号仍排除）`
+                  : st.changed
+                    ? `${displayName(a)}：已解除系统禁用，账号回到选号池`
+                    : `${displayName(a)}：账号未被系统禁用，无需复活`,
         })
       } else if (action === 'checkin' || action === 'refresh' || action === 'travel') {
         const res =
@@ -481,6 +496,19 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                               title="摘出对话流量：签到/保活/猫猫照常，仅不参与选号"
                             >
                               停用
+                            </button>
+                          )}
+                          {/* 复活：只对「被系统判死且未被手动摘出」的号显示。
+                              手动停用的号先点「启用」再复活——两步分开，运维的摘除
+                              意图才不会被一次点击顺带解除。 */}
+                          {a.disabled && !a.manual_disabled && (
+                            <button
+                              className="btn btn-sm"
+                              disabled={busy || writeDisabled}
+                              onClick={() => void runSingle(a, 'revive')}
+                              title="解除系统禁用：清 disabled + 原因 + 连续失败计数（不动手动摘出位）"
+                            >
+                              复活
                             </button>
                           )}
                           <button

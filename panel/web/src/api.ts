@@ -108,6 +108,7 @@ export const api = {
   accountDisable: (uid: string, reason?: string) =>
     post<AdminState>(`/api/accounts/${encodeURIComponent(uid)}/disable`, reason ? { reason } : {}),
   accountEnable: (uid: string) => post<AdminState>(`/api/accounts/${encodeURIComponent(uid)}/enable`),
+  accountRevive: (uid: string) => post<AdminState>(`/api/accounts/${encodeURIComponent(uid)}/revive`),
 
   // 批量任务
   batchCheckin: (uids: string[]) => post<TaskView>('/api/tasks/checkin', { uids }),

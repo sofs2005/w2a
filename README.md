@@ -84,7 +84,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 - **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
 - **积分保底 `pool.credit_floor_cn` / `pool.credit_floor_global`**（按域分档）— 收费模型把余额打穿后，免费模型也会 402 硬冷却到次日签到（最坏约 11.5 小时不可用）。余额低于**本域**保底值的账号对**收费**模型不再参与选号（健康候选、会话粘性、全冷却兜底三条路径同一判据）；免费模型照常可用——保底保的是「留点余额给免费模型」。国内账号按 `credit_floor_cn`（默认 `100`）、国外账号按 `credit_floor_global`（默认 `30`）判定——国外号免费额度与积分购买力都低于国内，同一阈值两头不讨好；紧急时把对应值改小或改 `0` 重启即放行（保留分本就是应急余额）。收费判据两级：本地实测台账（该号该模型实测扣过费）优先，无观测时用**上游目录积分倍率**兜底（限时免费的生效价 0x 按免费处理），故「全池都没学过」的高价新模型也拦得住；倍率表未覆盖的模型按未知放行（不惩罚）。全池触底且无可接的免费模型时选号返回空、网关回 503——硬语义，不放行收费请求打穿保底。键缺席即取上述默认，显式写 `0` = 关闭该域；签到回血越过该值自动恢复；`/status` 透出 `credit_floor_cn` / `credit_floor_global`（另留 `credit_floor` = 两域较大者供旧客户端）。旧单值键 `credit_floor` 非 0 时自动迁移到两域（老配置升级语义不突变），已废弃
 - **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
-- **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：`/admin/accounts/{uid}/{disable,enable,revive}` 端点 + `cmd/acct` CLI（默认关闭，`admin.enabled` 显式开启）
+- **账号临时停用 / 恢复** — 运维可把某个号临时摘出选号池、观察后再放回，不必删凭证（issue #138/#118）。语义是「对话流量摘除」而非「账号冻结」：停用期间签到、token 保活、排程任务照常执行，账号仍在池里、状态照常透出。与系统自动禁用是**两个独立状态位**（`manual_disabled` / `disabled`），各自清除、都清空才回到选号池——避免运维意图被签到解冻等自动复活路径意外解除；停用状态随池状态落盘，重启保留。入口：面板「账号」页的**停用 / 启用 / 复活**按钮（面板与网关同进程，直调账号池；`/admin/accounts/*` HTTP 端点已下线，无 `admin.enabled` 开关，也不存在用 api_key 从外部摘号的路子）
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复。落盘周期由 `pool.state_flush` 控制（默认 `30m`，`"0"` 关闭后台落盘）；**结构性变更**（手动停用、账号剔除）绕过周期立即落盘，故运维意图不受周期影响。启动时自动刷新一遍全量账号余额（含 global 域；只查余额、不触发签到），使重启后显示的积分即为权威值
 - **重启后的积分** — 面板「账号」页的积分优先显示实时查询值（内存缓存，重启即失效），回落到 `state.json` 里网关侧的值。该值在**启动刷新**与**每日签到**（`schedule.checkin_hours`）时被权威余额覆盖，两次之间按请求消耗递减估算——故不点「积分」按钮时看到的也是新鲜值，而非上次签到的陈旧快照
 
@@ -204,7 +204,6 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 - 积分日报：`./credit.sh`（美化 / `-json`，realm 感知双域）
 - 手动签到：`./signin.sh`（批量、幂等不重复计）
-- 账号停用 / 恢复：`./acct.sh list | disable <uid> [原因] | enable <uid> | revive <uid>`（需 `admin.enabled`，走网关管理端点）
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认（`custom`/`append` 模式生效）
 
@@ -398,12 +397,8 @@ curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
 # 账号状态（汇总 + 每账号详情，含 disabled / manual_disabled 双位）
 curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
 
-# 临时停用一个账号（需 config 里 admin.enabled = true）
-curl -s -X POST http://localhost:7863/admin/accounts/<uid>/disable \
-  -H "Authorization: Bearer your-api-key" -H "Content-Type: application/json" \
-  -d '{"reason":"观察几天"}'
-# 或用 CLI（自动从 config.json 读网关地址与 key）
-./acct.sh list && ./acct.sh disable <uid> 观察几天 && ./acct.sh enable <uid>
+# 停用 / 启用 / 复活账号：只在面板「账号」页操作（进程内直调账号池）。
+# 网关侧没有对应的 HTTP 端点——/admin/accounts/* 一律 404，api_key 摘不动号。
 
 # 流式聊天
 curl -sN http://localhost:7863/v1/chat/completions \

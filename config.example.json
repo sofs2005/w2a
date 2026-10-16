@@ -39,9 +39,6 @@
     "cat_enabled": true,
     "growth_enabled": true
   },
-  "admin": {
-    "enabled": false
-  },
   "global": {
     "enabled": true,
     "chat_base": "",
