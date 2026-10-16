@@ -290,9 +290,9 @@ export default function Accounts({ session }: { session: SessionInfo }) {
               placeholder="搜索 uid / 昵称…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              style={{ width: 190 }}
+              style={{ width: 160 }}
             />
-            <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} style={{ width: 150 }}>
+            <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} style={{ width: 130 }}>
               <option value="all">全部</option>
               <option value="healthy">仅正常</option>
               <option value="cooling">仅冷却中</option>
@@ -333,7 +333,8 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                   <th className="num">成功 / 失败</th>
                   <th>Token 有效期</th>
                   <th>最近活动</th>
-                  <th style={{ minWidth: 210 }}>操作</th>
+                  {/* 下限只保证按钮不至于挤成一列：窄屏上 210 会让整张表被迫多滑很远。 */}
+                  <th style={{ minWidth: 150 }}>操作</th>
                 </tr>
               </thead>
               <tbody>

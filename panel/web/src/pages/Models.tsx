@@ -339,7 +339,7 @@ export default function Models() {
               onChange={(e) => setQ(e.target.value)}
             />
           </div>
-          <div className="shrink" style={{ minWidth: 160 }}>
+          <div className="shrink" style={{ minWidth: 140 }}>
             <select value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
               <option value="rate-asc">倍率从低到高</option>
               <option value="rate-desc">倍率从高到低</option>

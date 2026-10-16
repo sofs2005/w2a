@@ -269,71 +269,75 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           </span>
         </div>
 
-        <table className="table">
-          <thead>
-            <tr>
-              <th style={{ width: '30%' }}>
-                对外模型名
-                <span className="hint">（共 {catalog.all.length} 个）</span>
-              </th>
-              <th style={{ width: '28%' }}>
-                国内（cn）真实名
-                <span className="hint">（共 {catalog.byRealm.cn.length} 个）</span>
-              </th>
-              <th style={{ width: '28%' }}>
-                国际（global）真实名
-                <span className="hint">（共 {catalog.byRealm.global.length} 个）</span>
-              </th>
-              <th style={{ width: 70 }} />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, idx) => (
-              <tr key={idx}>
-                <td>
-                  <SuggestInput
-                    value={row.name}
-                    onChange={(v) => update(idx, { name: v })}
-                    options={catalog.all}
-                    placeholder="my-model"
-                    disabled={writeDisabled}
-                    ariaLabel="对外模型名"
-                  />
-                </td>
-                <td>
-                  <SuggestInput
-                    value={row.cn}
-                    onChange={(v) => update(idx, { cn: v })}
-                    options={catalog.byRealm.cn}
-                    placeholder="留空 = 国内无此模型"
-                    disabled={writeDisabled}
-                    ariaLabel="国内真实模型名"
-                  />
-                </td>
-                <td>
-                  <SuggestInput
-                    value={row.global}
-                    onChange={(v) => update(idx, { global: v })}
-                    options={catalog.byRealm.global}
-                    placeholder="留空 = 国际无此模型"
-                    disabled={writeDisabled}
-                    ariaLabel="国际真实模型名"
-                  />
-                </td>
-                <td>
-                  <button
-                    className="btn btn-sm btn-ghost"
-                    title="删除该行"
-                    onClick={() => removeRow(idx)}
-                    disabled={writeDisabled}
-                  >
-                    <X size={13} />
-                  </button>
-                </td>
+        {/* 这张表是本页唯一没用 .table-wrap 包的：四列在窄屏合计约 570px，
+            没有 overflow-x:auto 兜底就会把整页顶出横向滚动条。 */}
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th style={{ width: '30%' }}>
+                  对外模型名
+                  <span className="hint">（共 {catalog.all.length} 个）</span>
+                </th>
+                <th style={{ width: '28%' }}>
+                  国内（cn）真实名
+                  <span className="hint">（共 {catalog.byRealm.cn.length} 个）</span>
+                </th>
+                <th style={{ width: '28%' }}>
+                  国际（global）真实名
+                  <span className="hint">（共 {catalog.byRealm.global.length} 个）</span>
+                </th>
+                <th style={{ width: 70 }} />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((row, idx) => (
+                <tr key={idx}>
+                  <td>
+                    <SuggestInput
+                      value={row.name}
+                      onChange={(v) => update(idx, { name: v })}
+                      options={catalog.all}
+                      placeholder="my-model"
+                      disabled={writeDisabled}
+                      ariaLabel="对外模型名"
+                    />
+                  </td>
+                  <td>
+                    <SuggestInput
+                      value={row.cn}
+                      onChange={(v) => update(idx, { cn: v })}
+                      options={catalog.byRealm.cn}
+                      placeholder="留空 = 国内无此模型"
+                      disabled={writeDisabled}
+                      ariaLabel="国内真实模型名"
+                    />
+                  </td>
+                  <td>
+                    <SuggestInput
+                      value={row.global}
+                      onChange={(v) => update(idx, { global: v })}
+                      options={catalog.byRealm.global}
+                      placeholder="留空 = 国际无此模型"
+                      disabled={writeDisabled}
+                      ariaLabel="国际真实模型名"
+                    />
+                  </td>
+                  <td>
+                    <button
+                      className="btn btn-sm btn-ghost"
+                      title="删除该行"
+                      onClick={() => removeRow(idx)}
+                      disabled={writeDisabled}
+                    >
+                      <X size={13} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
         <div className="page-actions" style={{ marginTop: 13 }}>
           <button className="btn" onClick={addRow} disabled={writeDisabled}>

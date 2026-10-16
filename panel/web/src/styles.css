@@ -307,10 +307,24 @@ a:hover {
   color: var(--text-faint);
   line-height: 1.65;
 }
+/* 主题切换 + 窄屏退出按钮。宽屏（.sidebar 纵向列）下就是普通的两块纵向排布；
+   窄屏改为钉在横向滚动带右缘，见媒体查询里的 .nav-tail。 */
+.nav-tail {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+}
 /* 主题切换在 .nav-foot 之上，且不参与窄屏对 .nav-foot 的整体隐藏。 */
 .nav-theme {
   margin-top: 10px;
   flex: 0 0 auto;
+}
+/* 窄屏专用的退出登录入口：宽屏下 .nav-foot 里有完整按钮，这个不显示。
+   必须写成 .btn.nav-logout-mobile 双类——单类的 .nav-logout-mobile 与
+   第 446 行的 .btn { display:inline-flex } 特异性相同，而 .btn 在后面，
+   会把这里的 none 覆盖掉，导致宽屏也多出一个退出按钮。 */
+.btn.nav-logout-mobile {
+  display: none;
 }
 
 .main {
@@ -513,12 +527,17 @@ a:hover {
   font-size: 12.5px;
   color: var(--text-dim);
   margin-bottom: 5px;
+  /* label 里带配置键名（如 pool.breaker_cooldown_max），是一整个长 token。
+     窄屏两列并排时它撑不动 flex 子项的 min-content，会把整页顶出横向滚动条。
+     anywhere 连 min-content 一起放宽，让它必要时从中间断开。 */
+  overflow-wrap: anywhere;
 }
 .field .desc {
   font-size: 11.5px;
   color: var(--text-faint);
   margin-top: 4px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 input[type='text'],
@@ -631,6 +650,8 @@ textarea::placeholder {
 
 .table-wrap {
   overflow-x: auto;
+  /* iOS 上让宽表横滑带惯性，否则滑动很滞涩 */
+  -webkit-overflow-scrolling: touch;
   margin: 0 -16px -14px;
   padding: 0 16px 4px;
 }
@@ -913,7 +934,8 @@ tbody tr.stat-group-end:last-child td {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px;
-  height: 460px;
+  /* 窄屏上 460px 几乎占满一屏，按视口比例收缩 */
+  height: min(460px, 60vh);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1205,14 +1227,33 @@ tbody tr.stat-group-end:last-child td {
   .nav-foot {
     display: none;
   }
+  /* 钉在滚动带右缘，免得被导航项推到滚动区最右端（375px 下约 800px 外）。
+     背景色与会话侧栏同色，否则导航项会从下面透出来。 */
+  .nav-tail {
+    position: sticky;
+    right: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-elev);
+    padding-left: 8px;
+  }
+  .nav-theme {
+    margin: 0;
+    display: flex;
+    gap: 3px;
+  }
   /* 窄屏侧栏变成横向滚动条，三个带字的按钮太占宽度：只留图标。
      仅限侧栏那份——登录页那份没有别的入口，去掉文字就只剩三个难懂的符号。 */
-  .nav-theme {
-    margin: 0 0 0 6px;
-  }
   .nav-theme .theme-switch button {
     font-size: 0;
     gap: 0;
+    padding: 5px;
+  }
+  /* .nav-foot 被整体隐藏后，退出登录就只剩这个图标按钮了：不能省。
+     双类与上面的默认隐藏规则对称，特异性压过 .btn。 */
+  .btn.nav-logout-mobile {
+    display: inline-flex;
     padding: 5px;
   }
   .main {
@@ -1220,5 +1261,42 @@ tbody tr.stat-group-end:last-child td {
   }
   .table-wrap {
     margin: 0 -18px -16px;
+  }
+}
+
+/* 手机竖屏：760px 那套「胶囊条 + 横滑」仍然成立，只是留白需要再收一档，
+   否则弹窗和表格的可视宽度会被 padding 吃掉太多。 */
+@media (max-width: 480px) {
+  .modal-backdrop {
+    padding: 12px;
+  }
+  .modal {
+    padding: 14px;
+    /* dvh 跟随移动端地址栏伸缩，vh 在旧实现里会被地址栏高度骗到 */
+    max-height: calc(100dvh - 24px);
+  }
+  .modal-head {
+    margin-bottom: 12px;
+  }
+  .modal-foot {
+    margin-top: 12px;
+    padding-top: 12px;
+  }
+  th,
+  td {
+    padding: 5px 7px;
+  }
+  table {
+    font-size: 12px;
+  }
+  .main {
+    padding: 12px 10px 32px;
+  }
+  .card {
+    padding: 12px;
+  }
+  .table-wrap {
+    margin: 0 -12px -12px;
+    padding: 0 12px 4px;
   }
 }

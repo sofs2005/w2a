@@ -11,6 +11,7 @@ import {
   LayoutDashboard,
   LineChart,
   MessageSquare,
+  Power,
   Server,
   Settings,
   UserPlus,
@@ -140,10 +141,24 @@ function Shell({
           </NavLink>
         ))}
         <div className="nav-spacer" />
-        {/* 主题切换放在 .nav-foot 之外（它之上）：那个块在窄屏被整体隐藏，
-            主题切换不该跟着消失。 */}
-        <div className="nav-theme">
-          <ThemeSwitch />
+        {/* 窄屏侧栏是一条横向滚动带，导航项总宽远超屏宽：主题切换和退出登录
+            如果按普通流排在末尾，会被推到滚动区最右端（375px 下离屏约 800px），
+            用户得横滑很久才够得着——等于没有入口。所以这两个包成 .nav-tail，
+            窄屏下 sticky 钉在带宽右缘，宽屏下退回普通纵向排布。 */}
+        <div className="nav-tail">
+          <div className="nav-theme">
+            <ThemeSwitch />
+          </div>
+          {/* 窄屏下 .nav-foot 整体隐藏，退出登录就靠这个图标按钮兜底。
+              只读模式另有顶部 Alert 提示，这里不再重复放徽标。 */}
+          <button
+            className="btn btn-sm nav-logout-mobile"
+            onClick={onLogout}
+            title={`退出登录（${session.username}）`}
+            aria-label="退出登录"
+          >
+            <Power size={14} />
+          </button>
         </div>
         <div className="nav-foot">
           <div style={{ marginBottom: 7, wordBreak: 'break-all', fontFamily: 'var(--mono)' }}>
