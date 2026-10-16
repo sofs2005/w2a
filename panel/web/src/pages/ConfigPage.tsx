@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ConfigMeta, SessionInfo } from '../types'
 import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import { RefreshCw, Save, Undo2 } from '../icons'
 
 type Doc = Record<string, unknown>
 
@@ -200,12 +201,12 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
           <h1>网关配置</h1>
           <p>
             在线编辑 <span className="mono">{meta?.path || 'config.json'}</span>
-            {meta?.mod_time && <span className="text-faint"> · 最后修改 {fmtISO(meta.mod_time)}</span>}
           </p>
         </div>
         <div className="page-actions">
+          {meta?.mod_time && <span className="page-meta">最后修改 {fmtISO(meta.mod_time)}</span>}
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 重新读取
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 重新读取
           </button>
           {meta?.backup_path && (
             <button
@@ -214,7 +215,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
               disabled={writeDisabled || !session.dangerous_ops}
               title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '从首次备份恢复'}
             >
-              ↩️ 恢复备份
+              <Undo2 size={14} /> 恢复备份
             </button>
           )}
         </div>
@@ -722,7 +723,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
 
           <div className="page-actions">
             <button className="btn btn-primary" onClick={() => void saveForm()} disabled={saving || writeDisabled}>
-              {saving ? <Spinner /> : '💾'} 保存配置
+              {saving ? <Spinner /> : <Save size={14} />} 保存配置
             </button>
             <button className="btn" onClick={() => void load()} disabled={saving}>
               放弃修改
@@ -750,7 +751,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
           />
           <div className="page-actions" style={{ marginTop: 13 }}>
             <button className="btn btn-primary" onClick={() => void saveJSON()} disabled={saving || writeDisabled}>
-              {saving ? <Spinner /> : '💾'} 保存配置
+              {saving ? <Spinner /> : <Save size={14} />} 保存配置
             </button>
             <button className="btn" onClick={() => setJsonText(JSON.stringify(doc ?? {}, null, 2))}>
               还原为已加载内容

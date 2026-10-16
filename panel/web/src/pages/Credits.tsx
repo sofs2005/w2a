@@ -11,6 +11,7 @@ import { api } from '../api'
 import type { Account, CreditPack } from '../types'
 import { REALMS, accountRealm, realmLabel, type Realm } from '../realm'
 import { Alert, Badge, Empty, Spinner, displayName, fmtNum, fmtTime, upstreamSec } from '../ui'
+import { Coins, RefreshCw } from '../icons'
 
 type SortKey = 'expire-asc' | 'remain-desc' | 'name'
 type RealmFilter = 'all' | Realm
@@ -211,20 +212,15 @@ export default function Credits() {
       <div className="page-head">
         <div>
           <h1>积分到期</h1>
-          <p>
-            各账号剩余积分与积分包作废时间
-            <span className="text-faint">
-              {' '}
-              · 积分是「上次查询时刻」的快照，不是实时值 —— 点右侧按钮去上游查一遍
-            </span>
-          </p>
+          <p>各账号剩余积分与积分包作废时间</p>
         </div>
         <div className="page-actions">
+          <span className="page-meta">积分为上次查询时刻的快照，非实时值</span>
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 重新加载
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 重新加载
           </button>
           <button className="btn btn-primary" onClick={() => void refreshAll()} disabled={refreshing}>
-            {refreshing ? <Spinner /> : '💎'} 刷新全部积分{progress ? `（${progress}）` : ''}
+            {refreshing ? <Spinner /> : <Coins size={14} />} 刷新全部积分{progress ? `（${progress}）` : ''}
           </button>
         </div>
       </div>
@@ -320,7 +316,7 @@ export default function Credits() {
         {loading && accounts.length === 0 ? (
           <Spinner label="正在加载账号…" />
         ) : rows.length === 0 ? (
-          <Empty>
+          <Empty icon={<Coins size={30} />}>
             没有匹配的账号。
             {q || onlySoon || onlyUnqueried || realm !== 'all' ? '（试试清掉筛选条件）' : ''}
           </Empty>

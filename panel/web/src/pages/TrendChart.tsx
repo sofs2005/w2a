@@ -172,7 +172,7 @@ export default function TrendChart({
           {/* 数据 */}
           {isLine ? (
             <>
-              <path d={areaPath} fill="rgba(79,140,255,0.14)" stroke="none" />
+              <path d={areaPath} fill="var(--accent-bg)" stroke="none" />
               <path d={linePath} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
               {n <= 60 &&
                 points.map((pt, i) => (

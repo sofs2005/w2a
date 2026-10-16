@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>WorkBuddy 网关控制台</title>
+    <script>
+      // 主题解析必须在首帧之前同步执行：放到 React 里会在挂载后才写 data-theme，
+      // 中间那一帧就闪错主题。不写 data-theme = 跟随系统（交给 CSS 的 media 查询）。
+      ;(function () {
+        try {
+          var m = localStorage.getItem('wb-theme')
+          if (m === 'dark' || m === 'light') document.documentElement.dataset.theme = m
+        } catch (e) {
+          // 隐私模式下 localStorage 可能抛异常；忽略即退化为跟随系统。
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { TaskView } from '../types'
 import { Alert, Modal, Spinner } from '../ui'
+import { CheckCircle2 } from '../icons'
 
 export default function TaskProgress({
   taskId,
@@ -68,9 +69,15 @@ export default function TaskProgress({
 
       {task && (
         <>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 12.5 }}>
             <span>
-              {task.running ? <Spinner label="执行中" /> : <span className="text-ok">✅ 已完成</span>}
+              {task.running ? (
+                <Spinner label="执行中" />
+              ) : (
+                <span className="text-ok" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <CheckCircle2 size={14} /> 已完成
+                </span>
+              )}
             </span>
             <span className="text-dim">
               {task.done} / {task.total} · 成功 {task.ok} · 失败 {task.failed}

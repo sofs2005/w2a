@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api'
 import type { SessionInfo } from '../types'
-import { Alert, Spinner } from '../ui'
+import { Alert, Spinner, ThemeSwitch } from '../ui'
 
 export default function Login({
   info,
@@ -36,6 +36,10 @@ export default function Login({
 
   return (
     <div className="login-wrap">
+      {/* 固定在右上角：不进卡片，避免「主题」这个外围选项挤占登录表单的视觉重心。 */}
+      <div className="login-theme">
+        <ThemeSwitch />
+      </div>
       <div className="login-card">
         <div className="login-logo">WB</div>
         <h1>WorkBuddy 控制台</h1>
@@ -78,14 +82,11 @@ export default function Login({
         </form>
 
         {info?.using_default_password && (
-          <div className="alert alert-info" style={{ marginTop: 16, marginBottom: 0, fontSize: 12.5 }}>
-            <span className="alert-icon">ℹ️</span>
-            <div>
-              当前使用默认口令 <span className="mono">admin / workbuddy</span>。首次登录后请修改：在服务端配置文件中设置
-              <span className="mono"> ui.username / ui.password</span>，或设置环境变量
-              <span className="mono"> WBGUI_PASSWORD</span>。
-            </div>
-          </div>
+          <Alert kind="info">
+            当前使用默认口令 <span className="mono">admin / workbuddy</span>。首次登录后请修改：在服务端配置文件中设置
+            <span className="mono"> ui.username / ui.password</span>，或设置环境变量
+            <span className="mono"> WBGUI_PASSWORD</span>。
+          </Alert>
         )}
       </div>
     </div>

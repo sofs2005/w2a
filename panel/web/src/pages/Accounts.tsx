@@ -18,6 +18,7 @@ import {
   Spinner,
   statusBadge,
 } from '../ui'
+import { CalendarCheck, Coins, Download, Key, Plane, Plus, RefreshCw, UserPlus } from '../icons'
 import TaskProgress from './TaskProgress'
 import { accountRealm, realmLabel, type Realm } from '../realm'
 
@@ -209,13 +210,13 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 刷新
           </button>
           <button className="btn" onClick={() => setShowImport(true)} disabled={writeDisabled} title={writeDisabled ? '只读模式' : ''}>
-            📥 导入凭证
+            <Download size={14} /> 导入凭证
           </button>
           <Link className="btn btn-primary" to="/login">
-            ➕ 添加账号
+            <Plus size={14} /> 添加账号
           </Link>
         </div>
       </div>
@@ -255,16 +256,16 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void runBatch('checkin')} disabled={writeDisabled || accounts.length === 0}>
-            ✅ 批量签到
+            <CalendarCheck size={14} /> 批量签到
           </button>
           <button className="btn" onClick={() => void runBatch('refresh')} disabled={writeDisabled || accounts.length === 0}>
-            🔑 批量刷新 Token
+            <Key size={14} /> 批量刷新 Token
           </button>
           <button className="btn" onClick={() => void runBatch('travel')} disabled={writeDisabled || accounts.length === 0}>
-            🐱 批量猫猫旅行
+            <Plane size={14} /> 批量猫猫旅行
           </button>
           <button className="btn" onClick={() => void runBatch('credits')} disabled={accounts.length === 0}>
-            💰 批量查积分
+            <Coins size={14} /> 批量查积分
           </button>
           {selected.size > 0 && (
             <button className="btn btn-ghost" onClick={() => setSelected(new Set())}>
@@ -304,13 +305,13 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         {loading && accounts.length === 0 ? (
           <Spinner label="加载中…" />
         ) : filtered.length === 0 ? (
-          <Empty>
+          <Empty icon={accounts.length === 0 ? <UserPlus size={30} /> : undefined}>
             {accounts.length === 0 ? (
               <>
                 还没有任何账号。
-                <div style={{ marginTop: 10 }}>
+                <div className="empty-actions" style={{ marginTop: 10 }}>
                   <Link className="btn btn-primary btn-sm" to="/login">
-                    ➕ 添加第一个账号
+                    <UserPlus size={13} /> 添加第一个账号
                   </Link>
                 </div>
               </>
@@ -647,7 +648,13 @@ function AccountDetail({ uid, onClose }: { uid: string; onClose: () => void }) {
             <dt>Token 过期</dt>
             <dd>{fmtTime(a.expires_at)}</dd>
             <dt>Refresh Token</dt>
-            <dd>{a.has_refresh_token ? '✅ 存在' : '❌ 缺失（无法刷新，需重登）'}</dd>
+            <dd>
+              {a.has_refresh_token ? (
+                <span className="text-ok">存在</span>
+              ) : (
+                <span className="text-danger">缺失（无法刷新，需重登）</span>
+              )}
+            </dd>
             <dt>网关状态</dt>
             <dd>
               <Badge cls={statusBadge(a.status).cls}>{statusBadge(a.status).text}</Badge>

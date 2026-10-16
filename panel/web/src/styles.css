@@ -1,31 +1,187 @@
 /* 全局样式：深色为主、单文件、无 UI 框架依赖，保证产物小且可控。 */
 
+/* ── 主题 ───────────────────────────────────────────────────────────────
+   三态：跟随系统（默认，无 data-theme）/ 深色 / 浅色，由 index.html 的内联脚本
+   在首帧前把 localStorage('wb-theme') 写到 <html data-theme>。
+   下面 :root 是**深色默认值**，也是「跟随系统且系统为深色」时的取值。
+   浅色值需要在两处重复：手动选浅色（[data-theme='light']）和跟随系统浅色
+   （media 查询）——单文件 CSS 无法把一组声明同时挂到两个选择器上，改色时
+   **两处必须同步**。                                                            */
+
 :root {
-  /* 整站是深色主题，但原生控件（下拉候选弹层、日期选择器、滚动条）默认按浅色渲染，
-     除非显式声明 color-scheme —— 否则 <datalist> 弹层是白底黑字，与整站格格不入。
-     color-scheme 可继承，声明在 :root 即覆盖全部控件。 */
+  /* 原生控件（下拉候选、日期选择器、滚动条）按 color-scheme 渲染，它可继承，
+     声明在 :root 即覆盖全部控件；切主题时必须跟着改，否则亮色下滚动条还是黑的。 */
   color-scheme: dark;
 
-  --bg: #0f1117;
-  --bg-elev: #171a23;
-  --bg-elev2: #1d212c;
-  --border: #262b38;
-  --border-soft: #20242f;
-  --text: #e6e8ee;
-  --text-dim: #98a0b3;
-  --text-faint: #6b7383;
+  /* 色板对齐 GitHub Dark：底色略降蓝调，强调色饱和度收敛，避免「AI 默认配色」观感。 */
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-elev2: #21262d;
+  --border: #30363d;
+  --border-soft: #21262d;
+  --text: #e6edf3;
+  --text-dim: #9198a1;
+  /* 三级文字阶梯，对比度实测（在 --bg #0d1117 上）：text 16.0:1 / dim 6.5:1 / faint 5.1:1。
+     faint 取 5.1:1 而非 GitHub 原生的 #6e7681（4.1:1）：表头 th、字段说明、空状态提示
+     都用它，都是要读的内容，得守住 AA 的 4.5:1。 */
+  --text-faint: #7d8590;
 
-  --accent: #4f8cff;
-  --accent-hover: #3d7bf0;
+  --accent: #2f81f7;
+  --accent-hover: #1f6feb;
   --ok: #3fb950;
+  /* 这三个都当**文字色**用（.text-ok / .text-warn / .text-danger），所以取 GitHub 的
+     *-fg 级色，而非 *-emphasis（#9e6a03 只有 4.08:1，达不到 AA）。告警条的「低调」
+     靠下面的 --warn-bg / --warn-border，不靠压低文字亮度。 */
   --warn: #d29922;
   --danger: #f85149;
   --purple: #a371f7;
 
-  --radius: 10px;
-  --radius-sm: 7px;
+  /* 语义底色：告警条/徽章的填充与描边。集中在这里，避免各页各写一套透明色
+     导致饱和度不齐（旧版糖果色告警条就是这么来的）。 */
+  --ok-bg: rgba(63, 185, 80, 0.1);
+  --ok-border: rgba(63, 185, 80, 0.35);
+  --warn-bg: rgba(187, 128, 9, 0.15);
+  --warn-border: rgba(187, 128, 9, 0.4);
+  --danger-bg: rgba(248, 81, 73, 0.1);
+  --danger-border: rgba(248, 81, 73, 0.4);
+  --accent-bg: rgba(47, 129, 247, 0.1);
+  --accent-border: rgba(47, 129, 247, 0.4);
+  --purple-bg: rgba(163, 113, 247, 0.18);
+
+  /* 「着色面上的强调色」：坐在 --*-bg 浅色底上的文字/图标。深色主题下要比 --*-fg 更亮
+     （底色本身就有色，暗字看不清）；浅色主题下反过来要更深。这是亮色化最容易漏的一层。 */
+  --accent-on-bg: #a9c8ff;
+  --ok-on-bg: #56d364;
+  --warn-on-bg: #d29922;
+  --danger-on-bg: #ff7b72;
+  --purple-on-bg: #c39bff;
+
+  /* 结构色：交互态、遮罩、阴影、轨道——与主题明暗强相关，不能只写死一个值。 */
+  --btn-hover-bg: #2d333b;
+  --btn-hover-border: #444c56;
+  --on-accent: #fff;
+  --overlay: rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --row-hover: rgba(255, 255, 255, 0.03);
+  --badge-dim-bg: rgba(110, 118, 129, 0.12);
+  --badge-dim-border: rgba(110, 118, 129, 0.24);
+  --danger-bg-hover: rgba(248, 81, 73, 0.22);
+  --spinner-track: rgba(255, 255, 255, 0.22);
+
+  --radius: 8px;
+  --radius-sm: 6px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
+
+/* 亮色主题（GitHub Light）。两处同步：此处 + 下方 media 查询块。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-elev: #f6f8fa;
+  --bg-elev2: #eaeef2;
+  --border: #d0d7de;
+  --border-soft: #e5e9ee;
+  --text: #1f2328;
+  --text-dim: #59636e;
+  /* 同深色侧的理由：faint 用在表头、字段说明、空状态这些要读的地方，而它们常
+     落在 --bg-elev（侧栏、卡片底）上——#6e7781 在那里只有 4.27:1，达不到 AA。
+     压深到 #5c646e 后有 4.7:1，在 --bg 上是 5.5:1。 */
+  --text-faint: #5c646e;
+
+  /* 亮色下强调色一律取更深的 fg 级色：白底上 #3fb950 / #f85149 几乎看不见。 */
+  --accent: #0969da;
+  --accent-hover: #0550ae;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --danger: #cf222e;
+  --purple: #8250df;
+
+  --ok-bg: rgba(26, 127, 55, 0.1);
+  --ok-border: rgba(26, 127, 55, 0.35);
+  --warn-bg: rgba(154, 103, 0, 0.1);
+  --warn-border: rgba(154, 103, 0, 0.35);
+  --danger-bg: rgba(207, 34, 46, 0.08);
+  --danger-border: rgba(207, 34, 46, 0.35);
+  --accent-bg: rgba(9, 105, 218, 0.08);
+  --accent-border: rgba(9, 105, 218, 0.35);
+  --purple-bg: rgba(130, 80, 223, 0.1);
+
+  --accent-on-bg: #0550ae;
+  --ok-on-bg: #1a7f37;
+  --warn-on-bg: #9a6700;
+  --danger-on-bg: #cf222e;
+  --purple-on-bg: #8250df;
+
+  --btn-hover-bg: #eef1f4;
+  --btn-hover-border: #d0d7de;
+  --on-accent: #fff;
+  --overlay: rgba(31, 35, 40, 0.5);
+  --shadow-pop: 0 8px 24px rgba(140, 149, 159, 0.2);
+  --row-hover: rgba(31, 35, 40, 0.04);
+  --badge-dim-bg: rgba(110, 118, 129, 0.1);
+  --badge-dim-border: rgba(110, 118, 129, 0.22);
+  --danger-bg-hover: rgba(207, 34, 46, 0.16);
+  --spinner-track: rgba(31, 35, 40, 0.18);
+}
+
+/* 跟随系统 + 系统是浅色。放在 media 里，故「手动选深色」的 :root[data-theme='dark']
+   天然不会被它命中（有 data-theme='dark' 就不匹配 :not([data-theme='dark'])）。 */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+
+    --bg: #ffffff;
+    --bg-elev: #f6f8fa;
+    --bg-elev2: #eaeef2;
+    --border: #d0d7de;
+    --border-soft: #e5e9ee;
+    --text: #1f2328;
+    --text-dim: #59636e;
+    --text-faint: #5c646e;
+
+    --accent: #0969da;
+    --accent-hover: #0550ae;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --danger: #cf222e;
+    --purple: #8250df;
+
+    --ok-bg: rgba(26, 127, 55, 0.1);
+    --ok-border: rgba(26, 127, 55, 0.35);
+    --warn-bg: rgba(154, 103, 0, 0.1);
+    --warn-border: rgba(154, 103, 0, 0.35);
+    --danger-bg: rgba(207, 34, 46, 0.08);
+    --danger-border: rgba(207, 34, 46, 0.35);
+    --accent-bg: rgba(9, 105, 218, 0.08);
+    --accent-border: rgba(9, 105, 218, 0.35);
+    --purple-bg: rgba(130, 80, 223, 0.1);
+
+    --accent-on-bg: #0550ae;
+    --ok-on-bg: #1a7f37;
+    --warn-on-bg: #9a6700;
+    --danger-on-bg: #cf222e;
+    --purple-on-bg: #8250df;
+
+    --btn-hover-bg: #eef1f4;
+    --btn-hover-border: #d0d7de;
+    --on-accent: #fff;
+    --overlay: rgba(31, 35, 40, 0.5);
+    --shadow-pop: 0 8px 24px rgba(140, 149, 159, 0.2);
+    --row-hover: rgba(31, 35, 40, 0.04);
+    --badge-dim-bg: rgba(110, 118, 129, 0.1);
+    --badge-dim-border: rgba(110, 118, 129, 0.22);
+    --danger-bg-hover: rgba(207, 34, 46, 0.16);
+    --spinner-track: rgba(31, 35, 40, 0.18);
+  }
+}
+
+/* 手动选深色：显式声明一遍，确保在「系统浅色」时也不被上面的 media 影响
+   （media 块用 :not([data-theme='dark']) 已排除，这里是为语义完整兜底）。 */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
 
 * {
   box-sizing: border-box;
@@ -42,8 +198,8 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -63,14 +219,14 @@ a:hover {
 }
 
 .sidebar {
-  width: 216px;
-  flex: 0 0 216px;
+  width: 200px;
+  flex: 0 0 200px;
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
-  padding: 18px 12px;
+  padding: 14px 10px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -81,23 +237,26 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 6px 10px 16px;
+  padding: 4px 8px 14px;
 }
+/* logo 用中性灰底 + accent 字色，不用蓝紫渐变——那是最典型的「AI 默认审美」，
+   整站只有这一处装饰元素，去掉后工程感立现。 */
 .brand-dot {
   width: 26px;
   height: 26px;
-  border-radius: 7px;
-  background: linear-gradient(135deg, var(--accent), var(--purple));
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
   display: grid;
   place-items: center;
   font-weight: 700;
-  font-size: 13px;
-  color: #fff;
+  font-size: 12px;
+  color: var(--accent);
   flex: 0 0 auto;
 }
 .brand-text strong {
   display: block;
-  font-size: 14px;
+  font-size: 13.5px;
   letter-spacing: 0.2px;
 }
 .brand-text span {
@@ -109,10 +268,10 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 8px 11px;
+  padding: 6px 10px;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
-  font-size: 13.5px;
+  font-size: 13px;
   cursor: pointer;
   border: 1px solid transparent;
   background: none;
@@ -126,14 +285,15 @@ a:hover {
   text-decoration: none;
 }
 .nav-item.active {
-  background: rgba(79, 140, 255, 0.13);
-  color: #cfe0ff;
-  border-color: rgba(79, 140, 255, 0.3);
+  background: var(--accent-bg);
+  color: var(--accent-on-bg);
+  border-color: var(--accent-border);
 }
 .nav-icon {
-  width: 17px;
-  text-align: center;
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
   flex: 0 0 auto;
 }
 .nav-spacer {
@@ -143,15 +303,20 @@ a:hover {
   border-top: 1px solid var(--border-soft);
   padding-top: 10px;
   margin-top: 10px;
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--text-faint);
-  line-height: 1.7;
+  line-height: 1.65;
+}
+/* 主题切换在 .nav-foot 之上，且不参与窄屏对 .nav-foot 的整体隐藏。 */
+.nav-theme {
+  margin-top: 10px;
+  flex: 0 0 auto;
 }
 
 .main {
   flex: 1;
   min-width: 0;
-  padding: 22px 26px 56px;
+  padding: 20px 24px 56px;
 }
 
 .page-head {
@@ -160,17 +325,26 @@ a:hover {
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 .page-head h1 {
-  font-size: 19px;
+  font-size: 18px;
   margin: 0 0 3px;
   font-weight: 650;
 }
 .page-head p {
   margin: 0;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 12.5px;
+}
+/* 页头的元信息（更新时间、自动刷新周期）放这里，不塞进副标题——副标题只讲这页是干嘛的。 */
+.page-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 .page-actions {
   display: flex;
@@ -185,32 +359,32 @@ a:hover {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 16px 18px;
+  padding: 14px 16px;
 }
 .card + .card {
-  margin-top: 16px;
+  margin-top: 12px;
 }
 .card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 13px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
 }
 .card-head h2 {
-  font-size: 14.5px;
+  font-size: 14px;
   margin: 0;
   font-weight: 620;
 }
 .card-head .hint {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-faint);
 }
 
 .grid {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 .grid-stats {
   grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
@@ -225,18 +399,18 @@ a:hover {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 13px 15px;
+  padding: 12px 14px;
 }
 .stat-label {
   font-size: 11.5px;
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
 }
 .stat-value {
-  font-size: 24px;
-  font-weight: 660;
+  font-size: 23px;
+  font-weight: 620;
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
@@ -273,20 +447,20 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 13px;
+  padding: 6px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--bg-elev2);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12.5px;
   font-family: inherit;
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.12s, border-color 0.12s;
 }
 .btn:hover:not(:disabled) {
-  background: #252a37;
-  border-color: #333a4a;
+  background: var(--btn-hover-bg);
+  border-color: var(--btn-hover-border);
 }
 .btn:disabled {
   opacity: 0.45;
@@ -295,7 +469,7 @@ a:hover {
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 550;
 }
 .btn-primary:hover:not(:disabled) {
@@ -303,15 +477,15 @@ a:hover {
   border-color: var(--accent-hover);
 }
 .btn-danger {
-  background: rgba(248, 81, 73, 0.14);
-  border-color: rgba(248, 81, 73, 0.42);
-  color: #ff9d97;
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-on-bg);
 }
 .btn-danger:hover:not(:disabled) {
-  background: rgba(248, 81, 73, 0.24);
+  background: var(--danger-bg-hover);
 }
 .btn-sm {
-  padding: 4px 9px;
+  padding: 3px 9px;
   font-size: 12px;
 }
 .btn-ghost {
@@ -322,6 +496,11 @@ a:hover {
 .btn-ghost:hover:not(:disabled) {
   background: var(--bg-elev2);
   color: var(--text);
+}
+
+/* 图标固定不参与 flex 伸缩（宽度由图标自身的 size 属性决定）。 */
+.btn svg {
+  flex: 0 0 auto;
 }
 
 /* ── 表单 ───────────────────────────────────────────── */
@@ -348,10 +527,10 @@ input[type='number'],
 select,
 textarea {
   width: 100%;
-  padding: 7px 10px;
+  padding: 6px 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: #12151d;
+  background: var(--bg);
   color: var(--text);
   font-size: 13px;
   font-family: inherit;
@@ -368,17 +547,20 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.14);
+  /* 2px 的实色圈比 3px 的柔光更「工具」，也更贴近 GitHub 的聚焦样式。 */
+  box-shadow: 0 0 0 2px var(--accent-bg);
 }
 input::placeholder,
 textarea::placeholder {
-  color: #545b6b;
+  color: var(--text-faint);
 }
 
 .row {
   display: flex;
   gap: 10px;
-  align-items: flex-end;
+  /* 顶对齐而非 flex-end：同一行两列的 label/desc 行数常常不等（如「签到小时」2 行说明、
+     "猫猫旅行" 1 行），底部对齐会把两列的输入框顶到不同高度。 */
+  align-items: flex-start;
   flex-wrap: wrap;
 }
 .row > * {
@@ -403,7 +585,7 @@ textarea::placeholder {
   background: var(--bg-elev2);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-pop);
 }
 .suggest-item {
   padding: 5px 9px;
@@ -417,8 +599,8 @@ textarea::placeholder {
   white-space: nowrap;
 }
 .suggest-item.active {
-  background: rgba(79, 140, 255, 0.18);
-  color: #a9c8ff;
+  background: var(--accent-bg);
+  color: var(--accent-on-bg);
 }
 .suggest-empty {
   padding: 6px 9px;
@@ -449,13 +631,13 @@ textarea::placeholder {
 
 .table-wrap {
   overflow-x: auto;
-  margin: 0 -18px -16px;
-  padding: 0 18px 4px;
+  margin: 0 -16px -14px;
+  padding: 0 16px 4px;
 }
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 th {
   text-align: left;
@@ -464,12 +646,12 @@ th {
   color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 td {
-  padding: 10px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border-soft);
   vertical-align: middle;
 }
@@ -477,7 +659,7 @@ tbody tr:last-child td {
   border-bottom: none;
 }
 tbody tr:hover {
-  background: rgba(255, 255, 255, 0.017);
+  background: var(--row-hover);
 }
 .num {
   font-variant-numeric: tabular-nums;
@@ -526,24 +708,24 @@ tbody tr.stat-group-end:last-child td {
   border: 1px solid transparent;
 }
 .badge-ok {
-  background: rgba(63, 185, 80, 0.14);
-  color: #56d364;
-  border-color: rgba(63, 185, 80, 0.3);
+  background: var(--ok-bg);
+  color: var(--ok-on-bg);
+  border-color: var(--ok-border);
 }
 .badge-warn {
-  background: rgba(210, 153, 34, 0.14);
-  color: #e3b341;
-  border-color: rgba(210, 153, 34, 0.3);
+  background: var(--warn-bg);
+  color: var(--warn-on-bg);
+  border-color: var(--warn-border);
 }
 .badge-danger {
-  background: rgba(248, 81, 73, 0.14);
-  color: #ff7b72;
-  border-color: rgba(248, 81, 73, 0.3);
+  background: var(--danger-bg);
+  color: var(--danger-on-bg);
+  border-color: var(--danger-border);
 }
 .badge-dim {
-  background: rgba(152, 160, 179, 0.12);
+  background: var(--badge-dim-bg);
   color: var(--text-dim);
-  border-color: rgba(152, 160, 179, 0.24);
+  border-color: var(--badge-dim-border);
 }
 
 /* 只读徽标云（模型别名页的「两域同名」清单）：条目多时需要自动换行而非撑破卡片。 */
@@ -558,9 +740,9 @@ tbody tr.stat-group-end:last-child td {
 }
 
 .badge-accent {
-  background: rgba(79, 140, 255, 0.14);
-  color: #7fb0ff;
-  border-color: rgba(79, 140, 255, 0.3);
+  background: var(--accent-bg);
+  color: var(--accent-on-bg);
+  border-color: var(--accent-border);
 }
 .badge-dot {
   width: 6px;
@@ -575,35 +757,52 @@ tbody tr.stat-group-end:last-child td {
 .alert {
   display: flex;
   gap: 10px;
-  padding: 11px 14px;
+  padding: 10px 13px;
   border-radius: var(--radius-sm);
-  font-size: 13px;
-  margin-bottom: 14px;
+  font-size: 12.5px;
+  margin-bottom: 12px;
   border: 1px solid;
   line-height: 1.6;
 }
+/* 正文用中性色、只有图标和左边线着色：旧版把整条文字也染成糖果色，面积一大就显廉价。 */
 .alert-error {
-  background: rgba(248, 81, 73, 0.09);
-  border-color: rgba(248, 81, 73, 0.32);
-  color: #ffa9a3;
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--text);
 }
 .alert-warn {
-  background: rgba(210, 153, 34, 0.09);
-  border-color: rgba(210, 153, 34, 0.32);
-  color: #e8c46a;
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--text);
 }
 .alert-ok {
-  background: rgba(63, 185, 80, 0.09);
-  border-color: rgba(63, 185, 80, 0.32);
-  color: #7ee787;
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--text);
 }
 .alert-info {
-  background: rgba(79, 140, 255, 0.08);
-  border-color: rgba(79, 140, 255, 0.3);
-  color: #a8c8ff;
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  color: var(--text);
+}
+.alert-error .alert-icon {
+  color: var(--danger-on-bg);
+}
+.alert-warn .alert-icon {
+  color: var(--warn-on-bg);
+}
+.alert-ok .alert-icon {
+  color: var(--ok-on-bg);
+}
+.alert-info .alert-icon {
+  color: var(--accent);
 }
 .alert-icon {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  /* 与首行文字基线对齐（正文 12.5px × 1.6 行高 ≈ 20px，图标 15px）。 */
+  height: 20px;
 }
 
 /* ── 登录页 ─────────────────────────────────────────── */
@@ -614,12 +813,19 @@ tbody tr.stat-group-end:last-child td {
   place-items: center;
   padding: 24px;
 }
+/* 脱离文档流：.login-wrap 是 grid + place-items:center，多一个子元素会把卡片挤偏。 */
+.login-theme {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 1;
+}
 .login-card {
   width: 100%;
   max-width: 372px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--radius);
   padding: 28px 26px;
 }
 .login-card h1 {
@@ -633,17 +839,19 @@ tbody tr.stat-group-end:last-child td {
   font-size: 12.5px;
   margin-bottom: 22px;
 }
+/* 与侧栏 .brand-dot 同一套处理：中性底 + accent 字色，不用渐变。 */
 .login-logo {
   width: 46px;
   height: 46px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, var(--accent), var(--purple));
+  border-radius: var(--radius);
+  background: var(--bg-elev2);
+  border: 1px solid var(--border);
   display: grid;
   place-items: center;
   margin: 0 auto 14px;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
-  color: #fff;
+  color: var(--accent);
 }
 
 /* ── 模态框 ─────────────────────────────────────────── */
@@ -651,7 +859,7 @@ tbody tr.stat-group-end:last-child td {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -661,12 +869,12 @@ tbody tr.stat-group-end:last-child td {
 .modal {
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--radius);
   width: 100%;
   max-width: 560px;
   max-height: 90vh;
   overflow-y: auto;
-  padding: 20px 22px;
+  padding: 18px 20px;
   margin: auto;
 }
 .modal-wide {
@@ -701,7 +909,7 @@ tbody tr.stat-group-end:last-child td {
   gap: 14px;
 }
 .chat-log {
-  background: #12151d;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px;
@@ -729,12 +937,12 @@ tbody tr.stat-group-end:last-child td {
   color: var(--text-dim);
 }
 .msg-user .msg-role {
-  background: rgba(79, 140, 255, 0.18);
-  color: #8ab4ff;
+  background: var(--accent-bg);
+  color: var(--accent-on-bg);
 }
 .msg-assistant .msg-role {
-  background: rgba(163, 113, 247, 0.18);
-  color: #c39bff;
+  background: var(--purple-bg);
+  color: var(--purple-on-bg);
 }
 .msg-body {
   flex: 1;
@@ -783,15 +991,30 @@ tbody tr.stat-group-end:last-child td {
 
 .empty {
   text-align: center;
-  padding: 38px 20px;
+  padding: 34px 20px;
   color: var(--text-faint);
-  font-size: 13px;
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+/* 空状态用描边图标替代 emoji：同色系、粗细与正文一致，不会在深色底上「跳」出来。 */
+.empty-icon {
+  color: var(--text-faint);
+  opacity: 0.55;
+}
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
 }
 .spinner {
   display: inline-block;
   width: 13px;
   height: 13px;
-  border: 2px solid rgba(255, 255, 255, 0.22);
+  border: 2px solid var(--spinner-track);
   border-top-color: currentColor;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
@@ -805,8 +1028,8 @@ tbody tr.stat-group-end:last-child td {
 .kv {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 7px 16px;
-  font-size: 13px;
+  gap: 6px 16px;
+  font-size: 12.5px;
 }
 .kv dt {
   color: var(--text-faint);
@@ -821,12 +1044,12 @@ tbody tr.stat-group-end:last-child td {
   display: flex;
   gap: 4px;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 15px;
+  margin-bottom: 14px;
   flex-wrap: wrap;
 }
 .tab {
-  padding: 7px 13px;
-  font-size: 13px;
+  padding: 6px 12px;
+  font-size: 12.5px;
   color: var(--text-dim);
   cursor: pointer;
   border: none;
@@ -839,8 +1062,43 @@ tbody tr.stat-group-end:last-child td {
   color: var(--text);
 }
 .tab.active {
-  color: #cfe0ff;
+  color: var(--accent-on-bg);
   border-bottom-color: var(--accent);
+}
+
+/* 折叠说明块：口径解释这类「查阅型」长文默认收起，不占首屏。 */
+.disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 13.5px;
+  font-weight: 620;
+  color: var(--text);
+  list-style: none;
+  user-select: none;
+}
+.disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.disclosure > summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--text-faint);
+  border-bottom: 1.5px solid var(--text-faint);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 0.15s;
+}
+.disclosure[open] > summary::after {
+  transform: rotate(-135deg) translate(-2px, -2px);
+}
+.disclosure > summary:hover {
+  color: var(--accent);
+}
+.disclosure > summary svg {
+  color: var(--text-faint);
 }
 
 .progress {
@@ -857,10 +1115,10 @@ tbody tr.stat-group-end:last-child td {
 }
 
 .muted-box {
-  background: #12151d;
+  background: var(--bg);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
-  padding: 11px 13px;
+  padding: 10px 12px;
   font-size: 12.5px;
   font-family: var(--mono);
   color: var(--text-dim);
@@ -869,15 +1127,54 @@ tbody tr.stat-group-end:last-child td {
 }
 
 .url-box {
-  background: #12151d;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 11px 13px;
+  padding: 10px 12px;
   font-family: var(--mono);
   font-size: 12px;
   word-break: break-all;
-  color: #8ab4ff;
+  color: var(--accent-on-bg);
   line-height: 1.6;
+}
+
+/* 主题切换：三态分段控件。侧栏底部与登录页各放一个——登录页没有侧栏，而那
+   恰恰是首次访问最可能要调主题的地方。 */
+.theme-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.theme-switch button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-faint);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.theme-switch button:hover {
+  color: var(--text);
+  background: var(--bg-elev2);
+}
+/* 选中态用「抬起的底 + 描边」而非 accent 填充：三个按钮并排，满色底会让这个
+   控件比它管辖的内容更抢眼。 */
+.theme-switch button[aria-pressed='true'] {
+  background: var(--bg-elev2);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 600;
 }
 
 @media (max-width: 760px) {
@@ -907,6 +1204,16 @@ tbody tr.stat-group-end:last-child td {
   .nav-spacer,
   .nav-foot {
     display: none;
+  }
+  /* 窄屏侧栏变成横向滚动条，三个带字的按钮太占宽度：只留图标。
+     仅限侧栏那份——登录页那份没有别的入口，去掉文字就只剩三个难懂的符号。 */
+  .nav-theme {
+    margin: 0 0 0 6px;
+  }
+  .nav-theme .theme-switch button {
+    font-size: 0;
+    gap: 0;
+    padding: 5px;
   }
   .main {
     padding: 16px 14px 40px;

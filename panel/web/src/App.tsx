@@ -3,7 +3,19 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { api, setUnauthorizedHandler } from './api'
 import type { SessionInfo } from './types'
-import { Alert, Spinner } from './ui'
+import { Alert, Spinner, ThemeSwitch } from './ui'
+import {
+  ArrowLeftRight,
+  Coins,
+  Cpu,
+  LayoutDashboard,
+  LineChart,
+  MessageSquare,
+  Server,
+  Settings,
+  UserPlus,
+  Users,
+} from './icons'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import StatsPage from './pages/StatsPage'
@@ -17,16 +29,16 @@ import ConfigPage from './pages/ConfigPage'
 import System from './pages/System'
 
 const NAV = [
-  { to: '/', label: '仪表盘', icon: '📊', end: true },
-  { to: '/accounts', label: '账号管理', icon: '👥' },
-  { to: '/stats', label: '请求统计', icon: '📈' },
-  { to: '/models', label: '模型与倍率', icon: '🧮' },
-  { to: '/credits', label: '积分到期', icon: '💎' },
-  { to: '/login', label: '添加账号', icon: '➕' },
-  { to: '/playground', label: '聊天测试', icon: '💬' },
-  { to: '/aliases', label: '模型别名', icon: '🔀' },
-  { to: '/config', label: '网关配置', icon: '⚙️' },
-  { to: '/system', label: '系统', icon: '🔧' },
+  { to: '/', label: '仪表盘', icon: LayoutDashboard, end: true },
+  { to: '/accounts', label: '账号管理', icon: Users },
+  { to: '/stats', label: '请求统计', icon: LineChart },
+  { to: '/models', label: '模型与倍率', icon: Cpu },
+  { to: '/credits', label: '积分到期', icon: Coins },
+  { to: '/login', label: '添加账号', icon: UserPlus },
+  { to: '/playground', label: '聊天测试', icon: MessageSquare },
+  { to: '/aliases', label: '模型别名', icon: ArrowLeftRight },
+  { to: '/config', label: '网关配置', icon: Settings },
+  { to: '/system', label: '系统', icon: Server },
 ]
 
 export default function App() {
@@ -121,13 +133,22 @@ function Shell({
             end={item.end}
             className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
           >
-            <span className="nav-icon">{item.icon}</span>
+            <span className="nav-icon">
+              <item.icon size={15} />
+            </span>
             {item.label}
           </NavLink>
         ))}
         <div className="nav-spacer" />
+        {/* 主题切换放在 .nav-foot 之外（它之上）：那个块在窄屏被整体隐藏，
+            主题切换不该跟着消失。 */}
+        <div className="nav-theme">
+          <ThemeSwitch />
+        </div>
         <div className="nav-foot">
-          <div style={{ marginBottom: 8, wordBreak: 'break-all' }}>网关：{session.gateway_url}</div>
+          <div style={{ marginBottom: 7, wordBreak: 'break-all', fontFamily: 'var(--mono)' }}>
+            {session.gateway_url}
+          </div>
           <div style={{ marginBottom: 8 }}>
             <span className="text-faint">登录身份：</span>
             {session.username}

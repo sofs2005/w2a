@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { LoginSession, SessionInfo } from '../types'
 import { Alert, Spinner } from '../ui'
+import { Check, Copy, ExternalLink, Info, Key, RefreshCw, RotateCcw, UserPlus, Users } from '../icons'
 
 const STEPS = ['发起授权', '浏览器登录', '保存凭证'] as const
 
@@ -138,12 +139,12 @@ export default function LoginWizard({
                   borderRadius: 20,
                   fontSize: 13,
                   border: '1px solid',
-                  borderColor: done ? 'rgba(63,185,80,.4)' : active ? 'rgba(79,140,255,.45)' : 'var(--border)',
-                  background: done ? 'rgba(63,185,80,.1)' : active ? 'rgba(79,140,255,.11)' : 'transparent',
-                  color: done ? '#7ee787' : active ? '#a8c8ff' : 'var(--text-faint)',
+                  borderColor: done ? 'var(--ok-border)' : active ? 'var(--accent-border)' : 'var(--border)',
+                  background: done ? 'var(--ok-bg)' : active ? 'var(--accent-bg)' : 'transparent',
+                  color: done ? 'var(--ok-on-bg)' : active ? 'var(--accent-on-bg)' : 'var(--text-faint)',
                 }}
               >
-                <span>{done ? '✓' : i + 1}</span>
+                <span>{done ? <Check size={12} /> : i + 1}</span>
                 {label}
               </div>
             )
@@ -167,7 +168,7 @@ export default function LoginWizard({
               国内版走腾讯 CodeBuddy（codebuddy.cn），国际版走 WorkBuddy Global（workbuddy.ai）。请选择与你账号匹配的区域。
             </div>
           </div>
-          <p className="text-dim" style={{ marginTop: 0, fontSize: 13 }}>
+          <p className="text-dim" style={{ marginTop: 0, fontSize: 12.5 }}>
             点击下方按钮后，本面板会向对应区域的 WorkBuddy 申请一个一次性授权链接（有效期约 15 分钟），
             你在浏览器中打开并完成登录即可，无需在服务器上执行任何命令。
           </p>
@@ -184,7 +185,7 @@ export default function LoginWizard({
             </ul>
           </Alert>
           <button className="btn btn-primary" onClick={() => void start()} disabled={busy || writeDisabled}>
-            {busy ? <Spinner /> : '🔑'} 发起授权（{region === 'global' ? '国际版' : '国内版'}）
+            {busy ? <Spinner /> : <Key size={14} />} 发起授权（{region === 'global' ? '国际版' : '国内版'}）
           </button>
         </div>
       )}
@@ -196,7 +197,7 @@ export default function LoginWizard({
             <h2>第 2 步 · 在浏览器中完成登录</h2>
             <Spinner label="等待授权中…" />
           </div>
-          <p className="text-dim" style={{ marginTop: 0, fontSize: 13 }}>
+          <p className="text-dim" style={{ marginTop: 0, fontSize: 12.5 }}>
             打开下面的链接，完成登录授权。本页面会自动检测结果，成功后无需手动操作。
           </p>
           <div className="url-box" style={{ marginBottom: 11 }}>
@@ -204,13 +205,13 @@ export default function LoginWizard({
           </div>
           <div className="page-actions">
             <a className="btn btn-primary" href={sess.auth_url} target="_blank" rel="noopener noreferrer">
-              🔗 打开授权页面
+              <ExternalLink size={14} /> 打开授权页面
             </a>
             <button className="btn" onClick={() => void copyURL()}>
-              {copied ? '✓ 已复制' : '📋 复制链接'}
+              {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? '已复制' : '复制链接'}
             </button>
             <button className="btn" onClick={() => void poll(sess.id)}>
-              🔄 立即检查
+              <RefreshCw size={14} /> 立即检查
             </button>
             <button className="btn btn-ghost" onClick={() => void cancel()}>
               取消
@@ -246,7 +247,7 @@ export default function LoginWizard({
           )}
           <div className="page-actions" style={{ marginTop: 14 }}>
             <Link className="btn btn-primary" to="/accounts">
-              👥 去账号管理
+              <Users size={14} /> 去账号管理
             </Link>
             <button
               className="btn"
@@ -256,7 +257,7 @@ export default function LoginWizard({
                 void start()
               }}
             >
-              ➕ 再添加一个账号
+              <UserPlus size={14} /> 再添加一个账号
             </button>
           </div>
         </div>
@@ -284,7 +285,7 @@ export default function LoginWizard({
                 void start()
               }}
             >
-              🔄 重新发起
+              <RotateCcw size={14} /> 重新发起
             </button>
             <Link className="btn" to="/accounts">
               返回账号管理
@@ -298,13 +299,13 @@ export default function LoginWizard({
         <div className="card-head">
           <h2>其他添加方式</h2>
         </div>
-        <p className="text-dim" style={{ marginTop: 0, fontSize: 13 }}>
+        <p className="text-dim" style={{ marginTop: 0, fontSize: 12.5 }}>
           如果服务器无法直连上游（本面板发起授权失败），仍可用原有方式在网关目录执行
           <span className="mono"> ./login.sh </span>完成登录，然后在本面板「账号管理 → 导入凭证」中粘贴生成的
           <span className="mono"> auths/workbuddy-*.json </span>内容。
         </p>
         <button className="btn" onClick={() => setManualUID(manualUID ? null : 'hint')}>
-          ℹ️ 了解导入方式
+          <Info size={14} /> 了解导入方式
         </button>
         {manualUID && (
           <div className="muted-box" style={{ marginTop: 11 }}>

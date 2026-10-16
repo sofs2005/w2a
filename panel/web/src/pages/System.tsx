@@ -3,7 +3,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { SessionInfo, SystemInfo, TaskListResponse } from '../types'
-import { Alert, Badge, ConfirmDialog, fmtDuration, fmtISO, Modal, Spinner } from '../ui'
+import { Alert, Badge, ConfirmDialog, Empty, fmtDuration, fmtISO, Modal, Spinner } from '../ui'
+import { Inbox, Key, Power, RefreshCw } from '../icons'
 
 export default function System({
   session,
@@ -73,7 +74,7 @@ export default function System({
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 刷新
           </button>
           <button
             className="btn btn-primary"
@@ -87,7 +88,7 @@ export default function System({
                   : '重启网关容器以加载新账号/新配置'
             }
           >
-            🔁 重启网关
+            <Power size={14} /> 重启网关
           </button>
         </div>
       </div>
@@ -120,7 +121,9 @@ export default function System({
           <dt>身份标识</dt>
           <dd>
             {gatewayServiceOK ? (
-              <>service = <span className="mono">workbuddy2api</span> ✅</>
+              <span className="text-ok">
+                service = <span className="mono">workbuddy2api</span>
+              </span>
             ) : (
               <span className="text-danger">{info?.gateway_health_error || '无法确认身份'}</span>
             )}
@@ -172,7 +175,7 @@ export default function System({
             disabled={!session.password_changeable}
             title={session.password_changeable ? '修改面板登录口令' : '服务端未配置凭据持久化，无法从网页改密码'}
           >
-            🔑 修改密码
+            <Key size={13} /> 修改密码
           </button>
         </div>
         <dl className="kv">
@@ -196,7 +199,13 @@ export default function System({
             )}
           </dd>
           <dt>Docker 可用</dt>
-          <dd>{info?.docker_available ? '✅ 是' : '❌ 否（容器控制已降级）'}</dd>
+          <dd>
+            {info?.docker_available ? (
+              <span className="text-ok">是</span>
+            ) : (
+              <span className="text-danger">否（容器控制已降级）</span>
+            )}
+          </dd>
         </dl>
       </div>
 
@@ -212,14 +221,14 @@ export default function System({
           </Alert>
         )}
         {!tasks?.tasks || tasks.tasks.length === 0 ? (
-          <div className="empty">
+          <Empty icon={<Inbox size={30} />}>
             还没有执行过批量任务。
-            <div style={{ marginTop: 10 }}>
+            <div className="empty-actions" style={{ marginTop: 10 }}>
               <Link className="btn btn-sm" to="/accounts">
                 去账号管理执行
               </Link>
             </div>
-          </div>
+          </Empty>
         ) : (
           <div className="table-wrap">
             <table>

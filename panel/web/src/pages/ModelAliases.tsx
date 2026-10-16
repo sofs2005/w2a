@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { AliasEntry, AliasMeta, Model, SessionInfo } from '../types'
 import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import { Plus, RefreshCw, Save, Undo2, X } from '../icons'
 import { SuggestInput } from '../SuggestInput'
 import { modelRealms, type Realm } from '../realm'
 
@@ -208,12 +209,12 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           <p>
             把对外统一模型名映射到各域真实名 ·{' '}
             <span className="mono">{meta?.path || 'model_aliases.json'}</span>
-            {meta?.mod_time && <span className="text-faint"> · 最后修改 {fmtISO(meta.mod_time)}</span>}
           </p>
         </div>
         <div className="page-actions">
+          {meta?.mod_time && <span className="page-meta">最后修改 {fmtISO(meta.mod_time)}</span>}
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 重新读取
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 重新读取
           </button>
           {meta?.backup_path && (
             <button
@@ -222,7 +223,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
               disabled={writeDisabled || !session.dangerous_ops}
               title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '从首次备份恢复'}
             >
-              ↩️ 恢复备份
+              <Undo2 size={14} /> 恢复备份
             </button>
           )}
         </div>
@@ -326,7 +327,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
                     onClick={() => removeRow(idx)}
                     disabled={writeDisabled}
                   >
-                    ✕
+                    <X size={13} />
                   </button>
                 </td>
               </tr>
@@ -336,10 +337,10 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
 
         <div className="page-actions" style={{ marginTop: 13 }}>
           <button className="btn" onClick={addRow} disabled={writeDisabled}>
-            ➕ 添加一行
+            <Plus size={14} /> 添加一行
           </button>
           <button className="btn btn-primary" onClick={() => void save()} disabled={saving || writeDisabled}>
-            {saving ? <Spinner /> : '💾'} 保存{dirty ? '（有未保存修改）' : ''}
+            {saving ? <Spinner /> : <Save size={14} />} 保存{dirty ? '（有未保存修改）' : ''}
           </button>
           <button className="btn" onClick={() => void load()} disabled={saving}>
             放弃修改

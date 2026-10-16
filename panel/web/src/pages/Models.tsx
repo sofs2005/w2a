@@ -12,6 +12,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import type { Model, ModelPromotion } from '../types'
 import { Alert, Badge, Empty, Spinner, fmtNum, upstreamSec } from '../ui'
+import { Cpu, RefreshCw } from '../icons'
 import { REALMS, bareID, modelRealms, type Realm } from '../realm'
 
 type SortKey = 'rate-asc' | 'rate-desc' | 'promo' | 'name' | 'context'
@@ -277,19 +278,16 @@ export default function Models() {
       <div className="page-head">
         <div>
           <h1>模型与倍率</h1>
-          <p>
-            上游各域支持的模型、积分倍率、能力与限时优惠
-            {refreshedAt && (
-              <span className="text-faint">
-                {' '}
-                · 更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}
-              </span>
-            )}
-          </p>
+          <p>上游各域支持的模型、积分倍率、能力与限时优惠</p>
         </div>
         <div className="page-actions">
+          {refreshedAt && (
+            <span className="page-meta">
+              更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}
+            </span>
+          )}
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 重新加载
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 重新加载
           </button>
         </div>
       </div>
@@ -367,7 +365,7 @@ export default function Models() {
         {loading && models.length === 0 ? (
           <Spinner label="正在拉取模型列表…" />
         ) : rows.length === 0 ? (
-          <Empty>
+          <Empty icon={<Cpu size={30} />}>
             没有匹配的模型。
             {q || onlyFree || onlyPromo ? '（试试清掉搜索或过滤条件）' : ''}
           </Empty>

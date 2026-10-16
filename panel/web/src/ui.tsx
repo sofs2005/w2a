@@ -1,6 +1,7 @@
 // ui.tsx 通用展示组件与格式化工具。
 
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Inbox, Info, Monitor, Moon, Sun, X, XCircle } from './icons'
 
 /** 把 Unix 秒格式化为本地时间字符串。 */
 export function fmtTime(sec?: number): string {
@@ -141,14 +142,17 @@ export function Alert({
   children: React.ReactNode
   onClose?: () => void
 }) {
-  const icon = { error: '⛔', warn: '⚠️', ok: '✅', info: 'ℹ️' }[kind]
+  // 图标按 kind 选，颜色由 CSS 的 .alert-<kind> .alert-icon 决定（正文保持中性色）。
+  const Icon = { error: XCircle, warn: AlertTriangle, ok: CheckCircle2, info: Info }[kind]
   return (
     <div className={`alert alert-${kind}`}>
-      <span className="alert-icon">{icon}</span>
+      <span className="alert-icon">
+        <Icon size={15} />
+      </span>
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
       {onClose && (
         <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭">
-          ✕
+          <X size={14} />
         </button>
       )}
     </div>
@@ -194,7 +198,7 @@ export function Modal({
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭">
-            ✕
+            <X size={14} />
           </button>
         </div>
         {children}
@@ -213,8 +217,21 @@ export function Spinner({ label }: { label?: string }) {
   )
 }
 
-export function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="empty">{children}</div>
+/** 空状态。默认配一个描边图标（比 emoji 更贴合整站的细线风格），可用 icon={null} 关掉。 */
+export function Empty({
+  children,
+  icon,
+}: {
+  children: React.ReactNode
+  icon?: React.ReactNode
+}) {
+  const glyph = icon === undefined ? <Inbox size={30} /> : icon
+  return (
+    <div className="empty">
+      {glyph && <span className="empty-icon">{glyph}</span>}
+      <div>{children}</div>
+    </div>
+  )
 }
 
 /** ConfirmDialog 危险操作二次确认。 */
@@ -255,7 +272,67 @@ export function ConfirmDialog({
         </>
       }
     >
-      <div style={{ fontSize: 13.5, lineHeight: 1.7, color: 'var(--text-dim)' }}>{message}</div>
+      <div style={{ fontSize: 13, lineHeight: 1.7, color: 'var(--text-dim)' }}>{message}</div>
     </Modal>
+  )
+}
+
+/* ── 主题切换 ───────────────────────────────────────── */
+
+type ThemeMode = 'system' | 'dark' | 'light'
+
+/** localStorage 键。index.html 的防闪烁内联脚本读的是同一个键，改这里要同步改那边。 */
+const THEME_KEY = 'wb-theme'
+
+/** 读当前选择。localStorage 在隐私模式下可能抛异常，一律退化为「跟随系统」。 */
+function readThemeMode(): ThemeMode {
+  try {
+    const m = localStorage.getItem(THEME_KEY)
+    return m === 'dark' || m === 'light' ? m : 'system'
+  } catch {
+    return 'system'
+  }
+}
+
+/** 把选择落到 DOM 与 localStorage。「跟随系统」不写 data-theme，交给 CSS 的 media 查询，
+    这样系统主题变化时浏览器自动切换，React 侧无需监听 matchMedia。 */
+function applyThemeMode(m: ThemeMode) {
+  if (m === 'system') document.documentElement.removeAttribute('data-theme')
+  else document.documentElement.dataset.theme = m
+  try {
+    if (m === 'system') localStorage.removeItem(THEME_KEY)
+    else localStorage.setItem(THEME_KEY, m)
+  } catch {
+    // 存不下只是下次打开回到跟随系统，不影响本次切换。
+  }
+}
+
+const THEME_OPTIONS: { mode: ThemeMode; text: string; title: string; Icon: (p: { size?: number }) => JSX.Element }[] = [
+  { mode: 'system', text: '系统', title: '跟随系统主题', Icon: Monitor },
+  { mode: 'dark', text: '深色', title: '固定深色主题', Icon: Moon },
+  { mode: 'light', text: '浅色', title: '固定浅色主题', Icon: Sun },
+]
+
+/** 三态主题切换。侧栏底部与登录页各放一个（登录页没有侧栏，需要单独一份）。 */
+export function ThemeSwitch() {
+  const [mode, setMode] = useState<ThemeMode>(readThemeMode)
+  return (
+    <div className="theme-switch" role="group" aria-label="主题">
+      {THEME_OPTIONS.map(({ mode: m, text, title, Icon }) => (
+        <button
+          key={m}
+          type="button"
+          title={title}
+          aria-pressed={mode === m}
+          onClick={() => {
+            setMode(m)
+            applyThemeMode(m)
+          }}
+        >
+          <Icon size={13} />
+          {text}
+        </button>
+      ))}
+    </div>
   )
 }

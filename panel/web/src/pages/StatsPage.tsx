@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ModelStat, RealmStat, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Spinner } from '../ui'
+import { Eraser, Info, LineChart, RefreshCw } from '../icons'
 import { realmLabel } from '../realm'
 // 时间趋势启用时需一并恢复（见下方注释块）：
 // import TrendChart, { type TrendMetric } from './TrendChart'
@@ -308,18 +309,16 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
       <div className="page-head">
         <div>
           <h1>请求统计</h1>
-          <p>
-            统计<strong>所有</strong>经过网关的请求（含绕过本面板的客户端），按模型分开
-            {stats && <span className="text-faint"> · 已运行 {fmtDuration(stats.uptime_sec)}</span>}
-          </p>
+          <p>统计所有经过网关的请求（含绕过本面板的客户端），按模型分开</p>
         </div>
         <div className="page-actions">
+          {stats && <span className="page-meta">已运行 {fmtDuration(stats.uptime_sec)}</span>}
           <label className="checkbox">
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
             自动刷新（10s）
           </label>
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 刷新
           </button>
           <button
             className="btn btn-danger"
@@ -327,7 +326,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             disabled={resetting || session.read_only}
             title={session.read_only ? '只读模式' : '清空累计统计，便于观察之后的增量'}
           >
-            {resetting ? <Spinner /> : '🧹'} 重置统计
+            {resetting ? <Spinner /> : <Eraser size={14} />} 重置统计
           </button>
         </div>
       </div>
@@ -528,7 +527,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         </div>
 
         {models.length === 0 ? (
-          <Empty>
+          <Empty icon={<LineChart size={30} />}>
             还没有统计数据。
             <div style={{ marginTop: 6, fontSize: 12 }}>
               向网关发一次请求（可用「聊天测试」页）后即可看到。
@@ -561,11 +560,13 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
         )}
       </div>
 
-      <div className="card">
-        <div className="card-head">
-          <h2>指标说明</h2>
-        </div>
-        <dl className="kv">
+      {/* 指标口径说明很长，默认折叠——它是查阅用的，不该占据首屏。 */}
+      <details className="card disclosure">
+        <summary>
+          <Info size={14} />
+          指标说明
+        </summary>
+        <dl className="kv" style={{ marginTop: 12 }}>
           <dt>按域分行</dt>
           <dd>
             统一调度后一个裸模型名会在<strong>国内版</strong>与<strong>国际版</strong>账号之间调度，
@@ -613,7 +614,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
           <dt>统计起点</dt>
           <dd>{stats ? fmtISO(stats.since) : '—'}</dd>
         </dl>
-      </div>
+      </details>
     </>
   )
 }

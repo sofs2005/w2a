@@ -3,7 +3,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { Account, Overview } from '../types'
-import { Alert, Badge, displayName, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
+import { Alert, Badge, displayName, Empty, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
+import { CheckCircle2, RefreshCw, UserPlus } from '../icons'
 
 export default function Dashboard() {
   const [ov, setOv] = useState<Overview | null>(null)
@@ -48,15 +49,17 @@ export default function Dashboard() {
       <div className="page-head">
         <div>
           <h1>仪表盘</h1>
-          <p>
-            账号池实时健康度与积分总览
-            {refreshedAt && <span className="text-faint"> · 更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}</span>}
-            <span className="text-faint"> · 每 15 秒自动刷新</span>
-          </p>
+          <p>账号池健康度与积分总览</p>
         </div>
         <div className="page-actions">
+          {refreshedAt && (
+            <span className="page-meta">
+              <RefreshCw size={12} />
+              更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })} · 15 秒自动刷新
+            </span>
+          )}
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 立即刷新
+            {loading ? <Spinner /> : <RefreshCw size={14} />} 刷新
           </button>
         </div>
       </div>
@@ -137,14 +140,14 @@ export default function Dashboard() {
                 </Link>
               </div>
               {topAccounts.length === 0 ? (
-                <div className="empty">
+                <Empty icon={<UserPlus size={30} />}>
                   还没有账号。
-                  <div style={{ marginTop: 10 }}>
+                  <div className="empty-actions" style={{ marginTop: 10 }}>
                     <Link className="btn btn-primary btn-sm" to="/login">
-                      ➕ 添加第一个账号
+                      <UserPlus size={13} /> 添加第一个账号
                     </Link>
                   </div>
-                </div>
+                </Empty>
               ) : (
                 <div className="table-wrap">
                   <table>
@@ -187,7 +190,9 @@ export default function Dashboard() {
                 <span className="hint">{problems.length} 个</span>
               </div>
               {problems.length === 0 ? (
-                <div className="empty">🎉 所有账号状态正常</div>
+                <Empty icon={<span className="text-ok" style={{ opacity: 1 }}><CheckCircle2 size={28} /></span>}>
+                  所有账号状态正常
+                </Empty>
               ) : (
                 <div className="table-wrap">
                   <table>

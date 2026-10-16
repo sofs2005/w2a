@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, streamChat } from '../api'
 import type { ChatMessage, Model } from '../types'
 import { Alert, fmtNum, Spinner } from '../ui'
+import { RefreshCw, Send, Square, Trash2, X } from '../icons'
 
 interface Bubble {
   role: 'user' | 'assistant'
@@ -201,10 +202,10 @@ export default function Playground() {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void loadModels()}>
-            🔄 刷新模型列表
+            <RefreshCw size={14} /> 刷新模型列表
           </button>
           <button className="btn" onClick={clearChat} disabled={messages.length === 0}>
-            🗑️ 清空对话
+            <Trash2 size={14} /> 清空对话
           </button>
         </div>
       </div>
@@ -353,11 +354,11 @@ export default function Playground() {
           <div className="page-actions" style={{ marginTop: 11 }}>
             {busy ? (
               <button className="btn btn-danger" onClick={stop}>
-                ⏹ 停止
+                <Square size={13} /> 停止
               </button>
             ) : (
               <button className="btn btn-primary" onClick={() => void send()} disabled={!input.trim() || !model}>
-                ▶️ 发送
+                <Send size={14} /> 发送
               </button>
             )}
             <span className="hint">Ctrl + Enter 快捷发送</span>
@@ -370,8 +371,8 @@ export default function Playground() {
           <div className="modal modal-wide">
             <div className="modal-head">
               <h2>原始响应数据</h2>
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowRaw(null)}>
-                ✕
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowRaw(null)} aria-label="关闭">
+                <X size={14} />
               </button>
             </div>
             <div className="muted-box" style={{ maxHeight: 420, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{showRaw}</div>
