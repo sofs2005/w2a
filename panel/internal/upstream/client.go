@@ -50,7 +50,7 @@ const (
 	ChatBaseGlobal    = "https://www.workbuddy.ai"
 	BillingBaseGlobal = "https://www.workbuddy.ai"
 
-	clientUA     = "CLI/2.63.2 CodeBuddy/2.63.2"
+	clientUA     = "CLI/2.161.0 CodeBuddy/2.161.0"
 	originCN     = "https://www.codebuddy.cn"
 	originGlobal = "https://www.workbuddy.ai"
 
@@ -301,10 +301,13 @@ func regionBases(region Region) (chatBase, billingBase, origin string) {
 	return ChatBaseCN, BillingBaseCN, originCN
 }
 
-// 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersion/defaultCliVersion 同值）。
+// 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersionCN /
+// defaultClientVersionGlobal / defaultCliVersion 同值）。
+// 两域分发包版本不同步，必须按 region 取：CN 5.8.3、global 5.8.4。
 const (
-	desktopClientVersion = "5.5.4"
-	desktopCLIVersion    = "2.137.1"
+	desktopClientVersionCN     = "5.8.3"
+	desktopClientVersionGlobal = "5.8.4"
+	desktopCLIVersion          = "2.161.0"
 )
 
 // promoFetchTimeout 促销配置的单次超时。
@@ -315,20 +318,22 @@ const (
 const promoFetchTimeout = 15 * time.Second
 
 // desktopUA 组装官方桌面端 UA：`WorkBuddy/<v> <平台品牌>/<v> CLI/<cli>`。
-// 平台段品牌按 realm 切——global 用 `WorkBuddy AI`，cn 用 `WorkBuddy`
-// （送错品牌段会被上游风控判 403 code 11140）。
+// 版本段与平台段都按 realm 切：CN `WorkBuddy/5.8.3`，global `WorkBuddy AI/5.8.4`
+// （送错品牌段/陈旧版本段会被上游风控判 403 code 11140）。
 func desktopUA(region Region) string {
 	platform := "WorkBuddy"
+	version := desktopClientVersionCN
 	if region == RegionGlobal {
 		platform = "WorkBuddy AI"
+		version = desktopClientVersionGlobal
 	}
-	return "WorkBuddy/" + desktopClientVersion + " " + platform + "/" + desktopClientVersion +
+	return "WorkBuddy/" + version + " " + platform + "/" + version +
 		" CLI/" + desktopCLIVersion
 }
 
 // desktopHeaders 设置官方桌面端出站请求头（网关 CommonHeaders 的同款口径）。
 //
-// 为什么不能复用包内既有的 commonHeaders（CLI UA `CLI/2.63.2 CodeBuddy/2.63.2`）：
+// 为什么不能复用包内既有的 commonHeaders（CLI UA `CLI/2.161.0 CodeBuddy/2.161.0`）：
 // 实测同一账号同一时刻，两种 UA 从 /v3/config 拿到的是**两份不同配置**——
 //
 //	CLI UA      → 21 个模型，无 modelPromotions

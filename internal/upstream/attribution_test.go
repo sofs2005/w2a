@@ -38,7 +38,7 @@ func chatHeadersReq(t *testing.T, c *Client, a *auth.Auth, clientIP string) http
 	return captured
 }
 
-// TestAgentPurposeHeadersSet ClientName 配 WorkBuddy 时四头齐全跟随该值。
+// TestAgentPurposeHeadersSet ClientName 配 WorkBuddy 时头组齐全跟随该值。
 func TestAgentPurposeHeadersSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy"}
@@ -47,7 +47,9 @@ func TestAgentPurposeHeadersSet(t *testing.T) {
 		header string
 		want   string
 	}{
+		{"X-Agent-Intent", "craft"},
 		{"X-Agent-Purpose", "conversation"},
+		{"X-Private-Data", "true"},
 		{"X-IDE-Name", "WorkBuddy"},
 		{"X-IDE-Type", "WorkBuddy"},
 		{"X-Product", "WorkBuddy"},
@@ -78,11 +80,11 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 			t.Errorf("%s = %q want %q", tc.header, got, tc.want)
 		}
 	}
-	// X-IDE-Version 缺省（client_version 空）= 内置默认 5.5.4，且四头齐全。
+	// X-IDE-Version 缺省（client_version 空）= 内置默认按 realm 取（CN 5.8.3），且四头齐全。
 	c2 := &Client{ClientName: "WorkBuddy"}
 	h2 := chatHeadersReq(t, c2, a, "")
-	if got := h2.Get("X-IDE-Version"); got != "5.5.4" {
-		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.5.4")
+	if got := h2.Get("X-IDE-Version"); got != "5.8.3" {
+		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.8.3")
 	}
 	// 显式 ClientName="SaaS" 时 X-IDE-Version 不设（还原旧行为：只有 X-Product=SaaS）。
 	c3 := &Client{ClientName: "SaaS"}
@@ -102,8 +104,10 @@ func TestProductDefaultWorkBuddyFingerprint(t *testing.T) {
 		"X-Product":       "WorkBuddy",
 		"X-IDE-Name":      "WorkBuddy",
 		"X-IDE-Type":      "WorkBuddy",
-		"X-IDE-Version":   "5.5.4",
+		"X-IDE-Version":   "5.8.3",
+		"X-Agent-Intent":  "craft",
 		"X-Agent-Purpose": "conversation",
+		"X-Private-Data":  "true",
 	} {
 		if got := h.Get(hdr); got != want {
 			t.Errorf("%s = %q want %q (default fingerprint)", hdr, got, want)
@@ -120,7 +124,7 @@ func TestProductSaaSOptOut(t *testing.T) {
 		t.Errorf("X-Product = %q want %q", got, "SaaS")
 	}
 	// X-IDE-Name/Type 不应被设置。
-	for _, hdr := range []string{"X-IDE-Name", "X-IDE-Type", "X-Agent-Purpose"} {
+	for _, hdr := range []string{"X-IDE-Name", "X-IDE-Type", "X-Agent-Purpose", "X-Agent-Intent", "X-Private-Data"} {
 		if got := h.Get(hdr); got != "" {
 			t.Errorf("%s = %q want empty (SaaS opt-out)", hdr, got)
 		}

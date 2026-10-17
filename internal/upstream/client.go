@@ -745,18 +745,19 @@ type Client struct {
 	DeviceTokenFile string
 
 	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-	// 空（默认）= "WorkBuddy"：伪造官方桌面端指纹（X-IDE-* 四头 + X-Agent-Purpose，
-	// 见 injectAttribution / attributionClientName）。显式配 "SaaS" 还原旧行为
-	// （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
+	// 空（默认）= "WorkBuddy"：伪造官方桌面端指纹（X-IDE-* 四头 + X-Agent-Intent /
+	// X-Agent-Purpose / X-Private-Data，见 injectAttribution / attributionClientName）。
+	// 显式配 "SaaS" 还原旧行为（仅 X-Product="SaaS"，不设其余头）；配其他值则四头跟随该值。
 	ClientName string
 
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + B 段的
-	// X-IDE-Version）。空 = 内置默认 defaultClientVersion（对齐官方 5.5.4 分发包）。
-	// config upstream.client_version 覆盖。
+	// X-IDE-Version）。空 = 按账号 realm 取内置默认（CN defaultClientVersionCN 5.8.3 /
+	// global defaultClientVersionGlobal 5.8.4，对齐官方两域分发包）。
+	// config upstream.client_version 覆盖（覆盖值对两域统一生效）。
 	ClientVersion string
 
 	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认 defaultCliVersion
-	// （对齐官方内置 CLI 2.137.1）。config upstream.cli_version 覆盖。
+	// （对齐官方内置 CLI 2.161.0，两域同版）。config upstream.cli_version 覆盖。
 	CliVersion string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。

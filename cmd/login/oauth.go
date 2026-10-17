@@ -21,12 +21,14 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-// 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
+// upstreamBaseCN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。base 由 realmConfig 按 realm 选，origin 随之配套。
+// clientUA 的版本段对齐官方两域共用的内置 CLI 版本（2.161.0）。登录走 OAuth 设备流，
+// 只影响 auth 端点，沿用既有 CLI 形状不动（改形状属独立 A/B 课题）。
 const (
 	upstreamBaseCN      = "https://copilot.tencent.com"
 	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
+	clientUA            = "CLI/2.161.0 CodeBuddy/2.161.0"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )

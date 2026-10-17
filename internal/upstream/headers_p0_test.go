@@ -84,18 +84,18 @@ func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 	}
 }
 
-// TestAcceptHeaderStreamVsNonStream Accept 头分流式/非流式（D6）：
-// chat 出站带 text/event-stream（流式），billing/refresh 出站仅 application/json
-// （去掉宽松的 text/plain, */*）。
+// TestAcceptHeaderStreamVsNonStream Accept 头全路径统一 application/json：
+// 官方 chat 上游（VLM 网关代理 applyGatewayHeaders）硬编码 `Accept: application/json`，
+// 流式由 body 的 stream:true 决定；billing/refresh 同样仅 application/json。
 func TestAcceptHeaderStreamVsNonStream(t *testing.T) {
 	c := &Client{}
 	a := &auth.Auth{AccessToken: "at", UID: "u1", RefreshToken: "rt"}
 
-	// chat 流式：application/json, text/event-stream
+	// chat：application/json（不追加 text/event-stream）。
 	chatReq := mustRequest(t)
 	c.ChatHeaders(chatReq, a, "", ChatMeta{})
-	if got := chatReq.Header.Get("Accept"); got != "application/json, text/event-stream" {
-		t.Errorf("chat Accept = %q want %q", got, "application/json, text/event-stream")
+	if got := chatReq.Header.Get("Accept"); got != "application/json" {
+		t.Errorf("chat Accept = %q want %q", got, "application/json")
 	}
 
 	// billing 非流式：application/json

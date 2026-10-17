@@ -9,17 +9,14 @@ import (
 )
 
 // globalUAString global realm 默认出站 UA：第二段 platform 品牌为官方国际版
-// `WorkBuddy AI`（intl 项目逆向证据：WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2），
-// 版本段保持现有 clientVersion/cliVersion（本仓库 5.5.4/2.137.1），只切品牌段。
-const globalUAString = "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"
+// `WorkBuddy AI`，版本段按 realm 取官方国际版分发包版本 5.8.4（CN 为 5.8.3），
+// CLI 段两域同为 2.161.0。
+const globalUAString = "WorkBuddy/5.8.4 WorkBuddy AI/5.8.4 CLI/2.161.0"
 
-// TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐 intl 三件套：
-//  1. UA 含 `WorkBuddy AI/<v>` 平台段（非 CN 的 `WorkBuddy/<v>`）；
-//  2. X-No-Enterprise-Id: 1（个人账号无企业 ID，显式声明）；
-//  3. X-Domain: www.workbuddy.ai（显式声明国际版域）。
-//
-// 与 CN 的差异是修复 global 403 code 11140 "request illegal" 风控的关键（
-// ANALYSIS-global-chat-solutions.md）。
+// TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐官方国际客户端形态：
+//  1. UA 含 `WorkBuddy AI/<v>` 平台段 + 5.8.4 版本段（非 CN 的 `WorkBuddy/<v>`）；
+//  2. X-Domain: www.workbuddy.ai（显式声明国际版域）；
+//  3. 不发 X-No-Enterprise-Id（官方 5.8.4 只在未登录的 auth 类请求发该头，chat 不发）。
 func TestChatHeadersGlobalRealm(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"} // global 账号
 	req := mustRequest(t)
@@ -29,13 +26,13 @@ func TestChatHeadersGlobalRealm(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != globalUAString {
 		t.Errorf("global UA = %q want %q", got, globalUAString)
 	}
-	if got := req.Header.Get("X-No-Enterprise-Id"); got != "1" {
-		t.Errorf("global X-No-Enterprise-Id = %q want %q", got, "1")
+	if got := req.Header.Get("X-No-Enterprise-Id"); got != "" {
+		t.Errorf("global X-No-Enterprise-Id = %q want empty (官方 chat 不发该头)", got)
 	}
 	if got := req.Header.Get("X-Domain"); got != "www.workbuddy.ai" {
 		t.Errorf("global X-Domain = %q want %q", got, "www.workbuddy.ai")
 	}
-	// global 账号不落 CN 侧的 X-Enterprise-Id（企业头无意义，只发 No-* 声明）。
+	// global 账号不落 CN 侧的 X-Enterprise-Id（企业头无意义）。
 	if got := req.Header.Get("X-Enterprise-Id"); got != "" {
 		t.Errorf("global X-Enterprise-Id = %q want empty", got)
 	}
@@ -71,8 +68,8 @@ func TestChatHeadersCNRealm(t *testing.T) {
 }
 
 // TestChatHeadersGlobalStrongOverride global 账号（domain 标记 global）即便带
-// EnterpriseID（异常数据）也发国际客户端形态头：X-No-Enterprise-Id=1 +
-// X-Domain=www.workbuddy.ai，不落 CN 侧企业头（覆盖注入顺序：global 分支先于
+// EnterpriseID（异常数据）也发国际客户端形态头：X-Domain=www.workbuddy.ai、
+// 不发 X-No-Enterprise-Id，不落 CN 侧企业头（覆盖注入顺序：global 分支先于
 // 既有分支的强覆盖语义）。
 func TestChatHeadersGlobalStrongOverride(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g2", EnterpriseID: "should-be-ignored", Domain: "www.workbuddy.ai"}
@@ -80,8 +77,8 @@ func TestChatHeadersGlobalStrongOverride(t *testing.T) {
 	c := &Client{}
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
-	if got := req.Header.Get("X-No-Enterprise-Id"); got != "1" {
-		t.Errorf("global(virtual enterprise) X-No-Enterprise-Id = %q want 1", got)
+	if got := req.Header.Get("X-No-Enterprise-Id"); got != "" {
+		t.Errorf("global(virtual enterprise) X-No-Enterprise-Id = %q want empty", got)
 	}
 	if got := req.Header.Get("X-Enterprise-Id"); got != "" {
 		t.Errorf("global(virtual enterprise) X-Enterprise-Id = %q want empty", got)
@@ -136,10 +133,14 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != globalUAString {
 		t.Errorf("defaultWorkBuddyUAFor(global) = %q want %q", got, globalUAString)
 	}
-	// version 覆盖仍生效：global 平台段跟随 clientVersion。
+	// version 覆盖仍生效：global 平台段跟随 clientVersion，CLI 段保持默认。
 	c2 := &Client{ClientVersion: "6.0.0"}
-	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy AI/6.0.0 CLI/2.137.1" {
+	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy AI/6.0.0 CLI/2.161.0" {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
+	}
+	// realm 差异不只是品牌段：版本段也分域（CN 5.8.3 / global 5.8.4）。
+	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
+		t.Errorf("defaultWorkBuddyUAFor(cn domain) = %q want 5.8.3", got)
 	}
 }
 
