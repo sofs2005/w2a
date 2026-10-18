@@ -188,6 +188,32 @@ var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []
 	`"code":11101`,
 }}
 
+// hitAntiProbe 反探测拦截判定（HTTP 400 + 业务码 11-128）。上游对请求体内容做
+// 逐字反探测：命中即整单拦截，msg 常见文案为 "request illegal"。
+//
+// 为什么必须单列并**先于** accountFaultRule：该 msg 与 11140 真封禁**逐字相同**，
+// 只能靠业务码区分。此前 accountFaultRule 先命中 → ErrAccountFault →
+// handler.applyErrorPolicy 见 "request illegal" 即硬禁用，把一个内容级 400 记成
+// 「账号被封」，整池被打空（实案 2026-10-18：baseline 200 两秒后带 tools 的请求
+// 400/11-128，账号被 Disable，后续全 503）。内容拦截的真实语义见 ErrContentBlocked
+// （不罚号、走降级重试），故此处映射到它，而不是新建 Kind。
+//
+// 只认 code 形态：11-128 不是合法 JSON 数字（含连字符），json.Unmarshal 必失败，
+// hasBusinessCode 用不了，必须走 codeMarker 的字面量容差（`"code":11-128` /
+// `"code": "11-128"` 等）。msg 文案不能当判据——"request illegal" 两义同形。
+func hitAntiProbe(lower string) bool {
+	return codeMarker(lower, "11-128")
+}
+
+// IsAntiProbeBlock 报告上游错误 body 是否为反探测拦截（业务码 11-128）。
+//
+// 供 handler 侧做**纵深防御**：applyErrorPolicy 决定是否硬禁用账号时，除分类结果
+// 外还要确认「body 里没有 11-128」——即便未来分类顺序被改动，内容级拦截也不会被
+// 写成账号封禁（两类错误的 msg 逐字相同，误判代价是整池被打空）。
+func IsAntiProbeBlock(body string) bool {
+	return hitAntiProbe(strings.ToLower(body))
+}
+
 // invalidImageRule 图片请求格式/数据无效（HTTP 400）的**文案**形态。这类错误由
 // 请求内容决定，不是账号问题：换账号不会改变同一 body 的解析结果。上游常见形态包括
 // `Parse message failed: invalid image_url content`、invalid_image_data、
@@ -567,6 +593,12 @@ func Classify(status int, body string) ErrKind {
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if sessionDeadRule.hit(body, lower) {
 		return ErrSessionDead
+	}
+	// 反探测拦截（code 11-128）必须先于 accountFaultRule：它的 msg 与 11140 真封禁
+	// 逐字相同（"request illegal"），只有业务码能区分。判晚了会被记成账号级故障 →
+	// handler 硬禁用 → 内容级 400 打空整池（实案 2026-10-18，见 hitAntiProbe 注释）。
+	if hitAntiProbe(lower) {
+		return ErrContentBlocked
 	}
 	if accountFaultRule.hit(body, lower) {
 		return ErrAccountFault

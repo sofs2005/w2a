@@ -535,6 +535,45 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	}
 }
 
+// TestChatAntiProbeBlockDoesNotDisable 反探测拦截（400 + code 11-128，msg 与 11140
+// 真封禁逐字相同 "request illegal"）**不得**把账号硬禁用：它是内容级错误（请求体命中
+// 上游反探测规则），账号完全健康。实案 2026-10-18：该形态被记成 11140 封禁，
+// disabled_reason 写成「account banned…」，整池被打空、后续请求全 503。
+// 断言：账号不 disabled、不被冷却/熔断（ErrContentBlocked 零罚），且请求在
+// passthrough 下降级重试后成功。
+func TestChatAntiProbeBlockDoesNotDisable(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		// 首个请求内容命中反探测 → 400/11-128；降级重试（第二次）放行。
+		if calls[authz] == 1 {
+			return 400, `{"code":11-128,"msg":"request illegal","requestId":"abc","displayMsg":{"en":"Request blocked. Please send it again"}}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	// 熔断阈值 1：若误罚 NoteError 一次即熔断。
+	p.SetBreaker(1, time.Hour, time.Hour)
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"system","content":"x"},{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200 after degraded retry)", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatalf("反探测拦截不得硬禁用账号: %+v", st)
+	}
+	if st.DisabledReason != "" {
+		t.Errorf("disabled_reason 应为空（未禁用），got %q", st.DisabledReason)
+	}
+	if st.Cooling {
+		t.Errorf("内容拦截不应冷却账号: %+v", st)
+	}
+}
+
 // TestChatAccountFault14017Rotates 配额未激活（14017 trial not activated，实测 global
 // 新账号 register 未完成）同样纳入轮换：坏号冷却、轮换到下一号、不再被重复选中。
 // 与 11140（硬禁用）区分的关键：14017 属于 register 未完成，完善 register 后可能

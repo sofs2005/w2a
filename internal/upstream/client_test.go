@@ -72,6 +72,13 @@ func TestClassify(t *testing.T) {
 		// （上方 {200, "code":11140 rate-limiting} 必须仍是 ErrSoftRate），只能靠 msg 区分。
 		{403, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, ErrAccountFault},
 		{403, `request illegal`, ErrAccountFault},
+		// 反探测拦截（code 11-128）与 11140 真封禁**同 msg 不同码**：必须归内容拦截
+		// （不罚号、走降级重试），不能被 accountFaultRule 抢走 → handler 硬禁用打空整池。
+		// 实案 2026-10-18：400/11-128「request illegal」把健康账号记成封禁，后续全 503。
+		{400, `{"code":11-128,"msg":"request illegal"}`, ErrContentBlocked},
+		{400, `{"code": "11-128", "msg": "request illegal"}`, ErrContentBlocked},
+		{400, `{"code":"11-128","msg":"request illegal"}`, ErrContentBlocked},
+		{403, `{"code":11-128,"msg":"request illegal"}`, ErrContentBlocked},
 		{429, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated. Please log out of your current account and log in again to activate it immediately and start your free trial."}}}`, ErrAccountFault},
 		{400, `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
 		// session 死亡优先于限流文案（401+12153 需人工重登，短冷却无意义）。

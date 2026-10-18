@@ -1552,7 +1552,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
+		//
+		// 硬禁用还必须**排除反探测拦截**（code 11-128）：两者的 msg 逐字相同
+		// （"request illegal"），只有业务码能区分。11-128 是内容级 400（上游反探测
+		// 规则命中请求体），账号完全健康——硬禁用会让后续所有请求 503（实案
+		// 2026-10-18：baseline 200 两秒后带 tools 的请求 400/11-128，整池被打空）。
+		// Classify 已把 11-128 分到 ErrContentBlocked（不会走到本分支），这里再加一道
+		// 判据：分类顺序未来若被改动，也不会把内容拦截写成账号封禁。
+		if strings.Contains(strings.ToLower(body), "request illegal") && !upstream.IsAntiProbeBlock(body) {
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
 			return
 		}
