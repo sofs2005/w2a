@@ -34,6 +34,16 @@ type Config struct {
 	// 表示显式直连（忽略环境变量代理），不需要在表里配置。
 	Proxies map[string]string `json:"proxies"`
 
+	// ReasoningAsContent 思考通道兜底（issue #135）：国际版 deepseek 思考模式下
+	// 答案只出现在 reasoning_content、content 恒空，只看 content 的客户端会看到
+	// 空回复。开启后，**整轮既无正文也无工具调用**时把思考原文同时作为 content
+	// 下发；正常轮次零改动。
+	//
+	// 默认 true（空回复比重复更难接受）。代价：同时渲染两个字段的客户端会把同一
+	// 段话显示两遍 —— 遇到就设 `"reasoning_as_content": false`，或环境变量
+	// WB2A_REASONING_AS_CONTENT=0。指针类型用于区分「没写」与「显式 false」。
+	ReasoningAsContent *bool `json:"reasoning_as_content"`
+
 	// Server 入站 HTTP 服务参数（issue #100）。
 	//
 	// 此段曾因 max_body_mb 移除而退役（请求体改由上游自然响应），现重新启用：
@@ -301,6 +311,8 @@ func Default() *Config {
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
 	c.Features.SanitizeBlacklistFingerprints = true
+	reasoningFallback := true
+	c.ReasoningAsContent = &reasoningFallback
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403
@@ -452,6 +464,10 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
 		c.Cooldown.CreditExhausted = v
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_REASONING_AS_CONTENT")); v != "" {
+		on := !(v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off"))
+		c.ReasoningAsContent = &on
 	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -693,6 +709,11 @@ func (c *Config) normalize() error {
 			log.Printf("WARN: [config] proxy.global 非法，按未配置处理（回落环境变量代理）: %v", err)
 			c.Proxy.Global = ""
 		}
+	}
+	// 思考通道兜底：没写 = 开（空回复比重复更难接受）；显式 false 保持关闭。
+	if c.ReasoningAsContent == nil {
+		on := true
+		c.ReasoningAsContent = &on
 	}
 	// 出口线路表（proxies）：名字与地址都去空白；scheme 只认 http/https/socks5/socks5h。
 	// 与上面域级 proxy 的「WARN 回落」不同，这里**启动即报错**：线路是账号级强绑定，

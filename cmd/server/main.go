@@ -235,6 +235,12 @@ func main() {
 	// 未配置线路时保持零日志 —— 不绑线路的部署与历史行为逐字节一致。
 	upstream.SetRouteHeaderTimeout(up.HeaderTimeout)
 	upstream.ConfigureProxies(cfg.Proxies)
+	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
+	// 只看 content 的客户端又空了"变成悬案。
+	upstream.ConfigureReasoningFallback(cfg.ReasoningAsContent == nil || *cfg.ReasoningAsContent)
+	if !upstream.ReasoningFallbackEnabled() {
+		log.Printf("思考通道兜底已关闭：只含 reasoning_content 的回复不会再补成 content")
+	}
 	if names := upstream.RouteNames(); len(names) > 0 {
 		log.Printf("INFO: [upstream] 出口线路已加载 %d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))
