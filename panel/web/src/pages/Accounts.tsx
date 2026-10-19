@@ -578,7 +578,7 @@ export default function Accounts({ session }: { session: SessionInfo }) {
               </p>
               <p>
                 该操作<strong className="text-danger">不可从上游恢复</strong>：删除后需要重新走 OAuth 登录才能找回该账号。
-                网关需重启后才会把它移出账号池。
+                网关会在数秒内把它移出账号池（无需重启）。
               </p>
             </>
           }
@@ -872,7 +872,7 @@ function ImportDialog({
         />
       </div>
       <div className="desc">
-        导入后需重启网关容器，账号才会进入账号池（可在「系统」页一键重启）。若无 refreshToken，该账号在 token
+        导入后网关会在 5 秒内自动扫描到并纳池，无需重启。若无 refreshToken，该账号在 token
         过期后必须重新登录。
       </div>
     </Modal>

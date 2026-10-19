@@ -67,8 +67,9 @@ type Config struct {
 	// 为空 = 不改密码持久化能力（仍可用环境变量 WBGUI_PASSWORD 控制）。
 	CredentialsFile string `json:"credentials_file"`
 
-	// DockerContainer 网关容器名；「系统」页的重启操作用它执行 docker restart。
-	// 留空 = 关闭重启能力。
+	// DockerContainer 网关容器名。合并部署下已不再使用（面板「系统」页不再提供
+	// 容器控制，见 ops/docker.go 包头注释）；保留该字段只为不破坏既有配置解析。
+	// 留空 = DockerAvailable() 报 false（本就不会被页面展示了）。
 	DockerContainer string `json:"docker_container"`
 
 	// AllowedOrigins 额外允许的写操作来源（Origin 的 host 部分）。

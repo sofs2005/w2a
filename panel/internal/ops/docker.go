@@ -1,8 +1,12 @@
-// docker.go Docker 集成：查询网关容器状态、重启容器以加载新账号/新配置。
+// docker.go Docker 集成：查询网关容器状态、重启容器。
 //
-// 为什么需要重启：workbuddy2api 只在启动时扫描 auths/ 目录（SyncToDir）并读取
-// config.json；新增账号或改配置后必须重启进程才会生效。GUI 通过 `docker restart`
-// 复刻 login.sh 的行为，免去用户登录服务器敲命令。
+// **在合并部署（面板与网关同进程）下这套能力不可用，也不应使用**：官方镜像不带
+// docker CLI，compose 也没挂 docker.sock，故 DockerAvailable() 恒为 false；即便
+// 补齐，`docker restart` 掐断的正是承载本次请求的进程，前端只会拿到网络错误。
+// 账号加载早已由网关的目录热加载取代（cmd/server/reload.go，5s），配置变更则
+// 由运维在宿主机执行 docker compose restart。
+//
+// 保留本文件仅作历史兼容（面板「系统」页已不再调用它，见 HOST-PATCHES.md）。
 package ops
 
 import (

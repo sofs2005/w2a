@@ -76,15 +76,14 @@ func New(opts Options) (http.Handler, error) {
 	pcfg.AuthOwnerUID = -1
 	pcfg.AuthOwnerGID = -1
 
-	// 合并后「重启网关」等于重启自己（面板随宿主进程一起重启，中断数秒）。
-	// 这对**账号**加载已无必要——账号改由宿主的目录监听热加载（落盘后数秒入池）。
+	// 合并后「重启网关」等于重启自己——面板随宿主进程一起重启，本次重启请求
+	// 必然被掐断，前端只会拿到网络错误；而且官方镜像不带 docker CLI、compose 也
+	// 没挂 docker.sock，DockerAvailable() 恒为 false。故面板「系统」页已整块移除
+	// 容器控制（见 panel/web/src/pages/System.tsx 与 HOST-PATCHES.md）。
 	//
-	// 但**配置**变更仍然必须重启：网关只在启动时读 config.json，没有 SIGHUP /
-	// 文件监听之类的热重载路径（已确认）。若把 DockerContainer 置空，面板的
-	// 「系统」页重启按钮会被禁用，配置页就变成「能存不能生效」的死路。
-	// 因此保留该能力（默认 workbuddy2api），由面板自身的 DockerAvailable() 判定：
-	// 未挂载 docker.sock 时自动降级为「Docker 不可用」，界面如实提示，
-	// 用户改在宿主机执行 docker compose restart 即可。
+	// 账号加载不需要重启：网关另有目录监听热加载（cmd/server/reload.go，5s）。
+	// 配置变更仍必须重启进程（网关只在启动时读 config.json，无 SIGHUP / 文件监听），
+	// 但这由运维在宿主机执行 `docker compose restart`——网页端无法安全地做这件事。
 	pcfg.RefreshConfigOnLogin = false
 
 	dataDir := opts.DataDir

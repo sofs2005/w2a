@@ -239,16 +239,9 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
       )}
 
       <Alert kind="info">
-        <strong>修改后需要重启网关才生效。</strong> 保存只会写文件，不会自动重启。
-        {session.dangerous_ops ? (
-          <>
-            {' '}可在「系统」页一键重启容器。
-          </>
-        ) : (
-          <>
-            {' '}（自动重启能力需在服务端开启 <span className="mono">dangerous_ops</span>）
-          </>
-        )}
+        <strong>修改后需重启网关进程才生效。</strong> 保存只会写文件，面板不会也不该替你重启
+        —— 面板与网关同进程，网页触发重启只会把当前请求掐断。请在宿主机执行：
+        <div className="muted-box" style={{ marginTop: 7 }}>docker compose restart</div>
         {meta?.backup_path ? (
           <div style={{ marginTop: 5, fontSize: 12.5 }}>
             首次保存前已自动备份原始文件到 <span className="mono">{meta.backup_path}</span>

@@ -975,7 +975,7 @@ type StateFileInfo struct {
 // 推，而不是一口咬定「权限让网关读不到」。按线索分三种：
 //
 //  1. 文件对同组/其他用户可读 —— 网关哪怕以别的用户运行也读得到，成因只剩
-//     「网关还没重新扫描目录」（网关只在启动时读一次 auths/）。
+//     「目录监听还没扫到」（网关每 5 秒比对一次 auths/ 指纹）。
 //  2. 配了 auth_owner_uid/auth_owner_gid，但文件属主没跟着变 —— 落盘那步没生效。
 //  3. 文件属主是 root 且仅 root 可读 —— 真正的隐患：非 root 的网关进程一定读不到
 //     （容器部署正是这种：面板以 root 落盘，网关以 uid 10001 的 app 运行）。
@@ -986,7 +986,7 @@ func (s *Service) credentialLoadHint(uid string) string {
 	p := s.store.PathFor(uid)
 	st, err := os.Stat(p)
 	if p == "" || err != nil {
-		return "需重启网关加载"
+		return "凭证文件不可读，网关无法载入"
 	}
 	mode := st.Mode().Perm()
 	file := "auths/workbuddy-" + shortUID(uid) + ".json"
@@ -998,7 +998,7 @@ func (s *Service) credentialLoadHint(uid string) string {
 	}
 
 	if mode&0o044 != 0 {
-		return "文件对同组/其他用户可读，网关读得到 —— 多半只是还没重新扫描目录，到「系统」页重启网关即可"
+		return "文件对同组/其他用户可读，网关读得到 —— 多半只是目录监听还没扫到（网关每 5 秒重扫 auths/），等几秒再看"
 	}
 	// 配了目标属主：属主是否真的跟着变了，决定是「落盘那步没生效」还是「权限没问题」。
 	// 只看「配置有没有设」会误报 —— 配置生效时文件本来就该是那个属主。
@@ -1006,7 +1006,7 @@ func (s *Service) credentialLoadHint(uid string) string {
 		matched := haveOwner && (uid2 < 0 || fuid == uid2) && (gid < 0 || fgid == gid)
 		if matched {
 			return "文件属主与配置的 auth_owner_uid/auth_owner_gid 一致，权限没问题 —— " +
-				"多半只是还没重新扫描目录，到「系统」页重启网关即可"
+				"多半只是目录监听还没扫到（网关每 5 秒重扫 auths/），等几秒再看"
 		}
 		return fmt.Sprintf("已配置 auth_owner_uid=%d/auth_owner_gid=%d，但该文件属主是 %s，"+
 			"落盘时未改成，请检查挂载目录权限", uid2, gid, owner)
@@ -1017,7 +1017,7 @@ func (s *Service) credentialLoadHint(uid string) string {
 			"设为网关进程的 uid:gid 后重新落盘，或直接 chmod 0644 %s", mode, file)
 	}
 	return fmt.Sprintf("文件属主是 %s 且仅属主可读（%o）。若网关与本控制台同机且同用户，读得到，"+
-		"多半只是还没重新扫描目录，重启网关即可；若两者各读各的 auths 目录（跨机部署），"+
+		"多半只是目录监听还没扫到（每 5 秒重扫一次），等几秒再看；若两者各读各的 auths 目录（跨机部署），"+
 		"文件不在网关那台机器上，需先把凭证部署过去", owner, mode)
 }
 

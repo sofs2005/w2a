@@ -116,7 +116,7 @@ func (s *Service) SaveManualAuth(input ManualAuthInput) (*OpResult, error) {
 	}
 	return &OpResult{
 		UID: acct.UID, Action: "import", OK: true,
-		Message: fmt.Sprintf("凭证已保存到 %s；重启网关后生效", baseName(acct.FilePath)),
+		Message: fmt.Sprintf("凭证已保存到 %s；网关将在数秒内自动加载（无需重启）", baseName(acct.FilePath)),
 		Data:    map[string]any{"file": baseName(acct.FilePath)},
 	}, nil
 }

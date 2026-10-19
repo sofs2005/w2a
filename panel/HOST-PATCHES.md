@@ -4,7 +4,8 @@
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。
 
 上次同步：面板上游 `a26cd0f`（2026-09-24 提交，2026-09-27 拉取，含 5 个提交）。
-当前须保留的改动为第 1–3 条、第 5–15 条；第 4 条已撤销（原前提失效，见该节）。
+当前须保留的改动为第 1–3 条、第 5–16 条；第 4 条已撤销（原前提失效，见该节）。
+（第 16 条是合并部署后移除「系统」页容器控制，属**删除**类改动。）
 （第 9–11 条与第 12 条均为本 fork 独有的新增能力/删除，第 13 条为跟随网关的键改名，
 第 14 条为别名可观测性（新增统计列），第 15 条为出站代理，同属「必须保留」。）
 
@@ -534,6 +535,55 @@ handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与�
 **上游冲突面**：两处 `Transport` 各一行（上游若重写这两个 `New()` 需重放）；
 `ConfigPage.tsx` 新增一整张卡片（上游若改该文件的卡片排布需重放）。网关侧的
 `proxy.go` / `transport.go` / `client.go` / `config.go` 全在根 module，不受 pull 影响。
+
+## 16. 移除「系统」页的容器控制与过期文案（**合并部署专属，删除类改动**）
+
+**动机**：面板原本假设自己是**独立服务**、通过 `docker restart` 让网关加载新账号/新配置。
+合并成单进程单端口后，这套前提全部失效：
+
+- 「重启网关」= 重启自己：请求必然在容器重启时被掐断，前端只会拿到网络错误；
+- 官方镜像**不带 docker CLI**（`Dockerfile` 只装 wget / python3 / bash），根
+  `docker-compose.yml` 也**没挂 docker.sock** → `DockerAvailable()` 恒 false，页面
+  永远显示红色「环境中找不到 docker 命令」；
+- 账号加载早已由网关的目录热加载取代（`cmd/server/reload.go`，5s），重启按钮的
+  「加载新账号」这一半理由也不成立；
+- 页面自述「面板与网关是两个独立服务……网关重启不会影响面板」与事实**相反**；
+- 「客户端接入方式」用的是 `info.gateway_url`，即面板访问网关的**回环地址**
+  （`http://127.0.0.1:7863`），远程用户照抄 curl 只会打到自己的机器上。
+
+**改动**：
+
+1. `web/src/pages/System.tsx`：删除「网关状态」整张卡片（网关地址 / 身份自探 /
+   账号池 / 容器名 / 状态 / 镜像 / 启动时间）、右上角「重启网关」按钮、重启确认弹窗、
+   面板信息里的「Docker 可用」行。保留：运行时长/启动时间（改标「进程运行时长」，
+   即网关进程）、凭证目录、配置文件路径、运行模式、修改密码、任务历史。
+   客户端接入示例的 Base URL 改用 `window.location.origin`（反代后即对外地址），
+   页脚说明改为「同进程、同端口；账号 5s 热加载，配置需 `docker compose restart`」。
+2. 页面外过期文案（都在上游文件里，pull/replay 时注意）：
+   - `Accounts.tsx` 两处：「导入后需重启网关容器…可在『系统』页一键重启」→ 5 秒自动纳池；
+     删除确认「网关需重启后才会移出账号池」→ 数秒内自动移出（后端文案早已改对）。
+   - `ConfigPage.tsx`：「可在『系统』页一键重启容器」→ 宿主机 `docker compose restart`。
+   - `ops.go` 的 `credentialLoadHint`：三处「到『系统』页重启网关即可」→ 「目录监听
+     还没扫到，等几秒」；包头注释「网关只在启动时读一次 auths/」同步更正。
+   - `ops/loginflow.go` 手工导入成功文案：「重启网关后生效」→ 数秒内自动加载。
+   - `ops/configfile.go` 的 `RestartNote`：明确「重启进程 + 宿主机 compose restart」。
+   - `ops/docker.go` 包头注释重写（能力保留但已无调用方）。
+   - `config.go` 的 `DockerContainer` 注释。
+3. `host/host.go`：`RefreshConfigOnLogin = false` 的说明重写（不再以「重启按钮是配置
+   生效的唯一入口」为理由）。
+
+**未做**（刻意保留）：`/api/system/restart` 端点、`ops/docker.go`、`SystemInfo` 里的
+`container` / `docker_available` / `version` 字段都还在，只是页面不再调用。理由：删除
+它们要动后端路由、配置项与若干测试，收益只是少几行死代码；保留则对「面板被单独
+部署」的旧形态无害（那条路径本来就走 `docker restart`）。
+
+**遗留**：`panelVersion`（`cmd/server/panel.go`）从未被根 `Dockerfile` 用 `-ldflags`
+注入，故 `/api/system` 恒回 `version: "dev"`。系统页因此改为**仅在版本号非 `dev` 时
+显示这一行**（不谎报、也不留一行无信息量的文字）。要真正显示版本，需在根 Dockerfile
+给 `./cmd/server` 加 `-X main.panelVersion=...`；本次未动构建参数。
+
+**恢复方式**：若将来面板重新独立部署并挂上 docker.sock，按 git 历史找回该页与
+`host/host.go` 的旧注释即可；后端能力一直在，页面上重新接线即可。
 
 ## 纯新增、不会冲突的文件
 

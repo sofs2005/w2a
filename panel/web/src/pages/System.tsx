@@ -1,10 +1,16 @@
-// System.tsx 系统页：运行信息、容器状态与控制、任务历史、使用说明。
+// System.tsx 系统页：面板/网关运行信息、面板账号与口令、任务历史、客户端接入示例。
+//
+// 合并部署（面板与网关同进程、同端口）之后，这里**刻意不再有容器控制**：
+// 「重启容器」在这个形态下等于重启自己、请求必被掐断，而且官方镜像不带 docker
+// CLI、compose 也没挂 docker.sock —— 按钮从来就点不动。账号热加载（5s）取代了
+// 它，配置变更则在宿主机执行 docker compose restart。旧卡片整块移除，见
+// HOST-PATCHES.md。
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { SessionInfo, SystemInfo, TaskListResponse } from '../types'
-import { Alert, Badge, ConfirmDialog, Empty, fmtDuration, fmtISO, Modal, Spinner } from '../ui'
-import { Inbox, Key, Power, RefreshCw } from '../icons'
+import { Alert, Badge, Empty, fmtDuration, fmtISO, Modal, Spinner } from '../ui'
+import { Inbox, Key, RefreshCw } from '../icons'
 
 export default function System({
   session,
@@ -17,9 +23,6 @@ export default function System({
   const [tasks, setTasks] = useState<TaskListResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [confirmRestart, setConfirmRestart] = useState(false)
-  const [restarting, setRestarting] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
 
   const load = useCallback(async (silent = false) => {
@@ -42,62 +45,26 @@ export default function System({
     return () => clearInterval(timer)
   }, [load])
 
-  const doRestart = async () => {
-    setRestarting(true)
-    setNotice(null)
-    try {
-      const res = await api.restart()
-      setNotice(res.message + '。网关需数秒恢复，请稍后刷新页面查看账号加载情况。')
-      setConfirmRestart(false)
-      // 重启不改变面板自身配置，但同步一次会话信息以保证模式标志（只读/高危）最新。
-      void onSessionRefresh()
-      // 给容器一点启动时间再刷新状态。
-      setTimeout(() => void load(true), 4000)
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : '重启失败')
-    } finally {
-      setRestarting(false)
-    }
-  }
-
   if (loading && !info) return <Spinner label="正在加载系统信息…" />
 
-  const c = info?.container
-  const gatewayServiceOK = info?.gateway_health?.service === 'workbuddy2api'
+  // Base URL 必须用浏览器实际访问的源，而不是 info.gateway_url：后者是面板访问网关的
+  // 回环地址（127.0.0.1），远程用户照着复制只会打到自己的机器上。
+  const baseURL = `${window.location.origin}/v1`
 
   return (
     <>
       <div className="page-head">
         <div>
           <h1>系统</h1>
-          <p>面板与网关的运行状态、容器控制与任务历史</p>
+          <p>面板/网关进程运行信息、登录口令与任务历史</p>
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
             {loading ? <Spinner /> : <RefreshCw size={14} />} 刷新
           </button>
-          <button
-            className="btn btn-primary"
-            onClick={() => setConfirmRestart(true)}
-            disabled={!session.dangerous_ops || !c?.exists}
-            title={
-              !session.dangerous_ops
-                ? '需在服务端开启 dangerous_ops 才能重启容器'
-                : !c?.exists
-                  ? '未检测到容器'
-                  : '重启网关容器以加载新账号/新配置'
-            }
-          >
-            <Power size={14} /> 重启网关
-          </button>
         </div>
       </div>
 
-      {notice && (
-        <Alert kind="ok" onClose={() => setNotice(null)}>
-          {notice}
-        </Alert>
-      )}
       {error && (
         <Alert kind="error" onClose={() => setError(null)}>
           {error}
@@ -108,62 +75,6 @@ export default function System({
           面板正在使用默认口令，请在服务端配置中修改 <span className="mono">ui.password</span>。
         </Alert>
       )}
-
-      {/* 网关与容器状态 */}
-      <div className="card">
-        <div className="card-head">
-          <h2>网关状态</h2>
-          {gatewayServiceOK ? <Badge cls="badge-ok">运行中</Badge> : <Badge cls="badge-danger">不可达</Badge>}
-        </div>
-        <dl className="kv">
-          <dt>网关地址</dt>
-          <dd className="mono">{info?.gateway_url}</dd>
-          <dt>身份标识</dt>
-          <dd>
-            {gatewayServiceOK ? (
-              <span className="text-ok">
-                service = <span className="mono">workbuddy2api</span>
-              </span>
-            ) : (
-              <span className="text-danger">{info?.gateway_health_error || '无法确认身份'}</span>
-            )}
-          </dd>
-          <dt>账号池</dt>
-          <dd>
-            {info?.gateway_health ? `${info.gateway_health.healthy} / ${info.gateway_health.total} 可用` : '—'}
-          </dd>
-          <dt>容器名</dt>
-          <dd className="mono">{c?.name || '（未配置）'}</dd>
-          <dt>容器状态</dt>
-          <dd>
-            {c?.disabled ? (
-              <span className="text-faint">未配置 docker_container</span>
-            ) : c?.exists ? (
-              <>
-                <Badge cls={c.running ? 'badge-ok' : 'badge-danger'}>{c.status || 'unknown'}</Badge>
-                {c.health && c.health !== '-' && (
-                  <span className="text-faint" style={{ marginLeft: 8 }}>
-                    健康检查：{c.health}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="text-danger">{c?.error || '容器不存在'}</span>
-            )}
-          </dd>
-          <dt>容器镜像</dt>
-          <dd className="mono">{c?.image || '—'}</dd>
-          <dt>容器启动</dt>
-          <dd>{c?.started_at ? fmtISO(c.started_at) : '—'}</dd>
-        </dl>
-        {!session.dangerous_ops && (
-          <div className="desc" style={{ marginTop: 12 }}>
-            当前未开启高危操作（<span className="mono">dangerous_ops=false</span>），因此「重启网关」「删除账号」
-            「恢复配置备份」均被禁用。如需启用，在面板服务端配置中设置：
-            <div className="muted-box" style={{ marginTop: 7 }}>{`WBGUI_DANGEROUS_OPS=true  # 或配置文件里 "dangerous_ops": true`}</div>
-          </div>
-        )}
-      </div>
 
       {/* 面板信息 */}
       <div className="card">
@@ -179,11 +90,17 @@ export default function System({
           </button>
         </div>
         <dl className="kv">
-          <dt>面板版本</dt>
-          <dd className="mono">{info?.version || 'dev'}</dd>
-          <dt>运行时长</dt>
+          {/* 根 Dockerfile 未注入 panelVersion，`dev` 是「未注入」而非真实版本——
+              显示出来只会让人以为构建坏了，索性在有版本号时才显示这一行。 */}
+          {info?.version && info.version !== 'dev' && (
+            <>
+              <dt>面板版本</dt>
+              <dd className="mono">{info.version}</dd>
+            </>
+          )}
+          <dt>进程运行时长</dt>
           <dd>{info ? fmtDuration(info.uptime_sec) : '—'}</dd>
-          <dt>启动时间</dt>
+          <dt>进程启动时间</dt>
           <dd>{info ? fmtISO(info.started_at) : '—'}</dd>
           <dt>凭证目录</dt>
           <dd className="mono">{info?.auth_dir}</dd>
@@ -198,15 +115,13 @@ export default function System({
               <Badge cls="badge-dim">高危操作已锁定</Badge>
             )}
           </dd>
-          <dt>Docker 可用</dt>
-          <dd>
-            {info?.docker_available ? (
-              <span className="text-ok">是</span>
-            ) : (
-              <span className="text-danger">否（容器控制已降级）</span>
-            )}
-          </dd>
         </dl>
+        <div className="desc" style={{ marginTop: 12 }}>
+          面板与网关<strong>同进程、同端口</strong>，故「运行时长」即网关进程的存活时间。
+          账号凭证由网关每 5 秒扫描 <span className="mono">auths/</span> 自动热加载；
+          <span className="mono">config.json</span> 的修改未被监听，需在宿主机执行
+          <span className="mono"> docker compose restart </span>才会生效。
+        </div>
       </div>
 
       {/* 任务历史 */}
@@ -277,45 +192,24 @@ export default function System({
           网关对客户端暴露标准 OpenAI 兼容接口，任何支持自定义 base_url 的客户端都可直接接入：
         </p>
         <div className="muted-box">
-          {`Base URL:  ${info?.gateway_url || 'http://127.0.0.1:7863'}/v1
+          {`Base URL:  ${baseURL}
 API Key:   你在网关 config.json 中设置的 api_key
 模型:      见「聊天测试」页的模型列表（如 deepseek-v4.1-flash、glm-5.3 等）`}
         </div>
         <div className="muted-box" style={{ marginTop: 10 }}>
           {`# 命令行验证
-curl ${info?.gateway_url || 'http://127.0.0.1:7863'}/v1/chat/completions \\
+curl ${baseURL}/chat/completions \\
   -H "Authorization: Bearer <你的 api_key>" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'`}
         </div>
         <div className="desc" style={{ marginTop: 10 }}>
-          提示：本面板与网关是<strong>两个独立服务</strong>。面板只通过 HTTP API 管理网关，并直读磁盘上的账号凭证与
-          配置文件；因此网关重启不会影响面板，反之亦然。
+          上面的地址取自浏览器当前打开的源；若经反向代理对外，它就是代理后的地址。面板与网关
+          <strong>同进程、同端口</strong>：面板的 <span className="mono">/api/*</span> 与网关的
+          <span className="mono"> /v1/*</span>、<span className="mono">/status</span>、
+          <span className="mono">/healthz</span> 由同一个进程提供服务。
         </div>
       </div>
-
-      {confirmRestart && (
-        <ConfirmDialog
-          title="重启网关容器"
-          danger
-          confirmText="确认重启"
-          busy={restarting}
-          onCancel={() => setConfirmRestart(false)}
-          onConfirm={() => void doRestart()}
-          message={
-            <>
-              <p style={{ marginTop: 0 }}>
-                即将执行 <span className="mono">docker restart {c?.name}</span>。
-              </p>
-              <p>
-                重启期间（约 2-5 秒）网关无法处理请求，正在进行的对话会中断。
-                重启后新账号会被加载进账号池、新配置会生效。
-              </p>
-              <p style={{ marginBottom: 0 }}>账号池状态由 state.json 持久化，重启不会丢失冷却/熔断记录。</p>
-            </>
-          }
-        />
-      )}
 
       {showPassword && (
         <ChangePasswordDialog
