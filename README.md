@@ -536,6 +536,82 @@ docker compose pull && docker compose up -d
 > `gui-credentials.json` / `backups` 任一存在），会**拒绝生成新配置并报错退出**，
 > 而不是悄悄换掉 `api_key`。日志会直接打印上面这条 `docker inspect` 命令。
 
+### 同步官方客户端版本（每次官方发版时）
+
+上游风控会按客户端版本与请求头指纹判定请求合法性，官方发版后需要把内置版本号跟进。
+两域（CN / global）**发布节奏不同步**（2026-10 实测 CN 5.8.3、global 5.8.4，内置
+CLI 同版 2.161.0），**绝不能互相套用**。
+
+1. 读出官方安装体的实际版本（只读）：
+
+   ```bash
+   node scripts/official_versions.js
+   # 装在其他位置时显式指定：
+   node scripts/official_versions.js --root D:/PG/workbuddyAI --home C:/Users/me
+   ```
+
+   关键三行：`runtime.CN.version`、`runtime.global.version`、`install.*.cliVersion`。
+   前两者来自 `~/.workbuddy/last-launch.json` 与 `~/.workbuddy-ai/last-launch.json`
+   （运行时真实发包版本），第三个是两域共用的内置 CLI 版本。
+
+2. 同步常量（5 个文件 7 处，缺一处就会出现「UA 与 X-IDE-Version 打架」）：
+
+   | 位置 | 常量 |
+   |---|---|
+   | `internal/upstream/headers.go` | `defaultClientVersionCN` / `defaultClientVersionGlobal` / `defaultCliVersion` |
+   | `panel/internal/upstream/client.go` | `desktopClientVersionCN` / `desktopClientVersionGlobal` / `desktopCLIVersion` |
+   | `panel/internal/upstream/client.go` | `clientUA`（面板自身的 CLI 型 UA） |
+   | `internal/upstream/global_models.go` | `cliV3UA`（`CLI/<ver> CodeBuddy/<ver>`） |
+   | `cmd/login/oauth.go` | `clientUA`（同上格式） |
+
+   一次性核对有没有漏（按「常量 = "…版本号…"」形态抓，注释与测试不参与）：
+
+   ```bash
+   grep -rnE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*"[^"]*[0-9]+\.[0-9]+\.[0-9]+' \
+     --include='*.go' internal/ cmd/ panel/internal/ | grep -v '_test\.go'
+   ```
+
+   应命中上面 7 处，外加两行**不属于本次同步范围**的：`global_models.go` 的
+   `ideV3UA`（官方 IDE 端固定版本，官方没换 IDE 时不要动）和 `cmd/stats/main.go`
+   的 `host = "127.0.0.1"`（正则误伤，忽略）。
+
+3. 测试里的字面量同步（否则 `go test` 直接红）：
+
+   ```bash
+   grep -rnE '"[0-9]+\.[0-9]+\.[0-9]+' --include='*_test.go' internal/ panel/
+   ```
+
+   主要在 `useragent_test.go`（`defaultUAString` / `billingUAWorkBuddy`）、
+   `headers_global_test.go`（`globalUAString`）、`attribution_test.go`（`X-IDE-Version`）。
+
+4. 两个 module 各跑一遍：
+
+   ```bash
+   go build ./... && go vet ./... && go test ./internal/... ./cmd/...
+   cd panel && go test ./...
+   ```
+
+5. 若官方不只改版本号（还改了请求头形态），用 asar 探针复核官方包：
+
+   ```bash
+   node scripts/asar_probe.js scan <安装目录>/resources/app.asar X-Agent-Intent 200 5
+   node scripts/asar_probe.js list <安装目录>/resources/app.asar cli/
+   ```
+
+   `X-Agent-Intent` / `X-Private-Data` / `X-IDE-*` 应出现在 `/main/server.js` 的
+   `applyGatewayHeaders`；版本号在 `/cli/product.json` 与 `/cli/package.json`。
+
+6. 部署后核对容器里跑的是新构建（同名旧镜像仍可拉、`pull` 不报错，是历史事故）：
+
+   ```bash
+   docker exec workbuddy2api sh -c \
+     'for k in X-Machine-ID X-Agent-Intent 5.8.4; do echo "$k $(grep -ao "$k" /app/wb2api | wc -l)"; done'
+   ```
+
+   新构建：`X-Machine-ID` 为 0、`X-Agent-Intent` ≥1、`5.8.4` ≥1。更严格的做法是对比
+   `docker inspect -f '{{.Image}}' workbuddy2api` 与 `ghcr.io/sofs2005/w2a:latest`
+   的 manifest digest。
+
 ### 源码构建
 
 面板（`panel/`）是 `git subtree` 引入的**独立 Go module**，根 module 通过
