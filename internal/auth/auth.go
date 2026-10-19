@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,6 +58,53 @@ type Auth struct {
 	// 消费方：upstream.clientFor / TransportFor（按名取 Transport，连接池按线路
 	// 分开）。地址解析失败或线路名不存在时上游**明确报错、不静默直连**。
 	ProxyName string
+
+	// Weight 账号级手写权重，来源 auth 文件顶层 `weight` 字段（面板「权重」写入）。
+	// 0 = 未设置（等价 1.0）。
+	//
+	// 语义是**乘数**而非优先级：选号本来就按「余额 + 快过期占比 + 闲置时长」三因子
+	// 加权随机（见 pool.weightOf），这里把结果再乘上该值 —— 权重 3 表示同等条件下
+	// 被抽中的机会约为默认的 3 倍。之所以不做成「权重高的恒定优先」：那会让低权重
+	// 的号一直闲置，积分用不完就过期。硬门槛（冷却 / 熔断 / 禁用 / 在途占满 / 成本
+	// 分层）不受本字段影响。
+	Weight float64
+}
+
+// 手写权重的取值区间：低于 MinWeight 等于「几乎不用」（但仍留一丝机会，与
+// pickWeighted 的权重保底同口径），高于 MaxWeight 没有实际意义。
+const (
+	MinWeight = 0.1
+	MaxWeight = 100.0
+)
+
+// PickWeight 返回用于选号的权重乘数：未设置（0）或非法值给 1，合法值钳制在
+// [MinWeight, MaxWeight]。选号侧只读本方法、不直读字段 —— 钳制口径只有一处，
+// 否则「文件里写了 1e9」这种输入会把选号直接压成一号独大。
+func (a *Auth) PickWeight() float64 {
+	w := a.Weight
+	if math.IsNaN(w) || math.IsInf(w, 0) || w <= 0 {
+		return 1
+	}
+	if w < MinWeight {
+		return MinWeight
+	}
+	if w > MaxWeight {
+		return MaxWeight
+	}
+	return w
+}
+
+// sanitizeWeight 解析期清洗：非有限值与负数一律当「未设置」（0）。合法但越界的
+// 值**保留原样**，由 PickWeight 在选号时钳制 —— 面板靠原值回显「用户填了什么」，
+// 这里改写会让界面显示与文件内容不一致。手改坏的值打一行 WARN，否则「权重没生效」
+// 会变成没有线索的悬案。
+func sanitizeWeight(w float64) float64 {
+	if math.IsNaN(w) || math.IsInf(w, 0) || w < 0 {
+		log.Printf("WARN: [auth] 忽略非法的 weight=%v（按未设置处理，应为 %v..%v）",
+			w, MinWeight, MaxWeight)
+		return 0
+	}
+	return w
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -278,6 +326,8 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken string `json:"device_token"`
 			// Proxy 顶层 proxy（线路名，面板写入；见 Auth.ProxyName）。
 			Proxy string `json:"proxy"`
+			// Weight 顶层 weight（手写权重，面板写入；见 Auth.Weight）。
+			Weight float64 `json:"weight"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -293,6 +343,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
 			ProxyName:    strings.TrimSpace(n.Proxy),
+			Weight:       sanitizeWeight(n.Weight),
 		}
 	} else {
 		var f struct {
@@ -306,6 +357,11 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname     string `json:"nickname"`
 			DeviceToken  string `json:"device_token"`
 			Proxy        string `json:"proxy"`
+
+			// Weight 顶层 weight（与 proxy 同层级，面板写入；见 Auth.Weight）。
+			// 单独成组（上方空行）是为了不改动既有字段的对齐 —— 补丁切片只描述
+			// 自己的增量，gofmt 顺手重排别人的行会让前一个补丁的「已应用」判定失效。
+			Weight float64 `json:"weight"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -321,6 +377,7 @@ func Parse(raw []byte) (*Auth, error) {
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
 			ProxyName:    strings.TrimSpace(f.Proxy),
+			Weight:       sanitizeWeight(f.Weight),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -364,6 +421,11 @@ func (a *Auth) SaveAtomic() error {
 	// 续期时把面板绑好的出口线路静默解绑（出口随之改变而没人会发现）。
 	if a.ProxyName != "" {
 		doc["proxy"] = a.ProxyName
+	}
+	// Weight 同理只在非零时写回：刷新 token 会整份重建文件，不保留等于把用户设的
+	// 权重静默清零。0 = 未设置，不写键（手改过的文件也不会多出 "weight": 1 噪音）。
+	if a.Weight != 0 {
+		doc["weight"] = a.Weight
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

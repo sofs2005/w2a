@@ -147,6 +147,7 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为：硬冷却到次日 04:00）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur)                 // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloorCN, cfg.Pool.CreditFloorGlobal) // 积分保底按域分档（默认 100/30；0 = 该域关闭）
@@ -262,25 +263,35 @@ func main() {
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	up.GlobalEnabled = cfg.Global.Enabled
 
+	// 私有部署标识：让每日随机偏移在重启后保持不变、且与其他部署互不相同。
+	// **绝不打印** —— 知道 seed 就能反推出每天的实际触发时刻。
+	scheduleSeed := cfg.APIKey
+	if scheduleSeed == "" {
+		scheduleSeed = cfg.AuthDir
+	}
 	sch := scheduler.New(scheduler.Config{
-		Pool:                p,
-		Upstream:            up,
-		CheckinHours:        cfg.Schedule.CheckinHours,
-		TravelHours:         cfg.Schedule.TravelHours,
-		ActivityHours:       cfg.Schedule.ActivityHours,
-		KeepaliveHours:      cfg.Schedule.KeepaliveHours,
-		SchoolHours:         cfg.Schedule.SchoolHours,
-		CatHours:            cfg.Schedule.CatHours,
-		GrowthHours:         cfg.Schedule.GrowthHours,
-		ActivityReportCount: cfg.Schedule.ActivityReportCount,
-		ExpiringSoonWindow:  cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
-		CheckinDisabled:     !cfg.Schedule.CheckinEnabled,
-		TravelDisabled:      !cfg.Schedule.TravelEnabled,
-		ActivityDisabled:    !cfg.Schedule.ActivityEnabled,
-		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
-		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
-		CatDisabled:         !cfg.Schedule.CatEnabled,
-		GrowthDisabled:      !cfg.Schedule.GrowthEnabled,
+		AccountDelayMinSeconds: cfg.Schedule.AccountDelayMinSeconds,
+		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
+		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
+		RandomDelaySeed:        scheduleSeed,
+		Pool:                   p,
+		Upstream:               up,
+		CheckinHours:           cfg.Schedule.CheckinHours,
+		TravelHours:            cfg.Schedule.TravelHours,
+		ActivityHours:          cfg.Schedule.ActivityHours,
+		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
+		SchoolHours:            cfg.Schedule.SchoolHours,
+		CatHours:               cfg.Schedule.CatHours,
+		GrowthHours:            cfg.Schedule.GrowthHours,
+		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
+		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
+		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
+		TravelDisabled:         !cfg.Schedule.TravelEnabled,
+		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
+		KeepaliveDisabled:      !cfg.Schedule.KeepaliveEnabled,
+		SchoolDisabled:         !cfg.Schedule.SchoolEnabled,
+		CatDisabled:            !cfg.Schedule.CatEnabled,
+		GrowthDisabled:         !cfg.Schedule.GrowthEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -319,6 +330,14 @@ func main() {
 		log.Printf("成长任务补跑已禁用（schedule.growth_enabled=false）")
 	} else {
 		log.Printf("成长任务补跑已启用：%v 点（task_runner.py ALL --yes，幂等：已领/已达标逐项跳过）", cfg.Schedule.GrowthHours)
+	}
+	// 两类扰动的启动回执：只报"开了多大"，不报 seed。
+	if cfg.Schedule.RandomDelayMinutes > 0 {
+		log.Printf("排程随机平移已启用：每个时点在原小时内随机偏移 0-%d 分钟（按部署种子+日期+任务类型稳定取值）", cfg.Schedule.RandomDelayMinutes)
+	}
+	if cfg.Schedule.AccountDelayMaxSeconds > 0 {
+		log.Printf("账号随机间隔已启用：定时遍历每两个账号之间额外等 %d-%d 秒（手动触发不受影响）",
+			cfg.Schedule.AccountDelayMinSeconds, cfg.Schedule.AccountDelayMaxSeconds)
 	}
 
 	h := server.NewHandler(server.Config{

@@ -319,11 +319,11 @@ func blockCauseOf(mc modelCooldown) BlockCause {
 
 // ModelBlockStatus 描述某模型在全池范围内因模型级冷却而不可选的情况。
 type ModelBlockStatus struct {
-	Blocked bool      // true = 每个非禁用账号都对该模型处于冷却中
+	Blocked bool       // true = 每个非禁用账号都对该模型处于冷却中
 	Cause   BlockCause // 阻塞性质：限流（该等）还是不可用（该换模型）
-	Reason  string    // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
-	Until   time.Time // 最早解封时间（零值 = 上游未给重置时刻）
-	Count   int       // 因此被挡的账号数
+	Reason  string     // 冷却原因（通常为上游原文，如 "11102 model ... not found"）
+	Until   time.Time  // 最早解封时间（零值 = 上游未给重置时刻）
+	Count   int        // 因此被挡的账号数
 }
 
 // ModelBlocked 报告该模型是否在全池范围内被模型级冷却挡住。
@@ -495,7 +495,19 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。
 // 用于 ErrHardCredit 场景：积分耗尽账号等签到任务（09:00/21:00）恢复。
+//
+// 配了 cooldown.credit_exhausted（分钟级时长）时不走这里：改用 **软冷却** 只退出
+// 那一段，到期即回到候选池（issue #78「不要等薅完积分冷却一整天」）。软冷却的
+// 时长就是配置值、不做指数堆加（见 Cooldown 的说明），所以它**不会**被连续触发
+// 拉长。0 = 未配置，保持旧行为。
 func (p *Pool) CooldownUntilTomorrow4AM(uid string, reason string) {
+	p.mu.RLock()
+	short := p.creditExhausted
+	p.mu.RUnlock()
+	if short > 0 {
+		p.Cooldown(uid, CoolSoft, short, reason)
+		return
+	}
 	now := time.Now()
 	p.Cooldown(uid, CoolHard, nextDay4AM(now).Sub(now), reason)
 }

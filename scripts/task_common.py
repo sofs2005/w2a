@@ -12,7 +12,7 @@
      chat 域 400 时降级 web 域 www.workbuddy.cn 同路径 + x-client-platform: web）
   - 领养   : POST /activity/growth/buddy/agreement + /buddy/first（幂等，+300c+8e）
 """
-import json, os, time, glob, urllib.request, urllib.error
+import json, os, time, glob, random, urllib.request, urllib.error
 
 
 def _resolve_auths_dir() -> str:
@@ -294,3 +294,39 @@ def chat_completion(auth, model_id="glm-5.2", prompt="hi", max_tokens=32,
         return e.code, t[:200]
     except Exception as e:
         return -1, repr(e)[:200]
+
+
+class AccountSpacing:
+    """账号之间的随机间隔；首个（符合条件的）账号不等待.
+
+    Go 调度器在定时派发时通过 --account-delay-min/max 注入；手动跑脚本时
+    两个参数都缺省 0，行为与改造前逐字节一致。间隔放在账号循环里、skip 判定
+    之后 —— 被跳过的账号（global / 无凭证）不产生上游请求，不该占用间隔。
+    """
+
+    def __init__(self, minimum=0, maximum=0):
+        if not 0 <= minimum <= maximum <= 600:
+            raise ValueError("account delays require 0 <= min <= max <= 600 seconds")
+        self.minimum, self.maximum = minimum, maximum
+        self.started = False
+
+    def wait(self):
+        if self.started and self.maximum > 0:
+            delay = random.SystemRandom().uniform(self.minimum, self.maximum)
+            print(f"account spacing: waiting {delay:.1f}s", flush=True)
+            time.sleep(delay)
+        self.started = True
+
+
+def add_account_spacing_arguments(parser):
+    parser.add_argument("--account-delay-min", type=int, default=0,
+                        help="账号之间的最小间隔秒数（默认 0）")
+    parser.add_argument("--account-delay-max", type=int, default=0,
+                        help="账号之间随机间隔的上限秒数（0 = 不启用）")
+
+
+def account_spacing_from_args(args, parser):
+    try:
+        return AccountSpacing(args.account_delay_min, args.account_delay_max)
+    except ValueError as exc:
+        parser.error(str(exc))

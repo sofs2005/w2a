@@ -8,6 +8,7 @@
 package scheduler
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/exec"
@@ -46,12 +47,27 @@ type scriptRunner interface {
 	Run() error
 }
 
+// contextSetter 可选能力：支持 ctx 取消的实现（scriptCmd 实现；测试 fake 不必）。
+// 不并进 scriptRunner 主接口，是为了让既有 fake 无需改动。
+type contextSetter interface {
+	SetContext(context.Context)
+}
+
 // scriptCmd exec.Cmd 适配器：把 exec.Cmd 的 Dir 字段包装成 SetDir 方法，
 // 满足 scriptRunner 接口（exec.Cmd 本身只有字段没有方法）。
 type scriptCmd struct{ cmd *exec.Cmd }
 
 func (c *scriptCmd) SetDir(dir string) { c.cmd.Dir = dir }
-func (c *scriptCmd) Run() error        { return c.cmd.Run() }
+
+// SetContext 用同一个可执行文件与参数重建为 CommandContext：进程在 ctx 取消时
+// 被杀掉，避免停机时残留 python 子进程继续打上游。
+func (c *scriptCmd) SetContext(ctx context.Context) {
+	dir := c.cmd.Dir
+	c.cmd = exec.CommandContext(ctx, c.cmd.Path, c.cmd.Args[1:]...)
+	c.cmd.Dir = dir // 保留已设置的工作目录（调用顺序 SetDir→SetContext 也成立）
+}
+
+func (c *scriptCmd) Run() error { return c.cmd.Run() }
 
 // newScriptCmd 构建脚本子进程。包级变量便于测试注入 fake（installFakeExec 覆盖）。
 // 工作目录由调用方 SetDir 显式设置仓库根。
@@ -79,8 +95,20 @@ func pythonCmd() string {
 // runScript 依次执行若干脚本命令：任一命令失败只记一行 WARN，不向上抛、
 // 不影响调度主循环继续跑下一个时点。单命令失败不中断后续命令。
 func runScript(name, root string, commands [][]string) {
+	runScriptContext(context.Background(), name, root, commands)
+}
+
+// runScriptContext 同 runScript，但把 ctx 传给子进程：ctx 取消即杀子进程，
+// 且取消后不再启动后续命令（优雅停机不留下半截脚本）。
+func runScriptContext(ctx context.Context, name, root string, commands [][]string) {
 	for _, cmdArgs := range commands {
+		if ctx.Err() != nil {
+			return
+		}
 		c := newScriptCmd(cmdArgs[0], cmdArgs[1:]...)
+		if setter, ok := c.(contextSetter); ok {
+			setter.SetContext(ctx)
+		}
 		c.SetDir(root)
 		if err := c.Run(); err != nil {
 			log.Printf("WARN: %s (%s): %v", name, cmdArgs[1], err)
@@ -93,22 +121,26 @@ func runScript(name, root string, commands [][]string) {
 // RunSchoolNow 立即执行开学季任务：school_open_day_2026.py ALL --run --yes。
 // 全量跑任务点亮 + 领奖 + 自动抽空抽奖余额。活动下线（in_period=false）时脚本
 // 各段全量跳过、正常退出，不视为失败。失败只记 WARN。
-func (s *Scheduler) RunSchoolNow() {
+func (s *Scheduler) RunSchoolNow() { s.runSchoolNow(context.Background()) }
+
+func (s *Scheduler) runSchoolNow(ctx context.Context) {
 	root := repoRoot()
-	runScript("school", root, [][]string{
-		{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
+	runScriptContext(ctx, "school", root, [][]string{
+		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}),
 	})
 }
 
 // RunCatNow 立即执行夜猫子任务：task_runner.py ALL --yes --only black_cat。
 // black_cat 时段敏感：夜猫窗口 23:00–08:00 CST 内最多补 1 次（task_runner 内部
 // 判定，非窗口期打印 skip 正常退出）。失败只记 WARN。
-func (s *Scheduler) RunCatNow() {
+func (s *Scheduler) RunCatNow() { s.runCatNow(context.Background()) }
+
+func (s *Scheduler) runCatNow(ctx context.Context) {
 	taskRunnerMu.Lock()
 	defer taskRunnerMu.Unlock()
 	root := repoRoot()
-	runScript("cat", root, [][]string{
-		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
+	runScriptContext(ctx, "cat", root, [][]string{
+		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"}),
 	})
 }
 
@@ -136,11 +168,13 @@ var taskRunnerMu sync.Mutex
 //   - global realm 账号：脚本 auth_is_global 门控跳过，不发起任何 CN 任务中心请求。
 //
 // 失败只记 WARN（runScript 口径），不影响同槽其余任务族。
-func (s *Scheduler) RunGrowthTasksNow() {
+func (s *Scheduler) RunGrowthTasksNow() { s.runGrowthTasksNow(context.Background()) }
+
+func (s *Scheduler) runGrowthTasksNow(ctx context.Context) {
 	taskRunnerMu.Lock()
 	defer taskRunnerMu.Unlock()
 	root := repoRoot()
-	runScript("growth", root, [][]string{
-		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes"},
+	runScriptContext(ctx, "growth", root, [][]string{
+		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes"}),
 	})
 }

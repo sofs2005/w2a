@@ -14,13 +14,23 @@ import "fmt"
 // cmd/server 与 cmd/activity 共用本结构，默认值由 DefaultSchedule 填充、
 // 缺省归一由 Normalize 完成——两命令走同一份语义，不再各自复制。
 type Schedule struct {
-	CheckinHours   []int `json:"checkin_hours"`   // [9,21]
-	TravelHours    []int `json:"travel_hours"`    // [9,21]
-	ActivityHours  []int `json:"activity_hours"`  // [10]
-	KeepaliveHours []int `json:"keepalive_hours"` // [22]
-	SchoolHours    []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
-	CatHours       []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
-	GrowthHours    []int `json:"growth_hours"`    // [8] 成长任务补跑（一次性任务，幂等，覆盖新账号）
+	// AccountDelayMinSeconds / AccountDelayMaxSeconds 账号间随机间隔（秒）：
+	// 定时派发的遍历在每两个账号之间额外睡 [min, max] 秒（含原有限速基数）。
+	// 0/0 = 不额外间隔（旧行为）；手动触发（面板/管理接口）不受影响。
+	// 上限 600s：再长会让一轮签到跨过下一个时点。
+	AccountDelayMinSeconds int `json:"account_delay_min_seconds"`
+	AccountDelayMaxSeconds int `json:"account_delay_max_seconds"`
+	// RandomDelayMinutes 把每个每日时点在**原小时内**随机平移：0 = 整点（旧行为），
+	// 1..60 = 在该分钟内（60 视为 59:59 上限，不与下一个整点重叠）。
+	// 偏移由「部署种子 + 日期 + 小时 + 任务类型」哈希得出，重启不变、跨部署独立。
+	RandomDelayMinutes int   `json:"random_delay_minutes"`
+	CheckinHours       []int `json:"checkin_hours"`   // [9,21]
+	TravelHours        []int `json:"travel_hours"`    // [9,21]
+	ActivityHours      []int `json:"activity_hours"`  // [10]
+	KeepaliveHours     []int `json:"keepalive_hours"` // [22]
+	SchoolHours        []int `json:"school_hours"`    // [12] 开学季任务（迁移自 school/cat 两条系统 crontab）
+	CatHours           []int `json:"cat_hours"`       // [1] 夜猫窗口 23-08 CST，01:00 窗口内补 1 次
+	GrowthHours        []int `json:"growth_hours"`    // [8] 成长任务补跑（一次性任务，幂等，覆盖新账号）
 	// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/SchoolEnabled/CatEnabled/GrowthEnabled
 	// 显式禁用开关（缺省 true）。
 	//
@@ -55,9 +65,9 @@ func DefaultSchedule() Schedule {
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
 		KeepaliveHours:      []int{22},
-		SchoolHours:          []int{12},
-		CatHours:             []int{1},
-		GrowthHours:          []int{8},
+		SchoolHours:         []int{12},
+		CatHours:            []int{1},
+		GrowthHours:         []int{8},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,
@@ -78,6 +88,13 @@ func DefaultSchedule() Schedule {
 // 注意这是「显式配 0 = 旧行为」的兼容语义，与 scheduler.New 的 <=0 → 1 归一一致；
 // 「缺省 = 5」由 DefaultSchedule 在 Unmarshal 前置入，是另一条路径，两者不合并。
 func (s *Schedule) Normalize() error {
+	if s.AccountDelayMinSeconds < 0 || s.AccountDelayMaxSeconds > 600 ||
+		s.AccountDelayMaxSeconds < s.AccountDelayMinSeconds {
+		return fmt.Errorf("schedule account delays require 0 <= min <= max <= 600 seconds")
+	}
+	if s.RandomDelayMinutes < 0 || s.RandomDelayMinutes > 60 {
+		return fmt.Errorf("schedule.random_delay_minutes must be between 0 and 60")
+	}
 	if len(s.CheckinHours) == 0 {
 		s.CheckinHours = []int{9, 21}
 	}

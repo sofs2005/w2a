@@ -57,6 +57,10 @@ type Config struct {
 		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// CreditExhausted 积分耗尽后的冷却时长（如 "10m"）。空 = 旧行为：硬冷却到
+		// 次日 04:00（等签到恢复）。配了就只退出这一小段，到期回到候选池 —— 用户
+		// 可能在期间充值、上游也可能刷新额度，挂一整天是浪费（issue #78）。
+		CreditExhausted string `json:"credit_exhausted"`
 	} `json:"cooldown"`
 
 	Schedule config.Schedule `json:"schedule"`
@@ -244,8 +248,11 @@ type Config struct {
 	} `json:"session_sticky"`
 
 	// 解析后
-	SoftRateDur         time.Duration `json:"-"`
-	SoftRateMaxDur      time.Duration `json:"-"`
+	SoftRateDur    time.Duration `json:"-"`
+	SoftRateMaxDur time.Duration `json:"-"`
+	// CreditExhaustedDur 解析后的积分耗尽冷却时长（cooldown.credit_exhausted）；
+	// 0 = 保持旧行为「硬冷却到次日 04:00」。
+	CreditExhaustedDur  time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	DegradeCooldownDur  time.Duration `json:"-"`
@@ -443,6 +450,9 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
 	}
+	if v := os.Getenv("WB2A_CREDIT_EXHAUSTED"); v != "" {
+		c.Cooldown.CreditExhausted = v
+	}
 	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -544,6 +554,21 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 积分耗尽后的冷却时长（issue #78）：空 = 保持「硬冷却到次日 04:00」的旧行为；
+	// 填了必须是正时长（负值/0 会让冷却立即到期，等于没冷却 —— 与其静默放行，
+	// 不如报错）。
+	if v := strings.TrimSpace(c.Cooldown.CreditExhausted); v == "" {
+		c.CreditExhaustedDur = 0
+	} else {
+		d, perr := time.ParseDuration(v)
+		if perr != nil {
+			return fmt.Errorf("cooldown.credit_exhausted: %w", perr)
+		}
+		if d <= 0 {
+			return fmt.Errorf("cooldown.credit_exhausted: 必须是正时长，got %q", v)
+		}
+		c.CreditExhaustedDur = d
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)

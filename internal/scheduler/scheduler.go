@@ -21,14 +21,24 @@ import (
 // 任务开关用「禁用」命名而非「启用」：零值 Config 即七类任务都启用（hours 回落默认），
 // 与引入开关前的行为逐字一致（老调用方/老测试无需改动）。
 type Config struct {
-	Pool           *pool.Pool
-	Upstream       *upstream.Client
-	CheckinHours   []int // 默认 [9, 21]
-	TravelHours    []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
-	ActivityHours  []int // 默认 [10]
-	KeepaliveHours []int // 默认 [22]
-	SchoolHours    []int // 默认 [12]：开学季任务（迁移自系统 crontab）
-	CatHours       []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
+	// AccountDelayMinSeconds / AccountDelayMaxSeconds 定时遍历的账号间随机间隔
+	// （秒）。0 区间 = 保持旧节奏；手动触发始终不受影响（见 random_schedule.go）。
+	AccountDelayMinSeconds int
+	AccountDelayMaxSeconds int
+	// RandomDelayMinutes 每日时点在原小时内随机平移的窗口（分钟）：0 = 整点。
+	// 1..60，偏移由 RandomDelaySeed + 日期 + 小时 + 任务类型哈希得出。
+	RandomDelayMinutes int
+	// RandomDelaySeed 部署私有的稳定种子（main 传 APIKey，空则 AuthDir）。
+	// **绝不打印进日志** —— 知道 seed 就能反推出每天的实际触发时刻。
+	RandomDelaySeed string
+	Pool            *pool.Pool
+	Upstream        *upstream.Client
+	CheckinHours    []int // 默认 [9, 21]
+	TravelHours     []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
+	ActivityHours   []int // 默认 [10]
+	KeepaliveHours  []int // 默认 [22]
+	SchoolHours     []int // 默认 [12]：开学季任务（迁移自系统 crontab）
+	CatHours        []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
@@ -195,25 +205,25 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	var slots []slot
 	if !s.cfg.CheckinDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours), taskCheckin})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.CheckinHours, taskCheckin), taskCheckin})
 	}
 	if !s.cfg.TravelDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.TravelHours), taskTravel})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.TravelHours, taskTravel), taskTravel})
 	}
 	if !s.cfg.ActivityDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.ActivityHours), taskActivity})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.ActivityHours, taskActivity), taskActivity})
 	}
 	if !s.cfg.KeepaliveDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.KeepaliveHours, taskKeepalive), taskKeepalive})
 	}
 	if !s.cfg.SchoolDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.SchoolHours), taskSchool})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.SchoolHours, taskSchool), taskSchool})
 	}
 	if !s.cfg.CatDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.CatHours, taskCat), taskCat})
 	}
 	if !s.cfg.GrowthDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.GrowthHours), taskGrowth})
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.GrowthHours, taskGrowth), taskGrowth})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -338,7 +348,28 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 // runBatch 并行派发一批任务（同一唤醒时刻的多类任务），等全部完成返回。
 // 供 Run 主循环与测试使用；ctx 取消时由各任务内部的 sleepCtx 快速收尾。
+//
+// 配了账号间隔时改为**串行**派发：否则同槽的两类任务各跑各的遍历，A 类正在
+// 等「账号间隔」时 B 类可能同时对另一个账号发请求——间隔就形同虚设，而账号级
+// 扰动正是为了不出现「几秒内多个号连续被访问」。串行时仍保持「单任务失败不
+// 拖垮同批其余任务」：逐个 dispatch，panic 在单任务内兜住。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
+	if s.cfg.AccountDelayMaxSeconds > 0 {
+		for _, k := range kinds {
+			if ctx.Err() != nil {
+				return
+			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("WARN: [sched] task %v panicked: %v", k, r)
+					}
+				}()
+				s.dispatch(ctx, k)
+			}()
+		}
+		return
+	}
 	var wg sync.WaitGroup
 	for _, k := range kinds {
 		wg.Add(1)
@@ -353,28 +384,34 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 // dispatch 按任务类型分发到对应执行函数。脚本类（school/cat）失败只记 WARN、
 // 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
 // ctx 传导给带账号间限速的遍历（取消时立即放弃剩余账号），纯脚本类任务不感知。
+//
+// ctx 在这里打上 scheduledAccountKey 标记：ac 间隔 / 脚本参数只对定时派发生效，
+// 同一批执行函数被手动入口（RunXNow）调用时走 context.Background()，行为不变。
 func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
+	ctx = context.WithValue(ctx, scheduledAccountKey{}, true)
 	switch k {
 	case taskCheckin:
-		s.RunCheckinNow()
+		s.runCheckinNow(ctx)
 	case taskTravel:
 		s.runTravel(ctx)
 	case taskActivity:
 		s.runActivity(ctx)
 	case taskKeepalive:
-		s.RunKeepaliveNow()
+		s.runKeepaliveNow(ctx)
 	case taskSchool:
-		s.RunSchoolNow()
+		s.runSchoolNow(ctx)
 	case taskCat:
-		s.RunCatNow()
+		s.runCatNow(ctx)
 	case taskGrowth:
-		s.RunGrowthTasksNow()
+		s.runGrowthTasksNow(ctx)
 	}
 }
 
 // RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
-func (s *Scheduler) RunCheckinNow() {
-	if _, err := s.CheckinAll(); err != nil {
+func (s *Scheduler) RunCheckinNow() { s.runCheckinNow(context.Background()) }
+
+func (s *Scheduler) runCheckinNow(ctx context.Context) {
+	if _, err := s.checkinAll(ctx); err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
 	}
 }
@@ -386,6 +423,10 @@ func (s *Scheduler) RunCheckinNow() {
 // session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
 // 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	return s.checkinAll(context.Background())
+}
+
+func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
 	}
@@ -397,6 +438,7 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	// 跳过原因分项计数：汇总行同时给出构成，避免 skipped=N 时无法判断
 	// 「是禁用/无凭证」还是「global 门控」——后者是 D4 的正常语义，前者才要处理。
 	var skipDisabledN, skipNoCredN, skipGlobalN int
+	firstAccount := true
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
@@ -440,6 +482,15 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
+		// 账号间随机间隔（仅定时派发且配置了 account_delay_*）：放在所有 skip
+		// 判定之后 —— 跳过号不产生上游请求，不该占用间隔（否则一批全禁用的号
+		// 会白等 N×max 秒）。首号不睡，手动入口 accountGap 直接返回 0。
+		if !firstAccount {
+			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+				return out, ctx.Err()
+			}
+		}
+		firstAccount = false
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -582,7 +633,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !sleepCtx(ctx, s.accountGap(ctx, activityAccountDelay)) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -813,7 +864,10 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() {
+func (s *Scheduler) RunKeepaliveNow() { s.runKeepaliveNow(context.Background()) }
+
+func (s *Scheduler) runKeepaliveNow(ctx context.Context) {
+	firstAccount := true
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
@@ -822,6 +876,13 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
+		// 账号间随机间隔（仅定时派发）：放在 skip 判定之后，跳过号不占间隔。
+		if !firstAccount {
+			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
+				return
+			}
+		}
+		firstAccount = false
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
