@@ -849,8 +849,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 是服务端指令，走本网关的客户端不属于该形态）。此处**轮转循环外**生成一次，
 	// 循环内每次出站原样复用 → 换号/重试/降级全部同 ID，后台不再碎片化（此前网关
 	// 一个都不发，上游按 HTTP 请求逐条记账，同一对话几十上百个 RequestID）。
-	//   - conversationID：body 提取（透传客户端原值，缺省空串——不伪造，见
-	//     ResolveConversationID；官方后台不校验一致，空会话则不建立聚合键）；
+	//   - conversationID：**恒非空**（上游缺头即判渠道校验 11-128："conversation
+	//     id missing"，会把账号卷进去）。派生走 ConversationIDForHeaders：客户端原值
+	//     优先，其次首条 user 文本签名（同会话稳定），再次会话键，最后请求级随机。
+	//     只补头、不改 body，出站字节形态不受影响。
 	//   - conversationRequestID：入站 X-Conversation-Request-ID 透传优先（客户端已
 	//     有自己的对话轮 ID 则以客户端为准）。派生分两态：
 	//     * turnKey 非空（有末条 user 消息）→ 带会话键客户端走 TurnRequestID(
@@ -862,7 +864,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//       也空走 NewMessageID 请求级（TurnRequestID 空键行为）——轮转内捕获
 	//       一次即共享。
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	chatMeta := upstream.ChatMeta{ConversationID: session.ConversationIDForHeaders(body, sessKey)}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -1494,6 +1496,25 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
+// upstreamCodeLabel 给「禁用/冷却理由」用的短标签：优先取响应体里的**真实业务码**
+// （数字，或带横线的字符串），取不到再回落到 HTTP 状态。
+//
+// 不写死具体码是刻意的（issue #201 缺陷 1）：这条分支历史上只见过 11140，于是理由
+// 里写死了它；现场实际是 `http 400 + 反探测业务码`，排障的人拿着 11140 去搜方向
+// 全错（11140 指向"UA 平台段送错"，而真实原因是渠道校验）。
+func upstreamCodeLabel(body string, uerr *upstream.Error) string {
+	if code := upstream.CodeOf(body); code != "" {
+		if uerr != nil && uerr.Status > 0 {
+			return fmt.Sprintf("code %s, http %d", code, uerr.Status)
+		}
+		return "code " + code
+	}
+	if uerr != nil && uerr.Status > 0 {
+		return fmt.Sprintf("http %d", uerr.Status)
+	}
+	return "unknown code"
+}
+
 func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, uerr *upstream.Error, alsoOut ...string) {
 	switch kind {
 	case upstream.ErrHardCredit:
@@ -1544,23 +1565,45 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
-		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultMarkers 一致）：
-		//   - "request illegal"（code 11140）→ 账号级**授权封禁**：软冷却到期也不会自动
-		//     恢复（需重新 OAuth 登录），到期后重新选号只会再撞 403 浪费一次轮换——
-		//     硬禁用（Disable），不再参与选号。/status 以 disabled + disabled_reason 呈现。
+		// 账号级授权/配额故障按 msg 分野（口径与 Classify 的 accountFaultRule 一致）：
+		//   - 渠道校验（code + 「渠道校验/channel verification/official client」文案，
+		//     或 "conversation id missing"）→ 上游按账号灰度启用的强校验。出站已补会话
+		//     头族（session.ConversationIDForHeaders）并做过 /v2 → /console 换路径，
+		//     仍撞上说明该账号被灰度到了别的口径：**软冷却、绝不禁用**（灰度随时可能
+		//     放开，禁用会让用户白重新登录），但必须挪出池子，否则它"显示健康、每次
+		//     被选中都失败"。
+		//   - "request illegal"（无渠道校验文案）→ 账号级**授权封禁**：软冷却到期也
+		//     不会自动恢复（需重新 OAuth 登录），到期后重新选号只会再撞一次同样的
+		//     答复、白费一次轮换——硬禁用（Disable），不再参与选号。/status 以
+		//     disabled + disabled_reason 呈现。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
-		// 两条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
+		// 三条路径对坏号都立刻换号（同一请求轮转出池），只是后续可恢复性不同。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
 		//
-		// 硬禁用还必须**排除反探测拦截**（code 11-128）：两者的 msg 逐字相同
-		// （"request illegal"），只有业务码能区分。11-128 是内容级 400（上游反探测
-		// 规则命中请求体），账号完全健康——硬禁用会让后续所有请求 503（实案
-		// 2026-10-18：baseline 200 两秒后带 tools 的请求 400/11-128，整池被打空）。
-		// Classify 已把 11-128 分到 ErrContentBlocked（不会走到本分支），这里再加一道
-		// 判据：分类顺序未来若被改动，也不会把内容拦截写成账号封禁。
-		if strings.Contains(strings.ToLower(body), "request illegal") && !upstream.IsAntiProbeBlock(body) {
-			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+		// 顺序是**渠道校验 → request illegal → 其余**：渠道校验的封套里常带历史 msg
+		// "request illegal"，先判 request illegal 会把好号硬禁用（用户报告
+		// 2026-10-17：面板显示"已禁用（需重新登录）"，重扫也没用——凭证从来没问题）。
+		//
+		// 硬禁用还必须**排除反探测拦截**（同一业务码族）：两者的 msg 逐字相同
+		// （"request illegal"），只有业务码能区分。纯码命中的内容级 400（上游反探测
+		// 规则命中请求体）账号完全健康——硬禁用会让后续所有请求 503（实案 2026-10-18：
+		// baseline 200 两秒后带 tools 的请求 400，整池被打空）。Classify 已把纯码形态
+		// 分到 ErrContentBlocked（不会走到本分支），这里再加一道判据：分类顺序未来若被
+		// 改动，也不会把内容拦截写成账号封禁。
+		lowerBody := strings.ToLower(body)
+		if upstream.IsChannelCheck(body) || strings.Contains(lowerBody, "conversation id missing") {
+			h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown,
+				"channel check ("+upstreamCodeLabel(body, uerr)+")")
+			return
+		}
+		if strings.Contains(lowerBody, "request illegal") && !upstream.IsAntiProbeBlock(body) {
+			// 理由里带**响应自己的码**（issue #201 缺陷 1：此前写死 11140，而真实响应
+			// 是 http 400 + 反探测业务码 —— 按 11140 去搜会把排障方向带偏）。
+			h.cfg.Pool.Disable(uid, fmt.Sprintf(
+				"account banned by upstream (request illegal, %s), re-login required",
+				upstreamCodeLabel(body, uerr),
+			))
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.SoftCooldown, "account fault (14017)")

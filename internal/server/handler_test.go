@@ -515,7 +515,10 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	if !st.Disabled {
 		t.Fatalf("bad 应被硬禁用（11140 封禁需重登，不可自愈）: %+v", st)
 	}
-	wantReason := "account banned by upstream (11140 request illegal), re-login required"
+	// 理由里带**响应自己的码**（issue #201：此前写死 11140，现场真实响应可能是
+	// 反探测业务码，拿着 11140 去搜方向全错）。本用例的响应体是 11140 + 403，
+	// 理由如实反映它。
+	wantReason := "account banned by upstream (request illegal, code 11140, http 403), re-login required"
 	if st.DisabledReason != wantReason {
 		t.Errorf("disabled_reason=%q want %q", st.DisabledReason, wantReason)
 	}
@@ -630,7 +633,7 @@ func TestChatAccountFault14017Rotates(t *testing.T) {
 // 分类下按 msg 分野——"request illegal"(11140) → 硬禁用；"trial"(14017) → 软冷却不禁用。
 // 端到端接线由上方 TestChatAccountFault11140Disables / TestChatAccountFault14017Rotates 覆盖。
 func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
-	const why11140 = "account banned by upstream (11140 request illegal), re-login required"
+	const why11140 = "account banned by upstream (request illegal, code 11140), re-login required"
 
 	t.Run("11140 request illegal disables", func(t *testing.T) {
 		p := pool.New("")

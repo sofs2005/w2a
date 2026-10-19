@@ -44,6 +44,33 @@ func ResolveConversationID(body []byte) string {
 	return strOrEmpty(obj["conversationId"])
 }
 
+// ConversationIDForHeaders 派生出站 X-Conversation-ID 头的取值。
+//
+// 与 ResolveConversationID 的差别：后者只做「客户端给了就透传、没给就空」，
+// 而本函数**恒返回非空**——上游对缺 X-Conversation-ID 的请求会答渠道校验
+// （业务码 11-128 / "conversation id missing"），属于账号被拦的风险，不能
+// 让空值出站。四级回落：
+//  1. body 里的 conversationId 原值（客户端语义优先，不改写）；
+//  2. 首条 user 消息的文本签名 → 同会话多轮恒定、跨会话不撞；
+//  3. 会话键 sessKey（OpenAI 兼容客户端常见：body 无 conversationId，但
+//     ExtractKey 能从 metadata 等位置取到稳定键）；
+//  4. 请求级随机 32 hex（无任何会话线索时的最后兜底，至少形态合法）。
+//
+// 只补**头**、不往 body 里塞 conversationId：上游校验的是头，改写 body 会改变
+// 出站请求的字节形态，破坏已有的指纹对齐。
+func ConversationIDForHeaders(body []byte, sessKey string) string {
+	if v := ResolveConversationID(body); v != "" {
+		return v
+	}
+	if anchor := strings.TrimSpace(firstUserText(body)); anchor != "" {
+		return RequestIDForKey("conv:" + anchor)
+	}
+	if key := strings.TrimSpace(sessKey); key != "" {
+		return RequestIDForKey("conv:" + key)
+	}
+	return NewMessageID()
+}
+
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
 // X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
 // math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。
