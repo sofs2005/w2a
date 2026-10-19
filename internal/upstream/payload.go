@@ -365,9 +365,16 @@ func normalizeImageURL(obj map[string]any) {
 	}
 }
 
-// ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：
-// 首条消息非 system 时在 messages 最前补一条 fallback system（"You are a helpful assistant."）。
-// 仅对 global 请求调用（CN 现状不动；即使首条就是 system 也不重复注入）。
+// ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45）。
+//
+// ⚠️ 当前**不在生产链路上**（prepareBody 已不再调用）：官方国际版全量分发包
+// （D:\PG\workbuddyAI 的 main/server.js + cli/dist/codebuddy-lite-wb.mjs）里
+// 字面量 "You are a helpful assistant." 的 grep 计数为 0，说明官方客户端从不在
+// 客户端侧补这条 system。我们补了就变成「我们发了、官方从没发过」的自造形态，
+// 是 11-128 渠道校验（displayTips：这次调用没通过渠道校验）最直接的特征之一。
+// 保留函数体仅为记录历史修复与便于日后取证对照，禁止重新接回 prepareBody。
+//
+// 原始行为：首条消息非 system 时在 messages 最前补一条 fallback system。
 // body 不可解析时原样返回（与 prepareBody 语义一致：坏 body 不在这里二次错误化）。
 func ensureConsoleSystem(body []byte) []byte {
 	if len(body) == 0 {

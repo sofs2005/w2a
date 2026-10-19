@@ -236,6 +236,9 @@ func main() {
 	// 版本段（upstream.client_version / cli_version）：空 = 各走内置默认。
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
+	// OpenAI SDK 指纹段（X-Stainless-*）：空 = 内置默认（见 headers.go injectStainlessHeaders）。
+	up.StainlessRuntimeVersion = cfg.Upstream.StainlessRuntimeVersion
+	up.StainlessTimeoutSeconds = cfg.Upstream.StainlessTimeoutSeconds
 	// 设备风控头（X-Device-Token）全局兜底 + 文件读取路径；空 = 不注入。
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile

@@ -121,6 +121,14 @@ type Config struct {
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（对齐官方内置 CLI
 		// 2.161.0，两域同版）；显式配置则随配置走。
 		CliVersion string `json:"cli_version"`
+		// StainlessRuntimeVersion 出站 `X-Stainless-Runtime-Version`（官方 chat 走 OpenAI
+		// Node SDK，SDK buildHeaders 会带 process.version）。空 = 内置默认
+		// （defaultStainlessRuntimeVersion）。官方 CLI 跑在 Electron 内置 Node 上，具体
+		// 版本无法从 Go 侧推断，故留此覆盖口，线上校准无需改码重编。
+		StainlessRuntimeVersion string `json:"stainless_runtime_version"`
+		// StainlessTimeoutSeconds 出站 `X-Stainless-Timeout`（秒）。空 = 内置默认 1200
+		// （对应官方 buildOpenAIClientOptions 的 timeout: 1.2e6 ms）。
+		StainlessTimeoutSeconds string `json:"stainless_timeout_seconds"`
 
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底。
 		// 容器内无桌面端 Turing SDK，这是把外部生成的 token 注入的入口；空 = 不注入。
@@ -464,6 +472,12 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
 		c.Upstream.CliVersion = v
+	}
+	if v := os.Getenv("WB2A_STAINLESS_RUNTIME_VERSION"); v != "" {
+		c.Upstream.StainlessRuntimeVersion = v
+	}
+	if v := os.Getenv("WB2A_STAINLESS_TIMEOUT_SECONDS"); v != "" {
+		c.Upstream.StainlessTimeoutSeconds = v
 	}
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

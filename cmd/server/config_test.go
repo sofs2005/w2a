@@ -825,6 +825,38 @@ func TestUpstreamVersionConfig(t *testing.T) {
 	}
 }
 
+// TestUpstreamStainlessConfig 配置 upstream.stainless_runtime_version /
+// stainless_timeout_seconds 与对应 env 均生效；缺省空串 = headers 层回落内置默认
+// （见 internal/upstream/headers.go injectStainlessHeaders）。这两个字段是 OpenAI Node
+// SDK 指纹族 X-Stainless-* 的线上校准口，官方 CLI 跑在 Electron 内置 Node 上，
+// 真实 process.version 无法从 Go 侧推断。
+func TestUpstreamStainlessConfig(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"upstream":{"stainless_runtime_version":"v20.18.1","stainless_timeout_seconds":"600"}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.StainlessRuntimeVersion != "v20.18.1" || c.Upstream.StainlessTimeoutSeconds != "600" {
+		t.Errorf("stainless=%q/%q want v20.18.1/600", c.Upstream.StainlessRuntimeVersion, c.Upstream.StainlessTimeoutSeconds)
+	}
+	// 缺省为空（headers 层回落内置默认）。
+	if c2, err := Load(""); err != nil || c2.Upstream.StainlessRuntimeVersion != "" || c2.Upstream.StainlessTimeoutSeconds != "" {
+		t.Errorf("default stainless=%q/%q want empty (err=%v)", c2.Upstream.StainlessRuntimeVersion, c2.Upstream.StainlessTimeoutSeconds, err)
+	}
+	// env 覆盖。
+	t.Setenv("WB2A_STAINLESS_RUNTIME_VERSION", "v22.14.0")
+	t.Setenv("WB2A_STAINLESS_TIMEOUT_SECONDS", "1200")
+	c3, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.Upstream.StainlessRuntimeVersion != "v22.14.0" || c3.Upstream.StainlessTimeoutSeconds != "1200" {
+		t.Errorf("env stainless=%q/%q want v22.14.0/1200", c3.Upstream.StainlessRuntimeVersion, c3.Upstream.StainlessTimeoutSeconds)
+	}
+}
+
 // TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {

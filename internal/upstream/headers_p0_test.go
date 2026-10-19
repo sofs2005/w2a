@@ -6,18 +6,21 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestCommonHeadersCodeBuddyRequest 所有出站请求统一注入
-// X-CodeBuddy-Request: 1（官方客户端风控闸门头，D1）。
-// chat/billing/refresh 三类出站均覆盖。
+// TestCommonHeadersCodeBuddyRequest X-CodeBuddy-Request 的归属边界：
+//   - **chat 路径不发**——该头属于另一个客户端（CodeBuddy VS Code fork）。WorkBuddy AI
+//     全量包里它只出现在本地会话回放（buildSessionReplayRequestHeaders）与 host 运行时
+//     探测（probeHostRuntimeEndpoint），不在上游 /v2/chat/completions 路径。发出去就是
+//     「我们发了、官方 chat 没发」的多余客户端指纹。
+//   - billing / refresh **保留** "1"：账号类接口的既有闸门头，不属 chat 渠道校验面。
 func TestCommonHeadersCodeBuddyRequest(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{}
 
-	// chat 路径
+	// chat 路径：不发（ChatHeaders 末尾 Del 兜底）
 	req := mustRequest(t)
 	c.ChatHeaders(req, a, "", ChatMeta{})
-	if got := req.Header.Get("X-CodeBuddy-Request"); got != "1" {
-		t.Errorf("chat X-CodeBuddy-Request = %q want %q", got, "1")
+	if got := req.Header.Get("X-CodeBuddy-Request"); got != "" {
+		t.Errorf("chat X-CodeBuddy-Request = %q want empty (官方 chat 不发该头)", got)
 	}
 
 	// billing 路径
@@ -92,7 +95,8 @@ func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 //   - Origin：Vlm 的排除集 qN 显式含 `origin`；
 //   - Referer / Accept-Language / X-No-Enterprise-Id / X-No-Department-Info /
 //     X-Device-Token：grep 计数 0 或只属于 checkin/auth 路径；
-//   - X-Root-Request-ID：grep 计数 0。
+//   - X-Root-Request-ID：grep 计数 0；
+//   - X-CodeBuddy-Request / X-Requested-With：属另一客户端或浏览器侧，chat 上游不带。
 // 同时断言官方强制的 `Accept-Encoding: identity`。
 func TestChatHeadersDropsUnofficialHeaders(t *testing.T) {
 	c := &Client{}
@@ -107,6 +111,8 @@ func TestChatHeadersDropsUnofficialHeaders(t *testing.T) {
 		"X-No-Enterprise-Id", "X-No-Department-Info",
 		"X-No-Authorization", "X-No-User-Id",
 		"X-Device-Token", "X-Root-Request-ID",
+		// 另一客户端（CodeBuddy）与浏览器侧的闸门头：官方 chat 出站不带。
+		"X-CodeBuddy-Request", "X-Requested-With",
 	} {
 		if got := req.Header.Get(h); got != "" {
 			t.Errorf("%s = %q want empty (官方 chat 不发)", h, got)
@@ -123,6 +129,61 @@ func TestChatHeadersDropsUnofficialHeaders(t *testing.T) {
 		if got := empty.Header.Get(h); got != "" {
 			t.Errorf("empty-acct %s = %q want empty", h, got)
 		}
+	}
+}
+
+// TestChatHeadersStainlessFingerprint 官方 chat 走 OpenAI Node SDK，SDK 的 buildHeaders
+// 无条件拼入 X-Stainless-* 族（仅 CODEBUDDY_SKIP_INTERNAL_HEADERS 为真时才被
+// axiosToFetchAdapter 按 `x-stainless-` 前缀剥除，该 env 默认不设）。取证：
+// resources/app.asar.unpacked/cli/dist/lazy-lite-wb/3043.50ee4dca.mjs。
+//
+// 反例同样重要：OpenAI-Organization / OpenAI-Project 构造时是 null，SDK 在
+// buildHeaders 里 delete，官方实际上线不发 → 我们发出去就是多出项。
+func TestChatHeadersStainlessFingerprint(t *testing.T) {
+	c := &Client{}
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	req := mustRequest(t)
+	c.ChatHeaders(req, a, "", ChatMeta{})
+
+	want := map[string]string{
+		"X-Stainless-Retry-Count":     "0",      // maxRetries: 0
+		"X-Stainless-Timeout":         "1200",   // timeout 1.2e6 ms ÷ 1000
+		"X-Stainless-Lang":            "js",     // 常量
+		"X-Stainless-Package-Version": "6.25.0", // openai@6.x 的 SDK 版本串
+		"X-Stainless-OS":              "Windows",
+		"X-Stainless-Arch":            "x64",
+		"X-Stainless-Runtime":         "node",
+	}
+	for h, v := range want {
+		if got := req.Header.Get(h); got != v {
+			t.Errorf("%s = %q want %q", h, got, v)
+		}
+	}
+	if got := req.Header.Get("X-Stainless-Runtime-Version"); got != defaultStainlessRuntimeVersion {
+		t.Errorf("X-Stainless-Runtime-Version = %q want %q", got, defaultStainlessRuntimeVersion)
+	}
+
+	// 官方不发这两个（构造参数 null → SDK delete）。
+	for _, h := range []string{"OpenAI-Organization", "OpenAI-Project"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Errorf("%s = %q want empty（官方 buildHeaders 对 null 值 delete）", h, got)
+		}
+	}
+}
+
+// TestStainlessOverrides Client 配置覆盖两个 stainless 字段（线上校准口，
+// 不改码重编即可把 X-Stainless-Runtime-Version 调到真实桌面端 process.version）。
+func TestStainlessOverrides(t *testing.T) {
+	c := &Client{StainlessRuntimeVersion: "v20.18.1", StainlessTimeoutSeconds: "600"}
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	req := mustRequest(t)
+	c.ChatHeaders(req, a, "", ChatMeta{})
+
+	if got := req.Header.Get("X-Stainless-Runtime-Version"); got != "v20.18.1" {
+		t.Errorf("X-Stainless-Runtime-Version = %q want %q", got, "v20.18.1")
+	}
+	if got := req.Header.Get("X-Stainless-Timeout"); got != "600" {
+		t.Errorf("X-Stainless-Timeout = %q want %q", got, "600")
 	}
 }
 

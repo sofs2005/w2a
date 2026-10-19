@@ -35,8 +35,9 @@ func globalAcct() *auth.Auth {
 }
 
 // TestGlobalChatUsesV2PathAndBase 断言 global 账号的 chat 打到 ChatBaseGlobal + /v2/chat/completions
-// （#119：/console 挂腾讯云 WAF body 内容规则，固定 /v2 单路径），
-// 且首条消息非 system 时自动补兜底 system（ensureConsoleSystem）；chat 不发 Origin。
+// （#119：/console 挂腾讯云 WAF body 内容规则，固定 /v2 单路径），chat 不发 Origin，
+// 且**不**注入 system 兜底（官方国际版分发包里 "You are a helpful assistant." grep 计数 0，
+// 自造 system 属于「我们发了、官方没发」，见 prepareBody 注释）。
 func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	var gotPath, gotOrigin, gotModel string
 	var calls []string
@@ -89,9 +90,9 @@ func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	if gotModel != "gpt-5.4" {
 		t.Errorf("model=%q", gotModel)
 	}
-	// ensureConsoleSystem：首条 user → 前置 system 兜底。
-	if len(gotMsgs) != 2 || gotMsgs[0]["role"] != "system" {
-		t.Errorf("expected prepended system fallback, got %v", gotMsgs)
+	// 不注入兜底 system：body 原样透传（官方客户端也不注入）。
+	if len(gotMsgs) != 1 || gotMsgs[0]["role"] != "user" {
+		t.Errorf("expected passthrough user-only messages (no injected system), got %v", gotMsgs)
 	}
 }
 
@@ -189,7 +190,7 @@ func TestGlobalRefreshUsesGlobalChatBase(t *testing.T) {
 }
 
 // TestCNChatPathUnchanged 零回归：CN 账号（realm=cn）chat 仍打 CN base + /v2/chat/completions，
-// 无首条 system 兜底（ensureConsoleSystem 只对 global）。
+// body 原样透传（两域都不再补 system）。
 func TestCNChatPathUnchanged(t *testing.T) {
 	var gotPath, gotMsgsJSON string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
@@ -211,7 +212,7 @@ func TestCNChatPathUnchanged(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("cn chat path=%q", gotPath)
 	}
-	// 零回归：body 不因 ensureConsoleSystem 注入 system。
+	// 零回归：body 不被补 system。
 	if bytes.Contains([]byte(gotMsgsJSON), []byte(`"system"`)) {
 		t.Errorf("cn chat body should not be modified with system fallback: %s", gotMsgsJSON)
 	}

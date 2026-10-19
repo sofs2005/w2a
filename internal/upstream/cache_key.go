@@ -1,12 +1,18 @@
 // cache_key.go 注入上游 prompt_cache_key 字段（P0 费用优化）。
 //
-// 逆向实测（buddy-adapter.ts:706-714）：上游服务端支持 prompt_cache_key，
+// ⚠️ 当前**不在生产链路上**（prepareBody 已不再调用 InjectPromptCacheKey）：
+// 官方国际版全量分发包（D:\PG\workbuddyAI 的 main/server.js + cli/dist /
+// renderer 全量文件）里 prompt_cache_key 的 grep 计数为 0，且我们注入的键带
+// `wb2a-` 前缀（同样计数 0）。即客户端从不在 body 里发这个字段——我们发了就是
+// 「我们发了、官方从没发过」的自造形态，属 11-128 渠道校验的高危特征。
+// 费用优化让位于不被风控，故该优化暂时停用；函数体保留以便日后确认安全后重启。
+//
+// 原始设计（停用前的逆向结论）：上游服务端支持 prompt_cache_key，
 // 同一段 8k token 前缀：
 //   - 不带 → prompt_cache_hit_tokens=0, credit≈0.34
 //   - 带   → prompt_cache_hit_tokens=7808, credit≈0.02（费用降 ~17×）
 //
-// 网关在此为每个出站 chat 请求注入一个稳定、按账号隔离的 cache key，
-// 让同一客户端对同一账号的连续请求复用上游前缀缓存。
+// 网关曾为每个出站 chat 请求注入一个稳定、按账号隔离的 cache key。
 package upstream
 
 import (

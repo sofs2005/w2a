@@ -26,7 +26,60 @@ const (
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+
+	// uaAppNameCN / uaAppNameGlobal 出站 UA 第二段的「应用名」。
+	// 来源：官方桌面端 main/sidecar-manager.js 的 getCachedBaseEnv() 把 CLI 的
+	// CLIENT_INFO_* 环境变量注入子进程，其中 CLIENT_INFO_USER_AGENT_EXTENSION=`CLI/<ver>`；
+	// CLI 侧 UserAgentHttpInterceptor.buildUserAgent() 再按
+	//   `${platform}/${platformVersion} ${applicationName}/${productVersion} ${uaExtension}`
+	// 拼出最终 UA（dist/codebuddy-lite-wb.mjs: buildUserAgent）。
+	// 关键：applicationName 直接取自各自 product.json，**两域不同值**——
+	//   CN     product.json: "applicationName": "WorkBuddy"     → WorkBuddy/5.8.3
+	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.8.4
+	// 而 platform 段两域都硬编码 "WorkBuddy"（sidecar-manager.js: var mt=`WorkBuddy`），
+	// 所以只有第二段随 realm 变。此前按「两域 server.js 逐字节相同」推断第二段恒为
+	// WorkBuddy 是搞错了链路：server.js 的 buildVlmGatewayHeaders 只服务本地 VLM 技能
+	// 代理，桌面端主对话走 sidecar→CLI 直连，UA 由后者决定。
+	uaAppNameCN     = "WorkBuddy"
+	uaAppNameGlobal = "workbuddy-ai"
+
+	// OpenAI Node SDK 的 X-Stainless-* 指纹常量。来源：官方国际版分发包
+	// resources/app.asar.unpacked/cli/dist/lazy-lite-wb/3043.50ee4dca.mjs 的
+	// OpenAI 客户端 buildHeaders()——它对每个模型请求无条件拼入该族：
+	//   X-Stainless-Lang / Package-Version / OS / Arch / Runtime / Runtime-Version
+	// 其中 OS/Arch 由 normalizePlatform(process.platform) / normalizeArch(process.arch)
+	// 归一（win32→Windows、x64→x64），Runtime 恒 "node"，Package-Version 恒 "6.25.0"。
+	//
+	// 关键：只有 CODEBUDDY_SKIP_INTERNAL_HEADERS（ma.hv）为真时，axiosToFetchAdapter
+	// 才在 er 分支按 `x-stainless-` 前缀把整族剥掉（见其 transformRequest 注入）。
+	// 该 env 默认不设 → 官方默认安装的每次 chat 出站**必然携带**这 6 个头。
+	// 我们此前一个都不发，属「官方发了、我们没发」的渠道特征。
+	stainlessLang           = "js"
+	stainlessPackageVersion = "6.25.0"
+	stainlessOS             = "Windows"
+	stainlessArch           = "x64"
+	stainlessRuntime        = "node"
+
+	// defaultStainlessRuntimeVersion 出站 X-Stainless-Runtime-Version。官方取运行时的
+	// process.version（CLI 跑在 Electron 内置 Node 上），无法从 Go 侧推断，故内置一个
+	// 与官方桌面端同代的取值作为默认，并留 config upstream.stainless_runtime_version
+	// 覆盖口——线上校准无需求改码重编。
+	defaultStainlessRuntimeVersion = "v22.14.0"
+
+	// defaultStainlessTimeoutSeconds 出站 X-Stainless-Timeout（秒）。官方
+	// buildOpenAIClientOptions 硬编码 `timeout: this.resolveRequestTimeoutMs()`，其默认
+	// 返回 12e5 ms；SDK 用 String(Math.trunc(timeout/1e3)) 转秒 → 1200。
+	// config upstream.stainless_timeout_seconds 覆盖。
+	defaultStainlessTimeoutSeconds = "1200"
 )
+
+// uaAppNameFor 按账号 realm 返回 UA 第二段应用名（见 uaAppNameCN/uaAppNameGlobal）。
+func uaAppNameFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return uaAppNameGlobal
+	}
+	return uaAppNameCN
+}
 
 // originRefererFor 按账号 realm 返回 Origin/Referer 基础域：
 // global → https://www.workbuddy.ai；cn（含全局开关未开）→ https://www.codebuddy.cn。
@@ -63,17 +116,38 @@ func (c *Client) cliVersion() string {
 	return defaultCliVersion
 }
 
-// defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
-// `WorkBuddy/<clientVersion> WorkBuddy/<clientVersion> CLI/<cliVersion>`。
-// 第二段两域恒为 `WorkBuddy`：官方 CN 5.8.3 与 global 5.8.4 分发包的
-// buildVlmGatewayHeaders 都硬编码 `[WorkBuddy/${r}, WorkBuddy/${r}]`，与
-// productName（global 为 `WorkBuddy AI`）无关——早先按 realm 切 `WorkBuddy AI`
-// 是推断错误，两域 server.js 逐字节相同（md5 8f8525cb…，2026-10-19 复验）。
-// 版本段仍按 realm 切（CN 5.8.3 / global 5.8.4，见 defaultClientVersionFor）。
-// 官方无任何 UA 随机化（step1 §4），故默认确定性。
+// stainlessRuntimeVersion 生效的 X-Stainless-Runtime-Version：Client 配置优先，否则内置默认。
+func (c *Client) stainlessRuntimeVersion() string {
+	if c != nil && c.StainlessRuntimeVersion != "" {
+		return c.StainlessRuntimeVersion
+	}
+	return defaultStainlessRuntimeVersion
+}
+
+// stainlessTimeoutSeconds 生效的 X-Stainless-Timeout：Client 配置优先，否则内置默认。
+func (c *Client) stainlessTimeoutSeconds() string {
+	if c != nil && c.StainlessTimeoutSeconds != "" {
+		return c.StainlessTimeoutSeconds
+	}
+	return defaultStainlessTimeoutSeconds
+}
+
+// defaultWorkBuddyUAFor 组装默认客户端出站 UA，逐段对齐官方国际版/国内版真实取值：
+//
+//	WorkBuddy/<clientVersion> <uaAppName>/<clientVersion> CLI/<cliVersion>
+//
+// 链路取证：桌面端主对话不经本地 VLM 代理（那是 /skills/vlm/chat 技能专用），而是
+// main/sidecar-manager.js 起 CLI 子进程、注入 CLIENT_INFO_* 环境变量后由 CLI 直连
+// /v2/chat/completions。CLI 的 UserAgentHttpInterceptor 会先删掉自带 UA 再重建：
+//   - 第一段 platform：sidecar-manager.js 硬编码 `WorkBuddy`（var mt=`WorkBuddy`），两域同值；
+//   - 第二段 applicationName：取自各自 product.json → CN `WorkBuddy`、global `workbuddy-ai`；
+//   - 第三段 CLI/<ver>：来自 CLIENT_INFO_USER_AGENT_EXTENSION，值即内置 CLI 版本。
+//
+// 因此第二段必须按 realm 切。此前两域都写死 `WorkBuddy`，国内版因为 product.json 的
+// applicationName 恰好也是 WorkBuddy 而看不出问题，国际版则与官方 UA 直接不符。
 func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
 	v := c.clientVersion(a)
-	return "WorkBuddy/" + v + " WorkBuddy/" + v + " CLI/" + c.cliVersion()
+	return "WorkBuddy/" + v + " " + uaAppNameFor(a) + "/" + v + " CLI/" + c.cliVersion()
 }
 
 // userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
@@ -131,13 +205,20 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
 	// chat 路径在 ChatHeaders 覆盖为流式 event-stream。
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
 	// User-Agent 两域同形，只有版本段按 realm 切（见 defaultWorkBuddyUAFor）。
 	req.Header.Set("User-Agent", c.userAgent(a))
-	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
+	// X-CodeBuddy-Request / X-Requested-With 保留在 CommonHeaders 供**非 chat** 路径使用
+	// （/v3/config 与 models 列举的实测门禁依赖它们，见 global_models.go 注释）。
+	// chat 路径**不**继承这两个头：ChatHeaders 末尾统一 Del。
+	//   - X-CodeBuddy-Request 属于另一个客户端（CodeBuddy VS Code fork）。WorkBuddy AI
+	//     全量包里只出现 2 次，都是本地会话回放（buildSessionReplayRequestHeaders）与
+	//     host 运行时探测（probeHostRuntimeEndpoint），不在上游 /v2/chat/completions 路径。
+	//   - X-Requested-With 只在 web-fetch / web-search 头组与 Cell Framework 配置里出现。
+	// 两者发到 chat 上游即「我们在发、官方 chat 没发」的多余客户端指纹。
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
 	// 发对应语言标识，对齐避免上游风控按语言缺失误判。
@@ -248,11 +329,45 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		"X-No-Enterprise-Id",
 		"X-No-Department-Info",
 		"X-Device-Token",
+		// 另一客户端（CodeBuddy）与浏览器侧的闸门头：CommonHeaders 已不再注入，
+		// 此处 Del 兜底防未来回归（见 CommonHeaders 注释）。
+		"X-CodeBuddy-Request",
+		"X-Requested-With",
 	} {
 		req.Header.Del(h)
 	}
 	// 官方 Vlm.send 强制 `Accept-Encoding: identity`（与网关对压缩协商的假设一致）。
 	req.Header.Set("Accept-Encoding", "identity")
+	// OpenAI SDK 指纹族（官方 chat 走 SDK，默认必发；见 injectStainlessHeaders 注释）。
+	c.injectStainlessHeaders(req)
+}
+
+// injectStainlessHeaders 复刻官方 OpenAI Node SDK buildHeaders 发出的 X-Stainless-* 族。
+//
+// 取证路径（字节级 offset dump，非推测）：
+//   - resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs 的
+//     buildOpenAIClientOptions 为 chat 创建客户端：
+//       {baseURL, apiKey, fetch: this.axiosToFetchAdapter(), maxRetries:0, timeout:resolveRequestTimeoutMs()}
+//     resolveRequestTimeoutMs 默认返回 12e5（ms）。
+//   - 同包 lazy-lite-wb/3043.50ee4dca.mjs 的 buildHeaders 无条件拼入：
+//       Accept / "User-Agent": getUserAgent() / X-Stainless-Retry-Count / [X-Stainless-Timeout] /
+//       {X-Stainless-Lang, Package-Version, OS, Arch, Runtime, Runtime-Version} /
+//       OpenAI-Organization / OpenAI-Project
+//   - 该族只在 er 分支（CODEBUDDY_SKIP_INTERNAL_HEADERS 为真）由 axiosToFetchAdapter
+//     的 transformRequest 按 `x-stainless-` 前缀剥除；该 env **默认不设**。
+//
+// 不设 OpenAI-Organization / OpenAI-Project：构造参数默认 readEnv(...) ?? null，
+// 官方未配 OPENAI_ORG_ID/OPENAI_PROJECT_ID，SDK 的 buildHeaders 对 null 值做 delete，
+// 实际上线不带——我们带了反而是多出项。
+func (c *Client) injectStainlessHeaders(req *http.Request) {
+	req.Header.Set("X-Stainless-Retry-Count", "0")
+	req.Header.Set("X-Stainless-Timeout", c.stainlessTimeoutSeconds())
+	req.Header.Set("X-Stainless-Lang", stainlessLang)
+	req.Header.Set("X-Stainless-Package-Version", stainlessPackageVersion)
+	req.Header.Set("X-Stainless-OS", stainlessOS)
+	req.Header.Set("X-Stainless-Arch", stainlessArch)
+	req.Header.Set("X-Stainless-Runtime", stainlessRuntime)
+	req.Header.Set("X-Stainless-Runtime-Version", c.stainlessRuntimeVersion())
 }
 
 // injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合）。
@@ -337,32 +452,34 @@ func (c *Client) attributionClientName() string {
 }
 
 // injectAttribution 注入用量归属头（X-Agent-Intent / X-Agent-Purpose / X-IDE-* /
-// X-Product / X-Private-Data）。仅在 chat/completions 路径生效（ChatHeaders 调用）。
+// X-Agent-Type / X-Private-Data）。仅在 chat/completions 路径生效（ChatHeaders 调用）。
 //
-// 默认（ClientName 空）即伪造官方 WorkBuddy 桌面端指纹：X-Agent-Intent="craft" +
-// X-Agent-Purpose="conversation" + X-IDE-Name/Type/Product="WorkBuddy" +
-// X-IDE-Version=按 realm 的 client_version + X-Private-Data="true"。头名与取值对齐
-// 官方 5.8.4 的 VLM 网关头组（main/server.js: applyGatewayHeaders / YN 默认表）：
-//   - X-Agent-Intent=craft      每条 chat 必发（官方唯一取值）
-//   - X-Private-Data=true       个人数据声明，官方默认表恒设
+// 头名与取值逐项对齐官方国际版客户端（D:\PG\workbuddyAI 取证，2026-10-19）：
+//   - CLI 侧 `axiosToFetchAdapter`（dist/codebuddy-lite-wb.mjs）对每条模型请求设
+//     X-Agent-Intent / X-Agent-Purpose / X-IDE-Type / X-IDE-Name / X-IDE-Version /
+//     X-Agent-Type；渲染层 `applyGatewayHeaders` + `YN` 默认表再补 X-Private-Data。
+//   - X-Agent-Intent=craft      官方唯一取值为会话 meta["codebuddy.ai/mode"] ?? "craft"
+//   - X-Agent-Purpose=conversation  官方 getEffectiveAgentPurpose 主对话取值
+//   - X-Agent-Type=main         resolveSessionAgentType：无 teamContext/parentConversationId → "main"
+//   - X-Private-Data=true       官方默认表恒设
 //
-// 该头组与官方 banner 白名单头组同形（application-manifest.js:27590-27601），上游用量
-// 归因不再出现 client/agentPurpose 为空的「网关特征」。
-// 显式 ClientName="SaaS" 还原旧行为（仅 X-Product="SaaS"，不设其余头）；
-// 配其他值则归属四头跟随该值。
+// **不发 X-Product**：官方 CLI 的 yc.PRODUCT 常量只有声明、全包无赋值点，渲染层
+// YN 默认表仅在 inbound 已带该头时兜底（e.get(n)||r），而 CLI→网关这条链上没人设。
+// 实测国际版出站头集里没有 X-Product，我们之前发 `X-Product: WorkBuddy` 属多出项。
 func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	name := c.attributionClientName()
 	if name == "SaaS" {
+		// 旧行为兜底：仅显式配置 ClientName="SaaS" 时还原（也是 X-Product 唯一发出场景）
 		req.Header.Set("X-Product", "SaaS")
 		return
 	}
 	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-Agent-Type", "main")
 	req.Header.Set("X-Private-Data", "true")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion(a))
-	req.Header.Set("X-Product", name)
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游。

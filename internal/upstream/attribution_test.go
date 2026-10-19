@@ -52,7 +52,7 @@ func TestAgentPurposeHeadersSet(t *testing.T) {
 		{"X-Private-Data", "true"},
 		{"X-IDE-Name", "WorkBuddy"},
 		{"X-IDE-Type", "WorkBuddy"},
-		{"X-Product", "WorkBuddy"},
+		{"X-Agent-Type", "main"},
 	} {
 		if got := h.Get(tc.header); got != tc.want {
 			t.Errorf("%s = %q want %q", tc.header, got, tc.want)
@@ -61,7 +61,8 @@ func TestAgentPurposeHeadersSet(t *testing.T) {
 }
 
 // TestAttributionIncludesIDEVersion client_name + client_version 都配时，
-// X-IDE-* 四头齐全（Name/Type/Product 跟随 client_name，Version 跟随 client_version）。
+// X-IDE-* 三头齐全（Name/Type 跟随 client_name，Version 跟随 client_version），
+// 且 X-Agent-Type=main（官方 CLI axiosToFetchAdapter 恒发，见 injectAttribution 注释）。
 func TestAttributionIncludesIDEVersion(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy", ClientVersion: "6.0.0"}
@@ -74,7 +75,7 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 		{"X-IDE-Name", "WorkBuddy"},
 		{"X-IDE-Type", "WorkBuddy"},
 		{"X-IDE-Version", "6.0.0"},
-		{"X-Product", "WorkBuddy"},
+		{"X-Agent-Type", "main"},
 	} {
 		if got := h.Get(tc.header); got != tc.want {
 			t.Errorf("%s = %q want %q", tc.header, got, tc.want)
@@ -95,23 +96,27 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 }
 
 // TestProductDefaultWorkBuddyFingerprint ClientName 空（缺省）时伪造官方桌面端指纹：
-// X-Product=WorkBuddy 且 X-IDE-* / X-Agent-Purpose 四头齐全（本 PR 核心变更）。
+// X-IDE-* / X-Agent-* / X-Private-Data 齐全，且**不发** X-Product
+// （官方 CLI 声明了 X-Product 常量但零赋值点，等于从不发；我们发即多一个特征）。
 func TestProductDefaultWorkBuddyFingerprint(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{} // ClientName 空 → 默认 WorkBuddy 指纹
 	h := chatHeadersReq(t, c, a, "")
 	for hdr, want := range map[string]string{
-		"X-Product":       "WorkBuddy",
 		"X-IDE-Name":      "WorkBuddy",
 		"X-IDE-Type":      "WorkBuddy",
 		"X-IDE-Version":   "5.8.3",
 		"X-Agent-Intent":  "craft",
 		"X-Agent-Purpose": "conversation",
+		"X-Agent-Type":    "main",
 		"X-Private-Data":  "true",
 	} {
 		if got := h.Get(hdr); got != want {
 			t.Errorf("%s = %q want %q (default fingerprint)", hdr, got, want)
 		}
+	}
+	if got := h.Get("X-Product"); got != "" {
+		t.Errorf("X-Product = %q want empty (官方 CLI 从不发该头)", got)
 	}
 }
 
@@ -131,19 +136,23 @@ func TestProductSaaSOptOut(t *testing.T) {
 	}
 }
 
-// TestProductWorkBuddy_WhenConfigured client_name=WorkBuddy 时 X-Product 跟随（等价覆盖首测，保独立命名）。
+// TestProductWorkBuddy_WhenConfigured client_name 显式配置时 X-IDE-Name/Type 跟随该值，
+// 且仍不发 X-Product（只有 client_name="SaaS" 的旧行为兜底才发，见 TestProductSaaSOptOut）。
 func TestProductWorkBuddy_WhenConfigured(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{ClientName: "WorkBuddy"}
 	h := chatHeadersReq(t, c, a, "")
-	if got := h.Get("X-Product"); got != "WorkBuddy" {
-		t.Errorf("X-Product = %q want %q", got, "WorkBuddy")
+	if got := h.Get("X-IDE-Name"); got != "WorkBuddy" {
+		t.Errorf("X-IDE-Name = %q want %q", got, "WorkBuddy")
 	}
 	// client_name 其他值也应跟随。
 	c2 := &Client{ClientName: "MyEditor"}
 	h2 := chatHeadersReq(t, c2, a, "")
-	if got := h2.Get("X-Product"); got != "MyEditor" {
-		t.Errorf("X-Product = %q want %q", got, "MyEditor")
+	if got := h2.Get("X-IDE-Name"); got != "MyEditor" {
+		t.Errorf("X-IDE-Name = %q want %q", got, "MyEditor")
+	}
+	if got := h2.Get("X-Product"); got != "" {
+		t.Errorf("X-Product = %q want empty (非 SaaS 不发)", got)
 	}
 }
 

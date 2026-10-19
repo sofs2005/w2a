@@ -339,9 +339,10 @@ func hashIndex(key string, n int) int {
 // snake_case 优先级高于 camelCase（同值不同名命中同一对话时返回相同值，天然不混用）。
 //
 // 第 5 项 prompt_cache_key：pi-ai 驱动的客户端（dsh 等）把会话 ID 放在这个 OpenAI
-// 前缀缓存字段里（而非 conversation_id），网关在 upstream 侧本就认它（见
-// InjectPromptCacheKey 优先级 1：客户端自带则原值保留）。纳入识别后，这类客户端
-// 无需改配置即可命中粘性。置于最后，绝不抢占 conversation 维度的优先级。
+// 前缀缓存字段里（而非 conversation_id），网关需认它才能命中粘性。
+// 注意：这里只是**读取客户端自带的值**用于内部选号，网关自身不向上游注入该字段
+// （见 upstream/cache_key.go 顶部注释：官方客户端从不发它，发了即触发 11-128 渠道校验）。
+// 置于最后，绝不抢占 conversation 维度的优先级。
 func ExtractKey(body []byte) string {
 	if len(body) == 0 {
 		return ""
@@ -366,8 +367,8 @@ func ExtractKey(body []byte) string {
 	}
 	// 5. prompt_cache_key：OpenAI 系的会话级前缀缓存键，语义就是"同一会话复用同一
 	//    前缀"，与粘性诉求同源。部分客户端（pi-ai 驱动的 dsh 等）把会话 ID 放在这里
-	//    而非 conversation_id——见 upstream.InjectPromptCacheKey 的优先级 1：客户端
-	//    自带 key 即原值保留。放最后，不抢占 conversation 维度的优先级。
+	//    而非 conversation_id。**只读不写**：网关不向上游注入该字段（见
+	//    upstream/cache_key.go）。放最后，不抢占 conversation 维度的优先级。
 	if v := strOrEmpty(obj["prompt_cache_key"]); v != "" {
 		return v
 	}

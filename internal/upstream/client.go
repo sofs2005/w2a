@@ -796,6 +796,18 @@ type Client struct {
 	// （对齐官方内置 CLI 2.161.0，两域同版）。config upstream.cli_version 覆盖。
 	CliVersion string
 
+	// StainlessRuntimeVersion 出站 `X-Stainless-Runtime-Version` 取值（官方 chat 走
+	// OpenAI Node SDK，SDK 的 buildHeaders 会带 process.version）。空 = 内置默认
+	// defaultStainlessRuntimeVersion。官方 CLI 跑在 Electron 内置 Node 上，具体版本
+	// 无法从 Go 侧推断，故留 config 覆盖口（upstream.stainless_runtime_version），
+	// 线上校准无需改码重编。见 headers.go injectStainlessHeaders。
+	StainlessRuntimeVersion string
+
+	// StainlessTimeoutSeconds 出站 `X-Stainless-Timeout` 取值（秒）。空 = 内置默认
+	// defaultStainlessTimeoutSeconds（1200，对应官方 buildOpenAIClientOptions 的
+	// timeout: 1.2e6 ms）。config upstream.stainless_timeout_seconds 覆盖。
+	StainlessTimeoutSeconds string
+
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
 	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 参数传入 ChatStream，
 	// 由 ChatHeaders 注入（不再挂共享字段，杜绝并发串扰）。
@@ -965,8 +977,14 @@ func (c *Client) chatBase(a *auth.Auth) string {
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // 显式传 realm 使 effort 降级按域取桶：CN 探测信息不得作用到 global 请求（C-2）。
-// conversationID 为网关解析出的会话标识（用于 prompt_cache_key 注入的会话段；
-// body 里自带 conversation_id 时以 body 为准）。uid8 来自账号 UID，是跨账号硬隔离段。
+//
+// 不注入 prompt_cache_key：该字段在官方国际版全量分发包（渲染层 main/server.js
+// 3.6 MB + CLI dist/codebuddy-lite-wb.mjs 9.5 MB）里 grep 计数恒为 0，取值形态
+// `wb2a-<uid8>-<hex>` 更是我们独有。上游 11-128 的业务判据是 displayTips 里的
+// 「渠道校验 / channel verification」——判有没有按官方客户端发，而非内容审查，
+// 因此任何官方从不发送的自造字段都直接构成指纹。前缀缓存收益让位于可用性。
+// uid / conversationID 参数保留在签名里（既有调用方与测试依赖），当前仅用于
+// 语义表达，不再参与 body 改写。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
@@ -976,9 +994,6 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints, efforts, defs)
-	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
-	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
 	return body
 }
 
@@ -1320,13 +1335,11 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// ensureConsoleSystem 在 prepareBody 后统一套用全局脚本：首条消息非 system 时前置
-	// 兜底 system（防 console 域上游 code 11-128；#119 后 global 出站固定 /v2，
-	// 该兜底保留——上游对 /v2 是否需要 system 无实测反证，删了无回滚路径）。
+	// 出站 body 只做措辞/参数归一，不再补 system、不再注入 prompt_cache_key：
+	// 这两项在官方国际版全量分发包（渲染层 main/server.js + CLI dist）里 grep 计数
+	// 均为 0，属于「我们发了、官方从没发过」的自造形态，是 11-128 渠道校验最直接的
+	// 特征。详见 prepareBody 注释。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	if c.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
-	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。

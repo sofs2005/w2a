@@ -477,12 +477,12 @@ func TestRefreshSessionDead(t *testing.T) {
 }
 
 func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
-	var gotAuth, gotUID, gotProduct string
+	var gotAuth, gotUID, gotAgentType string
 	var gotBody []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		gotAuth = r.Header.Get("Authorization")
 		gotUID = r.Header.Get("X-User-Id")
-		gotProduct = r.Header.Get("X-Product")
+		gotAgentType = r.Header.Get("X-Agent-Type")
 		gotBody, _ = io.ReadAll(r.Body)
 		return &http.Response{
 			StatusCode: 200,
@@ -499,11 +499,69 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
-		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotAgentType != "main" {
+		t.Errorf("headers: auth=%q uid=%q agent-type=%q", gotAuth, gotUID, gotAgentType)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {
 		t.Errorf("stream not forced: %s", gotBody)
+	}
+}
+
+// TestChatStreamWireBodyHasNoSelfInventedFields 出站边界防回归：官方客户端从不发的
+// 字段，我们一个都不能发。已取证（D:\PG\workbuddyAI 全量分发包 grep 计数）：
+//   - prompt_cache_key / wb2a-             → 0
+//   - "You are a helpful assistant."（客户端侧兜底 system） → 0
+//   - X-Product 头（yc.PRODUCT 零赋值点）   → 0
+//
+// 这些「我们发了、官方没发」的自造形态是 11-128 渠道校验（displayTips：这次调用
+// 没通过渠道校验）最直接的特征。本测试以 wire 层字节为唯一判据锁死它们。
+func TestChatStreamWireBodyHasNoSelfInventedFields(t *testing.T) {
+	var gotBody []byte
+	var gotHeader http.Header
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		gotBody, _ = io.ReadAll(r.Body)
+		gotHeader = r.Header.Clone()
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+		}, nil
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`), "", ChatMeta{})
+	if err != nil || status != 200 {
+		t.Fatalf("chat: status=%d err=%v", status, err)
+	}
+	rc.Close()
+
+	for _, lit := range []string{`"prompt_cache_key"`, "wb2a-", "You are a helpful assistant."} {
+		if bytes.Contains(gotBody, []byte(lit)) {
+			t.Errorf("wire body 含官方从不发送的字面量 %q：%s", lit, gotBody)
+		}
+	}
+	if got := gotHeader.Get("X-Product"); got != "" {
+		t.Errorf("wire header X-Product=%q want 空（官方 CLI 从不发该头）", got)
+	}
+	// 反向：官方必发的 X-Agent-Type 必须在场。
+	if got := gotHeader.Get("X-Agent-Type"); got != "main" {
+		t.Errorf("wire header X-Agent-Type=%q want main（官方 axiosToFetchAdapter 恒发）", got)
+	}
+	// 反向：官方 chat 走 OpenAI Node SDK，X-Stainless-* 族默认必发（见
+	// injectStainlessHeaders）。漏发同样是「官方发了、我们没发」的渠道特征。
+	for _, h := range []string{
+		"X-Stainless-Retry-Count", "X-Stainless-Timeout", "X-Stainless-Lang",
+		"X-Stainless-Package-Version", "X-Stainless-OS", "X-Stainless-Arch",
+		"X-Stainless-Runtime", "X-Stainless-Runtime-Version",
+	} {
+		if got := gotHeader.Get(h); got == "" {
+			t.Errorf("wire header %s 缺失（官方 SDK buildHeaders 必发）", h)
+		}
+	}
+	// 反向：这两个头属另一客户端/浏览器侧，chat 上游不得出现。
+	for _, h := range []string{"X-CodeBuddy-Request", "X-Requested-With", "OpenAI-Organization", "OpenAI-Project"} {
+		if got := gotHeader.Get(h); got != "" {
+			t.Errorf("wire header %s=%q want 空（官方 chat 不发）", h, got)
+		}
 	}
 }
 

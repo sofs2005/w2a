@@ -7,13 +7,13 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// globalUAString global realm 默认出站 UA：第二段两域同为 `WorkBuddy`
-// （官方 buildVlmGatewayHeaders 硬编码），版本段按 realm 取官方国际版分发包版本
-// 5.8.4（CN 为 5.8.3），CLI 段两域同为 2.161.0。
-const globalUAString = "WorkBuddy/5.8.4 WorkBuddy/5.8.4 CLI/2.161.0"
+// globalUAString global realm 默认出站 UA。第二段「应用名」取自官方 product.json 的
+// applicationName：CN=`WorkBuddy`、global=`workbuddy-ai`（两域不同值），platform 段由
+// sidecar-manager.js 硬编码 `WorkBuddy`，CLI 段两域同为 2.161.0。
+const globalUAString = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"
 
 // TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐官方国际客户端形态：
-//  1. UA 两段 `WorkBuddy/5.8.4` + CLI 段（品牌段不随 realm 变，版本段变）；
+//  1. UA 为 `WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0`（应用名随 realm，版本随 realm）；
 //  2. X-Domain: www.workbuddy.ai（显式声明国际版域）；
 //  3. 不发 X-No-Enterprise-Id / X-No-Department-Info / Origin / Referer
 //     （官方全量分发包 grep 计数 0 或明确排除）。
@@ -114,8 +114,9 @@ func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 	}
 }
 
-// TestDefaultWorkBuddyUAForGlobal UA 单元级断言：第二段两域恒为 `WorkBuddy`，
-// 只有版本段随 realm 切（CN 5.8.3 / global 5.8.4）。
+// TestDefaultWorkBuddyUAForGlobal UA 单元级断言：第二段「应用名」随 realm 切
+// （官方 product.json applicationName：CN=`WorkBuddy` / global=`workbuddy-ai`），
+// 版本段同样随 realm（CN 5.8.3 / global 5.8.4）。
 func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	c := &Client{}
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{}); got != defaultUAString {
@@ -126,10 +127,10 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	}
 	// version 覆盖仍生效：两段跟随 clientVersion，CLI 段保持默认。
 	c2 := &Client{ClientVersion: "6.0.0"}
-	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.161.0" {
+	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 workbuddy-ai/6.0.0 CLI/2.161.0" {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
 	}
-	// 品牌段不随 realm 变，只有版本段分域。
+	// CN 侧应用名恒 WorkBuddy。
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
 		t.Errorf("defaultWorkBuddyUAFor(cn domain) = %q want 5.8.3", got)
 	}

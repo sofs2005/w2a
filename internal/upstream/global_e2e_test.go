@@ -115,8 +115,9 @@ func redactToken(tok string) string {
 	return tok[:12] + "...(" + strconv.Itoa(len(tok)) + " chars)"
 }
 
-// chatProbeBody 组装 chat 探测请求体（与生产同链路：prepareBody + ensureConsoleSystem）。
-// 首条消息非 system（探针用 user），确保 console 域兜底 system 注入被触发验证。
+// chatProbeBody 组装 chat 探测请求体（与生产同链路：仅 prepareBody）。
+// 不补 system：官方客户端从不在客户端侧注入兜底 system（见 payload.go 注释），
+// 探测必须与生产出站形态一致，否则验证的不是真实指纹。
 func chatProbeBody(cl *Client, a *auth.Auth, model string, maxTokens int) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"model":      model,
@@ -126,11 +127,7 @@ func chatProbeBody(cl *Client, a *auth.Auth, model string, maxTokens int) []byte
 			map[string]any{"role": "user", "content": "Reply with the single word 'ok'."},
 		},
 	})
-	prepared := cl.prepareBody(raw, a.Realm(), a.UID, "")
-	if cl.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
-	}
-	return prepared
+	return cl.prepareBody(raw, a.Realm(), a.UID, "")
 }
 
 // doProbe 发一个原样请求并返回 HTTP status + body（上限 1MB）。
@@ -278,7 +275,7 @@ func TestGlobalE2EProbeChatVariants(t *testing.T) {
 			r.Header.Set("X-IDE-Name", "WorkBuddy")
 			r.Header.Set("X-IDE-Type", "WorkBuddy")
 			r.Header.Set("X-IDE-Version", "5.8.4")
-			r.Header.Set("X-Product", "WorkBuddy")
+			r.Header.Set("X-Agent-Type", "main")
 		}},
 		{"no-content-type", "gpt-5.4", func(r *http.Request) { r.Header.Del("Content-Type") }},
 	}

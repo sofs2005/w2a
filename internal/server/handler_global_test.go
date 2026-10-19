@@ -57,7 +57,7 @@ func newRealmFake(t *testing.T) *realmFake {
 }
 
 // TestChatRealmSelectionAndBodyRewrite 断言 realm 贯穿：
-// global: 前缀 → 全局号 + 出站 body 剥前缀 + /v2 路径（#119 固定单路径） + ensureConsoleSystem 补 system；
+// global: 前缀 → 全局号 + 出站 body 剥前缀 + /v2 路径（#119 固定单路径） + body 原样透传（不补 system）；
 // 裸名 → CN 号 + /v2 路径 + body 原样（零回归）。
 // TestModelsGlobalListGating 断言 GlobalEnabled 逃生门仍生效：true 时 global 域探测名单
 // 可列出（并集目录下表现为 realms 含 global 的裸名条目）、false 时 global 条目不出现
@@ -167,8 +167,8 @@ func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("global chat path=%q want /v2/chat/completions", gotPath)
 	}
-	if gotMsgs != 2 { // ensureConsoleSystem：user 前置补 system
-		t.Errorf("global chat messages=%d want 2 (system fallback)", gotMsgs)
+	if gotMsgs != 1 { // 官方客户端不注入 system：body 原样透传（prepareBody 不再补 system）
+		t.Errorf("global chat messages=%d want 1 (passthrough, no system fallback)", gotMsgs)
 	}
 
 	// 裸名请求（CN 零回归）

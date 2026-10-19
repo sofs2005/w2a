@@ -111,7 +111,7 @@ func loadSSEGlobalAcct(t *testing.T) *auth.Auth {
 }
 
 // sseChatBody 组装 chat 探测请求体（system 首条触达上游；与生产 chat 同形态）。
-// 直接 marshaling OpenAI 形状，不依赖上游未导出改装函数（prepareBody/ensureConsoleSystem）。
+// 直接 marshaling OpenAI 形状，不依赖上游未导出改装函数（prepareBody 等）。
 func sseChatBody(cl *upstream.Client, a *auth.Auth, model string, maxTokens int) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"model":      model,

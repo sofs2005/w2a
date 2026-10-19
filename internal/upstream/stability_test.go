@@ -4,8 +4,8 @@
 // 命中恒为 0。若网关 body 重写链每次产生不同的 JSON 序列化（字段顺序跑偏、无谓往返），
 // 上游前缀 hash 无法命中。
 //
-// 本文件锁定 upstream 侧重写（prepareBody/PrepareBodyOptWithEfforts + ensureConsoleSystem）
-// 的结论：每一步都是 json.Unmarshal → map[string]any → json.Marshal，Go map 序列化按键
+// 本文件锁定 upstream 侧重写（prepareBody / PrepareBodyOptWithEfforts）的结论：
+// 每一步都是 json.Unmarshal → map[string]any → json.Marshal，Go map 序列化按键
 // 字典序，完全由输入与 efforts 快照决定；链中不注入任何时间/随机/id 字段。同输入 →
 // 字节级同输出，稳定。测试即锁死这一性质。
 package upstream
@@ -16,14 +16,10 @@ import (
 )
 
 // prepareBodyChain 以字节级精度仿真生产出站 body 重写链（upstream 侧）：
-// PrepareBodyOptWithEfforts（脱敏 + effort 降级等，efforts 传 nil → 透传不降级）
-// → ensureConsoleSystem（global realm 首条消息非 system 时前置兜底 system）。
+// 只有 PrepareBodyOptWithEfforts（脱敏 + effort 降级等，efforts 传 nil → 透传不降级）。
+// realm 参数保留以维持用例矩阵形状，但两域走同一条链——global 不再补 system。
 func prepareBodyChain(body []byte, realm string) []byte {
-	out := PrepareBodyOptWithEfforts(body, true, nil)
-	if realm == "global" {
-		out = ensureConsoleSystem(out)
-	}
-	return out
+	return PrepareBodyOptWithEfforts(body, true, nil)
 }
 
 // TestUpstreamRewriteStableSerialization 同一请求体经 upstream 侧重写链跑多遍，断言字节级一致。
@@ -35,8 +31,8 @@ func TestUpstreamRewriteStableSerialization(t *testing.T) {
 		realm string
 	}{
 		{"cn 零改写透传", `{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`, "cn"},
-		{"global 首条 user + 兜底 system", `{"model":"g:glm-4","messages":[{"role":"user","content":"hi"}]}`, "global"},
-		{"global 首条已是 system 不重复注入", `{"model":"g:glm-4","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`, "global"},
+		{"global 首条 user 原样透传（不补 system）", `{"model":"g:glm-4","messages":[{"role":"user","content":"hi"}]}`, "global"},
+		{"global 首条已是 system 原样保留", `{"model":"g:glm-4","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}`, "global"},
 		{"deepseek 开思考注入 thinking+effort", `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`, "cn"},
 		{"deepseek 显式 thinking disabled 删 effort", `{"model":"deepseek-v4-flash","reasoning_effort":"high","thinking":{"type":"disabled"},"messages":[]}`, "cn"},
 		{"tool_choice 归一化", `{"model":"g:glm-4","tool_choice":{"type":"function","function":{"name":"f"}},"tools":[{"type":"function","function":{"name":"f"}}],"messages":[{"role":"user","content":"hi"}]}`, "global"},
@@ -58,10 +54,8 @@ func TestUpstreamRewriteStableSerialization(t *testing.T) {
 	}
 }
 
-// TestChainIsInputPureFunction 锁死"重写结果不含时间/随机/id"：把同一输入跑出的两步结果
-// 再次互相比较等价于只比较派生处的一致性——字节级 Equal 已覆盖。此处补一个直接断言：
-// 对 fingerprint 携载的 system 首条消息，global 兜底不会引入与注入物无关的新键
-// （确定性由注入物 string 决定，非时间/随机）。
+// TestDeepSeekEffortDefaultsDeterministic 锁死"重写结果不含时间/随机/id"：
+// deepseek 的 thinking/effort 缺省注入只由模型名与常量决定，同输入必然字节级同输出。
 func TestDeepSeekEffortDefaultsDeterministic(t *testing.T) {
 	t.Parallel()
 	// 首次跑注入 thinking.type=enabled + reasoning_effort=high（无时间/随机参与）。
