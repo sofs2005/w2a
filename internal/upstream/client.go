@@ -1367,8 +1367,19 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
-			raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-			resp.Body.Close()
+			// 出站显式声明了 Accept-Encoding（见 headers.go chatAcceptEncoding），
+			// Transport 不再透明解压，错误体同样要自己解（错误信封也可能是压缩的）。
+			// 解码器构造失败时 body 已被 decompressBody 关闭，不能退回往原 body 读
+			// （只会再报一次错）：按传输层错误处理，半截/不可解的内容不进 Classify。
+			body, derr := decompressBody(resp)
+			if derr != nil {
+				// decompressBody 已在失败路径关掉底流。
+				cancel()
+				log.Printf("ERR: [upstream] chat_stream acct=%s: decompress: %v", logfmt.Label(a.UID, a.Nickname), derr)
+				return nil, 0, nil, fmt.Errorf("decompress body: %w", derr)
+			}
+			raw, rerr := io.ReadAll(io.LimitReader(body, 1<<20))
+			body.Close()
 			cancel()
 			// body 读失败（掐流/截断）→ 传输层错误：半截 raw 不交回调用方进 Classify，
 			// 否则 handler 侧 applyErrorPolicy 会按误判分类罚号。
@@ -1395,7 +1406,17 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
+		//
+		// 压缩解码必须在 monitorBody 之内侧（先解码再计空闲）：显式设置 Accept-Encoding
+		// 后 Transport 不再透明解压，SSE 的 Content-Encoding 可能是 gzip/br。
+		body, derr := decompressBody(resp)
+		if derr != nil {
+			// decompressBody 已在失败路径关掉底流，这里只取消 ctx 即可。
+			cancel()
+			log.Printf("ERR: [upstream] chat_stream acct=%s: decompress: %v", logfmt.Label(a.UID, a.Nickname), derr)
+			return nil, 0, nil, fmt.Errorf("decompress body: %w", derr)
+		}
+		return monitorBody(body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }

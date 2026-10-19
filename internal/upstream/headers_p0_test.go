@@ -97,7 +97,7 @@ func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 //     X-Device-Token：grep 计数 0 或只属于 checkin/auth 路径；
 //   - X-Root-Request-ID：grep 计数 0；
 //   - X-CodeBuddy-Request / X-Requested-With：属另一客户端或浏览器侧，chat 上游不带。
-// 同时断言官方强制的 `Accept-Encoding: identity`。
+// 同时断言官方 axios 层强制的 Accept-Encoding 取值。
 func TestChatHeadersDropsUnofficialHeaders(t *testing.T) {
 	c := &Client{}
 	// DeviceToken 三个来源都填上，确保 Del 真的发生在注入之后。
@@ -118,8 +118,8 @@ func TestChatHeadersDropsUnofficialHeaders(t *testing.T) {
 			t.Errorf("%s = %q want empty (官方 chat 不发)", h, got)
 		}
 	}
-	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
-		t.Errorf("Accept-Encoding = %q want identity", got)
+	if got := req.Header.Get("Accept-Encoding"); got != chatAcceptEncoding {
+		t.Errorf("Accept-Encoding = %q want %q", got, chatAcceptEncoding)
 	}
 
 	// 无凭据/无 UID 的账号也不发 X-No-* 声明头（官方没有这些头，缺省即不发）。

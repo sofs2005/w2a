@@ -71,8 +71,8 @@ func TestChatHeadersConversationFullMeta(t *testing.T) {
 			t.Errorf("%s = %q want empty", h, got)
 		}
 	}
-	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
-		t.Errorf("Accept-Encoding = %q want identity (官方 Vlm.send 强制)", got)
+	if got := req.Header.Get("Accept-Encoding"); got != chatAcceptEncoding {
+		t.Errorf("Accept-Encoding = %q want %q (官方 axios _request 强制写入)", got, chatAcceptEncoding)
 	}
 	// 既有头零回归：common + chat 账号头仍旧在。
 	if got := req.Header.Get("Authorization"); got != "Bearer at" {

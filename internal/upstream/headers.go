@@ -60,6 +60,26 @@ const (
 	stainlessArch           = "x64"
 	stainlessRuntime        = "node"
 
+	// chatAcceptEncoding 官方桌面端主对话出站的 Accept-Encoding 取值。
+	//
+	// 取证（字节级 offset dump）：
+	//   - 主对话链路是 sidecar → CLI → OpenAI Node SDK（fetch: axiosToFetchAdapter()）
+	//     → axios 的 `_request`。axios 在 node adapter 里**强制写**该头：
+	//       eo.set("Accept-Encoding", I.advertiseZstdAcceptEncoding===!0 ? tp : tu, !1)
+	//     其中 tu="gzip, compress, deflate"+(hasBrotli?", br":"")，
+	//     tp=tu+(hasZstd?", zstd":"")；advertiseZstdAcceptEncoding 默认 !1。
+	//     Electron 内置 Node 的 zlib 自带 createBrotliDecompress（模块 43106 == 原生 zlib），
+	//     故实际取值是 tu，即 "gzip, compress, deflate, br"。
+	//
+	// 关键纠错：此前的 `identity` 抄自 main/server.js 的 VlmUpstream.send()，
+	// 那是**本地 VLM 技能代理**（127.0.0.1 + /skills/vlm/chat，入站头还要先过
+	// 排除集 qN 丢掉 accept-encoding），与桌面端主对话不是同一条链路。发 identity
+	// 属「我们发了、官方没发」的渠道特征。
+	//
+	// 副作用：Go 的 http.Transport 只在**它自己**添加该头时才透明解压；一旦我们显式
+	// 设置，就必须在响应侧自行按 Content-Encoding 解码（见 decompressBody）。
+	chatAcceptEncoding = "gzip, compress, deflate, br"
+
 	// defaultStainlessRuntimeVersion 出站 X-Stainless-Runtime-Version。官方取运行时的
 	// process.version（CLI 跑在 Electron 内置 Node 上），无法从 Go 侧推断，故内置一个
 	// 与官方桌面端同代的取值作为默认，并留 config upstream.stainless_runtime_version
@@ -208,16 +228,20 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	origin := originRefererFor(a)
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	// User-Agent 两域同形，只有版本段按 realm 切（见 defaultWorkBuddyUAFor）。
+	// User-Agent 三段式：第一段 platform 两域同值，第二段 applicationName 按 realm 切
+	// （见 uaAppNameFor），第三段 CLI 版本。
 	req.Header.Set("User-Agent", c.userAgent(a))
 	// X-CodeBuddy-Request / X-Requested-With 保留在 CommonHeaders 供**非 chat** 路径使用
 	// （/v3/config 与 models 列举的实测门禁依赖它们，见 global_models.go 注释）。
 	// chat 路径**不**继承这两个头：ChatHeaders 末尾统一 Del。
 	//   - X-CodeBuddy-Request 属于另一个客户端（CodeBuddy VS Code fork）。WorkBuddy AI
-	//     全量包里只出现 2 次，都是本地会话回放（buildSessionReplayRequestHeaders）与
-	//     host 运行时探测（probeHostRuntimeEndpoint），不在上游 /v2/chat/completions 路径。
-	//   - X-Requested-With 只在 web-fetch / web-search 头组与 Cell Framework 配置里出现。
-	// 两者发到 chat 上游即「我们在发、官方 chat 没发」的多余客户端指纹。
+	//     全量包里它只出现在本地会话回放（buildSessionReplayRequestHeaders）、host 运行时
+	//     探测（probeHostRuntimeEndpoint）与**本地 VLM 技能代理**（main/server.js 的
+	//     applyGatewayHeaders，绑定 127.0.0.1 的 /skills/vlm/chat 路由）——桌面端主对话
+	//     链路（sidecar → CLI → OpenAI SDK）上 grep 计数 0。
+	//   - X-Requested-With 同样只出现在 VlmProxy 的 applyGatewayHeaders、web-fetch /
+	//     web-search 头组与 Cell Framework 配置里，不在主对话出站。
+	// 二者发到 chat 上游即「我们在发、官方主对话没发」的多余客户端指纹。
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("X-CodeBuddy-Request", "1")
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
@@ -273,9 +297,10 @@ type ChatMeta struct {
 // meta 为会话头族元数据（CN/global 同构，纯新增，不改既有头），见 injectConversationHeaders。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
 	c.CommonHeaders(req, a)
-	// Accept 不覆盖：官方 5.8.4 通往 /v2/chat/completions 的唯一路径（VLM 网关代理
-	// applyGatewayHeaders）硬编码 `Accept: application/json`，流式与否由 body 的
-	// `stream:true` 决定、响应照常是 SSE。早先覆盖成
+	// Accept 不覆盖。官方 SDK 的 buildHeaders 固定 `Accept: application/json`
+	// （3043.50ee4dca.mjs），而 SDK 的请求体只带 body+headers，不回写 Accept；
+	// 本地 VLM 技能代理的 applyGatewayHeaders 同样是 application/json。
+	// 流式与否由 body 的 `stream:true` 决定、响应照常是 SSE。早先覆盖成
 	// `application/json, text/event-stream` 是自造形态（官方只有 ACP transport 的
 	// buildAcpHeaders 用这个值，那是本地 ACP 连接、不是 chat 上游）。
 	// AccessToken 加锁快照：keepalive 定时刷新会在 a.mu 内改写它，锁外直读构成数据竞争
@@ -314,10 +339,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectClientIP(req, clientIP)
 	// 会话头族（对话/请求/消息/B3 链路）：纯新增，CN/global 同构，见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
-	// 官方 chat 上游（Vlm.send → applyGatewayHeaders）不发的头，这里显式抹掉：
-	//   - Origin：Vlm 的排除集 qN 里就有 `origin`（渲染层带来的浏览器头一律丢弃）；
-	//   - Referer / Accept-Language：全量分发包 main/ 下 grep 计数 0（chat 与其它
-	//     业务请求都不发，Accept-Language 只出现在 teams 拦截器，取值 zh-CN/en-US）；
+	// 官方桌面端主对话（CLI → OpenAI SDK → axios）不发的头，这里显式抹掉：
+	//   - Origin：VlmProxy 入站排除集 qN 里就有 `origin`；主对话 axios 层也不带；
+	//   - Referer / Accept-Language：全量分发包 main/ 下 grep 计数 0（Accept-Language
+	//     只出现在 teams 拦截器，取值 zh-CN/en-US）；axios 层也不加；
 	//   - X-No-Enterprise-Id / X-No-Department-Info：grep 计数 0（官方缺省就不发该头）；
 	//   - X-Device-Token：官方只在 checkin / auth 类请求（buildHeadersWithTuringToken）
 	//     注入，chat 从不带（见 account.js getCheckinRequestHeaders）。
@@ -336,8 +361,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	} {
 		req.Header.Del(h)
 	}
-	// 官方 Vlm.send 强制 `Accept-Encoding: identity`（与网关对压缩协商的假设一致）。
-	req.Header.Set("Accept-Encoding", "identity")
+	// Accept-Encoding 对齐官方桌面端主对话的 axios 层（见 chatAcceptEncoding 注释）。
+	// 注意：一旦我们显式设置该头，Go 的 http.Transport 就不再自动加 gzip 并透明解压，
+	// 因此响应侧必须自己解（见 decompressBody）。
+	req.Header.Set("Accept-Encoding", chatAcceptEncoding)
 	// OpenAI SDK 指纹族（官方 chat 走 SDK，默认必发；见 injectStainlessHeaders 注释）。
 	c.injectStainlessHeaders(req)
 }

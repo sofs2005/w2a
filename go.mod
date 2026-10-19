@@ -3,6 +3,10 @@ module workbuddy2api
 go 1.26
 
 require (
+	// github.com/andybalholm/brotli 纯 Go 的 brotli 解压实现，只用于聊天的响应解码：
+	// 官方桌面端出站显式声明 Accept-Encoding（含 br），Go 的 Transport 因此不再透明
+	// 解压，必须自己解（见 internal/upstream/decompress.go）。标准库没有 brotli。
+	github.com/andybalholm/brotli v1.2.1
 	github.com/redis/go-redis/v9 v9.18.0
 	// golang.org/x/net 只用到 proxy 子包（SOCKS5 出站代理，见 internal/upstream/proxy.go）。
 	// 标准库没有 SOCKS5 客户端实现，故必须引入这一个外部依赖。
