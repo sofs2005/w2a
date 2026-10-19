@@ -198,11 +198,15 @@ var badParamsRule = errorRule{kind: ErrBadParams, mode: matchExact, patterns: []
 // 400/11-128，账号被 Disable，后续全 503）。内容拦截的真实语义见 ErrContentBlocked
 // （不罚号、走降级重试），故此处映射到它，而不是新建 Kind。
 //
-// 只认 code 形态：11-128 不是合法 JSON 数字（含连字符），json.Unmarshal 必失败，
-// hasBusinessCode 用不了，必须走 codeMarker 的字面量容差（`"code":11-128` /
-// `"code": "11-128"` 等）。msg 文案不能当判据——"request illegal" 两义同形。
+// 只认 code 形态：json.Unmarshal 对 `"code":11128` 之外的畸形形态会失败，
+// hasBusinessCode 用不了，必须走 codeMarker 的字面量容差。
+//
+// 线上实测码是**五位裸数字 11128**（od 字节 `22 3a 31 31 31 32 38`，无 `2d`）。
+// 早先按 `11-128`（带连字符）实现，永远匹配不上真实 body，导致放行到
+// accountFaultRule、整池照旧被打空。带连字符形态保留作防御，两种都认。
+// msg 文案不能当判据——"request illegal" 两义同形。
 func hitAntiProbe(lower string) bool {
-	return codeMarker(lower, "11-128")
+	return codeMarker(lower, "11128") || codeMarker(lower, "11-128")
 }
 
 // IsAntiProbeBlock 报告上游错误 body 是否为反探测拦截（业务码 11-128）。

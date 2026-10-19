@@ -535,7 +535,7 @@ func TestChatAccountFault11140Disables(t *testing.T) {
 	}
 }
 
-// TestChatAntiProbeBlockDoesNotDisable 反探测拦截（400 + code 11-128，msg 与 11140
+// TestChatAntiProbeBlockDoesNotDisable 反探测拦截（400 + code 11128，msg 与 11140
 // 真封禁逐字相同 "request illegal"）**不得**把账号硬禁用：它是内容级错误（请求体命中
 // 上游反探测规则），账号完全健康。实案 2026-10-18：该形态被记成 11140 封禁，
 // disabled_reason 写成「account banned…」，整池被打空、后续请求全 503。
@@ -545,9 +545,9 @@ func TestChatAntiProbeBlockDoesNotDisable(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls[authz]++
-		// 首个请求内容命中反探测 → 400/11-128；降级重试（第二次）放行。
+		// 首个请求内容命中反探测 → 400/11128；降级重试（第二次）放行。
 		if calls[authz] == 1 {
-			return 400, `{"code":11-128,"msg":"request illegal","requestId":"abc","displayMsg":{"en":"Request blocked. Please send it again"}}`, false
+			return 400, `{"code":11128,"msg":"request illegal","requestId":"abc","displayMsg":{"en":"Request blocked. Please send it again"}}`, false
 		}
 		return 200, sseOK, true
 	})
