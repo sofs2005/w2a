@@ -2,21 +2,21 @@ package upstream
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 
 	"workbuddy2api/internal/auth"
 )
 
-// globalUAString global realm 默认出站 UA：第二段 platform 品牌为官方国际版
-// `WorkBuddy AI`，版本段按 realm 取官方国际版分发包版本 5.8.4（CN 为 5.8.3），
-// CLI 段两域同为 2.161.0。
-const globalUAString = "WorkBuddy/5.8.4 WorkBuddy AI/5.8.4 CLI/2.161.0"
+// globalUAString global realm 默认出站 UA：第二段两域同为 `WorkBuddy`
+// （官方 buildVlmGatewayHeaders 硬编码），版本段按 realm 取官方国际版分发包版本
+// 5.8.4（CN 为 5.8.3），CLI 段两域同为 2.161.0。
+const globalUAString = "WorkBuddy/5.8.4 WorkBuddy/5.8.4 CLI/2.161.0"
 
 // TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐官方国际客户端形态：
-//  1. UA 含 `WorkBuddy AI/<v>` 平台段 + 5.8.4 版本段（非 CN 的 `WorkBuddy/<v>`）；
+//  1. UA 两段 `WorkBuddy/5.8.4` + CLI 段（品牌段不随 realm 变，版本段变）；
 //  2. X-Domain: www.workbuddy.ai（显式声明国际版域）；
-//  3. 不发 X-No-Enterprise-Id（官方 5.8.4 只在未登录的 auth 类请求发该头，chat 不发）。
+//  3. 不发 X-No-Enterprise-Id / X-No-Department-Info / Origin / Referer
+//     （官方全量分发包 grep 计数 0 或明确排除）。
 func TestChatHeadersGlobalRealm(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "g1", Domain: "www.workbuddy.ai"} // global 账号
 	req := mustRequest(t)
@@ -26,8 +26,10 @@ func TestChatHeadersGlobalRealm(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != globalUAString {
 		t.Errorf("global UA = %q want %q", got, globalUAString)
 	}
-	if got := req.Header.Get("X-No-Enterprise-Id"); got != "" {
-		t.Errorf("global X-No-Enterprise-Id = %q want empty (官方 chat 不发该头)", got)
+	for _, h := range []string{"X-No-Enterprise-Id", "X-No-Department-Info", "Origin", "Referer", "Accept-Language"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Errorf("global %s = %q want empty (官方 chat 不发该头)", h, got)
+		}
 	}
 	if got := req.Header.Get("X-Domain"); got != "www.workbuddy.ai" {
 		t.Errorf("global X-Domain = %q want %q", got, "www.workbuddy.ai")
@@ -38,32 +40,25 @@ func TestChatHeadersGlobalRealm(t *testing.T) {
 	}
 }
 
-// TestChatHeadersCNRealm CN 账号头零回归：UA 不带 `WorkBuddy AI` 平台段、不注入
-// global 专属的 X-No-Enterprise-Id / X-Domain: www.workbuddy.ai；EnterpriseID 非空
-// 走原有 X-Enterprise-Id 分支，Domain 空走原有 X-No-Department-Info 分支。
+// TestChatHeadersCNRealm CN 账号头对齐：UA 两段都是 `WorkBuddy`、不注入 global 专属
+// X-Domain: www.workbuddy.ai；EnterpriseID 非空照常透传 X-Enterprise-Id，Domain 为空
+// 不再补 X-No-Department-Info（官方不发缺省头）。
 func TestChatHeadersCNRealm(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "c1", EnterpriseID: "e1"} // CN 企业账号 + 无 domain
 	req := mustRequest(t)
 	c := &Client{}
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
-	if got := req.Header.Get("User-Agent"); strings.Contains(got, "WorkBuddy AI") {
-		t.Errorf("CN UA = %q must NOT contain WorkBuddy AI (want %q)", got, defaultUAString)
-	}
 	if got := req.Header.Get("User-Agent"); got != defaultUAString {
 		t.Errorf("CN UA = %q want %q", got, defaultUAString)
 	}
 	if got := req.Header.Get("X-Enterprise-Id"); got != "e1" {
 		t.Errorf("CN X-Enterprise-Id = %q want e1", got)
 	}
-	if got := req.Header.Get("X-No-Enterprise-Id"); got != "" {
-		t.Errorf("CN X-No-Enterprise-Id = %q want empty (enterprise set)", got)
-	}
-	if got := req.Header.Get("X-Domain"); got != "" {
-		t.Errorf("CN X-Domain = %q want empty (domain empty → X-No-Department-Info)", got)
-	}
-	if got := req.Header.Get("X-No-Department-Info"); got != "1" {
-		t.Errorf("CN X-No-Department-Info = %q want 1 (zero regression)", got)
+	for _, h := range []string{"X-No-Enterprise-Id", "X-No-Department-Info", "X-Domain"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Errorf("CN %s = %q want empty", h, got)
+		}
 	}
 }
 
@@ -105,26 +100,22 @@ func TestChatHeadersGlobalWithConfiguredDomain(t *testing.T) {
 }
 
 // TestChatHeadersCNNoEnterpriseZeroRegression CN 无企业/无 domain 的老形态账号：
-// X-No-Enterprise-Id=1 + X-No-Department-Info=1（各自缺省），不注入 global 的 X-Domain。
+// 两个缺省声明头都不发（官方 grep 计数 0），也不注入 global 的 X-Domain。
 func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "c2"}
 	req := mustRequest(t)
 	c := &Client{}
 	c.ChatHeaders(req, a, "", ChatMeta{})
 
-	if got := req.Header.Get("X-No-Enterprise-Id"); got != "1" {
-		t.Errorf("CN(no enterprise) X-No-Enterprise-Id = %q want 1", got)
-	}
-	if got := req.Header.Get("X-No-Department-Info"); got != "1" {
-		t.Errorf("CN(no domain) X-No-Department-Info = %q want 1", got)
-	}
-	if got := req.Header.Get("X-Domain"); got != "" {
-		t.Errorf("CN(no enterprise) X-Domain = %q want empty", got)
+	for _, h := range []string{"X-No-Enterprise-Id", "X-No-Department-Info", "X-Domain"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Errorf("CN(no enterprise) %s = %q want empty", h, got)
+		}
 	}
 }
 
-// TestDefaultWorkBuddyUAForGlobal UA 品牌段按 realm 切换的单元级断言：
-// global → 第二段 `WorkBuddy AI`；CN → 第二段 `WorkBuddy`。
+// TestDefaultWorkBuddyUAForGlobal UA 单元级断言：第二段两域恒为 `WorkBuddy`，
+// 只有版本段随 realm 切（CN 5.8.3 / global 5.8.4）。
 func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	c := &Client{}
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{}); got != defaultUAString {
@@ -133,12 +124,12 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != globalUAString {
 		t.Errorf("defaultWorkBuddyUAFor(global) = %q want %q", got, globalUAString)
 	}
-	// version 覆盖仍生效：global 平台段跟随 clientVersion，CLI 段保持默认。
+	// version 覆盖仍生效：两段跟随 clientVersion，CLI 段保持默认。
 	c2 := &Client{ClientVersion: "6.0.0"}
-	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy AI/6.0.0 CLI/2.161.0" {
+	if got := c2.defaultWorkBuddyUAFor(&auth.Auth{Domain: "www.workbuddy.ai"}); got != "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.161.0" {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
 	}
-	// realm 差异不只是品牌段：版本段也分域（CN 5.8.3 / global 5.8.4）。
+	// 品牌段不随 realm 变，只有版本段分域。
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
 		t.Errorf("defaultWorkBuddyUAFor(cn domain) = %q want 5.8.3", got)
 	}

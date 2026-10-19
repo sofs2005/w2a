@@ -317,17 +317,17 @@ const (
 // 超时后按「拉取失败」处理 —— 模型列表照常返回，只是「优惠」列为空。
 const promoFetchTimeout = 15 * time.Second
 
-// desktopUA 组装官方桌面端 UA：`WorkBuddy/<v> <平台品牌>/<v> CLI/<cli>`。
-// 版本段与平台段都按 realm 切：CN `WorkBuddy/5.8.3`，global `WorkBuddy AI/5.8.4`
-// （送错品牌段/陈旧版本段会被上游风控判 403 code 11140）。
+// desktopUA 组装官方桌面端 UA：`WorkBuddy/<v> WorkBuddy/<v> CLI/<cli>`。
+// 两段品牌都恒为 `WorkBuddy`：官方分发包 buildVlmGatewayHeaders 硬编码
+// `[WorkBuddy/${r}, WorkBuddy/${r}]`，与 productName（global 为 `WorkBuddy AI`）
+// 无关，且两域 main/server.js 逐字节相同（md5 8f8525cb…，2026-10-19 复验）。
+// 版本段仍按 realm 切：CN 5.8.3、global 5.8.4（陈旧版本段会被上游风控挡）。
 func desktopUA(region Region) string {
-	platform := "WorkBuddy"
 	version := desktopClientVersionCN
 	if region == RegionGlobal {
-		platform = "WorkBuddy AI"
 		version = desktopClientVersionGlobal
 	}
-	return "WorkBuddy/" + version + " " + platform + "/" + version +
+	return "WorkBuddy/" + version + " WorkBuddy/" + version +
 		" CLI/" + desktopCLIVersion
 }
 

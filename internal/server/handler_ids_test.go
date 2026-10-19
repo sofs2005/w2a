@@ -13,8 +13,8 @@ import (
 
 // TestChatRotationReusesConversationRequestID 轮转失败（全部账号 402）场景：
 // 所有出站请求（3 号各打一次）的 X-Conversation-Request-ID 必须相同（后台聚合
-// 主键），X-Conversation-ID 透传客户端原值，X-Root-Request-ID 跟随
-// conversationRequestID，消息级 ID 每次出站不同，链路族合法。
+// 主键），X-Conversation-ID 透传客户端原值，消息级 ID 每次出站不同，链路族合法；
+// 官方没有的 X-Root-Request-ID 不透传。
 func TestChatRotationReusesConversationRequestID(t *testing.T) {
 	var reqs []http.Header
 	up := &upstream.Client{
@@ -70,10 +70,10 @@ func TestChatRotationReusesConversationRequestID(t *testing.T) {
 			t.Errorf("outbound %d X-Conversation-ID=%q want conv-1", i+1, got)
 		}
 	}
-	// Root = conversationRequestID。
+	// 官方 chat 不发 X-Root-Request-ID：出站也不该有。
 	for i, hdr := range reqs {
-		if got := hdr.Get("X-Root-Request-ID"); got != first {
-			t.Errorf("outbound %d X-Root-Request-ID=%q want %q", i+1, got, first)
+		if got := hdr.Get("X-Root-Request-ID"); got != "" {
+			t.Errorf("outbound %d X-Root-Request-ID=%q want empty", i+1, got)
 		}
 	}
 	// 消息级 ID（每条消息独立）：各出站不同（每条 ChatStream 独立），格式合法且

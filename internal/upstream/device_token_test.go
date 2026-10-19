@@ -14,7 +14,9 @@ import (
 	"workbuddy2api/internal/auth"
 )
 
-// TestDeviceTokenInjected_WhenSet auth.Auth.DeviceToken 非空时 chat/billing 请求均注入。
+// TestDeviceTokenInjected_WhenSet auth.Auth.DeviceToken 非空时 billing 请求注入；
+// chat 路径**不注入**（官方只在 checkin/auth 类请求带该头，chat 从不带，
+// 见 account.js getCheckinRequestHeaders / tar.js buildHeadersWithTuringToken）。
 func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1", DeviceToken: "tok-from-auth"}
 	// 用 server 端验证而非 RoundTripper 捕获：更贴近真实注入路径。
@@ -22,9 +24,10 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 		name      string
 		apply     func(c *Client, req *http.Request)
 		wantPath  string
+		wantToken string
 	}{
-		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions"},
-		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report"},
+		{"chat_drops", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions", ""},
+		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report", "tok-from-auth"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got string
@@ -47,14 +50,14 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 				t.Fatalf("do: %v", err)
 			}
 			resp.Body.Close()
-			if got != "tok-from-auth" {
-				t.Errorf("X-Device-Token = %q want %q", got, "tok-from-auth")
+			if got != tc.wantToken {
+				t.Errorf("X-Device-Token = %q want %q", got, tc.wantToken)
 			}
 		})
 	}
 }
 
-// TestDeviceTokenNotInjected_WhenEmpty 所有来源皆空时不注入该头。
+// TestDeviceTokenNotInjected_WhenEmpty 所有来源皆空时 billing 路径也不注入该头。
 func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"} // DeviceToken 空
 	var got string
@@ -71,8 +74,8 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 		BillingBaseCN: srv.URL,
 		// DeviceToken / DeviceTokenFile 皆空
 	}
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-	c.ChatHeaders(req, a, "", ChatMeta{})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/report", nil)
+	c.BillingHeaders(req, a)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
@@ -85,6 +88,7 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 
 // TestDeviceTokenFromConfigOrFile_Overrides 优先级：auth > config > 文件。
 // auth 有值时覆盖 config；auth 空时 config 兜底；auth 与 config 皆空时读文件。
+// 走 billing 路径断言（chat 不发该头，见 TestDeviceTokenInjected_WhenSet）。
 func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "device_token")
@@ -123,8 +127,8 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 				DeviceToken:    tc.cfg,
 				DeviceTokenFile: fp,
 			}
-			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-			c.ChatHeaders(req, a, "", ChatMeta{})
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/report", nil)
+			c.BillingHeaders(req, a)
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				t.Fatalf("do: %v", err)

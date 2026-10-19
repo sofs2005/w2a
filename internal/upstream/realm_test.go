@@ -36,7 +36,7 @@ func globalAcct() *auth.Auth {
 
 // TestGlobalChatUsesV2PathAndBase 断言 global 账号的 chat 打到 ChatBaseGlobal + /v2/chat/completions
 // （#119：/console 挂腾讯云 WAF body 内容规则，固定 /v2 单路径），
-// 且首条消息非 system 时自动补兜底 system（ensureConsoleSystem）。
+// 且首条消息非 system 时自动补兜底 system（ensureConsoleSystem）；chat 不发 Origin。
 func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	var gotPath, gotOrigin, gotModel string
 	var calls []string
@@ -83,8 +83,8 @@ func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	if len(calls) != 1 {
 		t.Errorf("global chat calls=%v want exactly 1 outbound request (/v2 single path)", calls)
 	}
-	if gotOrigin != "https://www.workbuddy.ai" {
-		t.Errorf("global chat Origin=%q want https://www.workbuddy.ai", gotOrigin)
+	if gotOrigin != "" {
+		t.Errorf("global chat Origin=%q want empty (官方 Vlm 排除 origin)", gotOrigin)
 	}
 	if gotModel != "gpt-5.4" {
 		t.Errorf("model=%q", gotModel)

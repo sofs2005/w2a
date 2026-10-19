@@ -13,8 +13,8 @@ var hex16Re = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // TestChatHeadersConversationFullMeta 全量 meta 出站头族（issue #35 后台聚合）：
 // 聚合主键 X-Conversation-Request-ID 必发且等于传入值，消息级双头同值 32 hex，
-// X-Root-Request-ID = conversationRequestID，Trace 透传入站值，B3 链路族格式合法，
-// 既有账号头零回归。
+// Trace 透传入站值，B3 链路族格式合法（含 ParentSpanId + traceparent/b3 单头），
+// 不发官方没有的 X-Root-Request-ID，既有账号头零回归。
 func TestChatHeadersConversationFullMeta(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
@@ -39,8 +39,8 @@ func TestChatHeadersConversationFullMeta(t *testing.T) {
 	if !hex32Re.MatchString(msgID) {
 		t.Errorf("message ID %q not 32 hex", msgID)
 	}
-	if got := req.Header.Get("X-Root-Request-ID"); got != meta.ConversationRequestID {
-		t.Errorf("X-Root-Request-ID = %q want %q", got, meta.ConversationRequestID)
+	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
+		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
 	}
 	if got := req.Header.Get("X-Trace-ID"); got != "trace-inbound" {
 		t.Errorf("X-Trace-ID = %q want trace-inbound", got)
@@ -51,8 +51,28 @@ func TestChatHeadersConversationFullMeta(t *testing.T) {
 	if got := req.Header.Get("X-B3-SpanId"); got != msgID[:16] {
 		t.Errorf("X-B3-SpanId = %q want %q (msgID[:16])", got, msgID[:16])
 	}
+	if got := req.Header.Get("X-B3-ParentSpanId"); got != msgID[16:] {
+		t.Errorf("X-B3-ParentSpanId = %q want %q (msgID[16:])", got, msgID[16:])
+	}
 	if got := req.Header.Get("X-B3-Sampled"); got != "1" {
 		t.Errorf("X-B3-Sampled = %q want 1", got)
+	}
+	// 单头链路形态：traceparent = 00-<32hex trace>-<16hex span>-01；
+	// b3 = <trace>-<span>-1-<parent>（与 X-B3-* 同值）。
+	if got, want := req.Header.Get("traceparent"), "00-"+meta.ConversationRequestID+"-"+msgID[:16]+"-01"; got != want {
+		t.Errorf("traceparent = %q want %q", got, want)
+	}
+	if got, want := req.Header.Get("b3"), meta.ConversationRequestID+"-"+msgID[:16]+"-1-"+msgID[16:]; got != want {
+		t.Errorf("b3 = %q want %q", got, want)
+	}
+	// 官方 chat 不发 Origin/Referer；这里显式抹掉。
+	for _, h := range []string{"Origin", "Referer"} {
+		if got := req.Header.Get(h); got != "" {
+			t.Errorf("%s = %q want empty", h, got)
+		}
+	}
+	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
+		t.Errorf("Accept-Encoding = %q want identity (官方 Vlm.send 强制)", got)
 	}
 	// 既有头零回归：common + chat 账号头仍旧在。
 	if got := req.Header.Get("Authorization"); got != "Bearer at" {
@@ -91,8 +111,8 @@ func TestChatHeadersConversationEmptyMeta(t *testing.T) {
 	if !hex32Re.MatchString(convReqID) {
 		t.Errorf("X-Conversation-Request-ID = %q want 32 hex (必发)", convReqID)
 	}
-	if got := req.Header.Get("X-Root-Request-ID"); got != convReqID {
-		t.Errorf("X-Root-Request-ID = %q want %q", got, convReqID)
+	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
+		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
 	}
 	if got := req.Header.Get("X-B3-TraceId"); got != convReqID {
 		t.Errorf("X-B3-TraceId = %q want %q", got, convReqID)
@@ -103,8 +123,8 @@ func TestChatHeadersConversationEmptyMeta(t *testing.T) {
 }
 
 // TestChatHeadersConversationInvalidTraceConvReqID 入站透传的 conversationRequestID
-// 非法 B3 TraceId（含横线/长度非 16/32）→ 仍按聚合主键透传，B3 TraceId 回落消息级
-// messageID（32 hex），SpanId 仍为 messageID[:16]。
+// 非法 B3 TraceId（含横线/长度非 16/32）→ 仍按聚合主键透传，B3 / traceparent / b3 的
+// TraceId 都回落消息级 messageID（32 hex），SpanId 仍为 messageID[:16]。
 func TestChatHeadersConversationInvalidTraceConvReqID(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
@@ -115,8 +135,8 @@ func TestChatHeadersConversationInvalidTraceConvReqID(t *testing.T) {
 	if got := req.Header.Get("X-Conversation-Request-ID"); got != bad {
 		t.Errorf("X-Conversation-Request-ID = %q want %q (透传不改)", got, bad)
 	}
-	if got := req.Header.Get("X-Root-Request-ID"); got != bad {
-		t.Errorf("X-Root-Request-ID = %q want %q (Root = conversationRequestID)", got, bad)
+	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
+		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
 	}
 	msgID := req.Header.Get("X-Conversation-Message-ID")
 	trace := req.Header.Get("X-B3-TraceId")
@@ -131,5 +151,33 @@ func TestChatHeadersConversationInvalidTraceConvReqID(t *testing.T) {
 	}
 	if !hex16Re.MatchString(req.Header.Get("X-B3-SpanId")) {
 		t.Errorf("X-B3-SpanId = %q not 16 hex", req.Header.Get("X-B3-SpanId"))
+	}
+	if got := req.Header.Get("X-B3-ParentSpanId"); got != msgID[16:] {
+		t.Errorf("X-B3-ParentSpanId = %q want %q", got, msgID[16:])
+	}
+	if got, want := req.Header.Get("traceparent"), "00-"+trace+"-"+msgID[:16]+"-01"; got != want {
+		t.Errorf("traceparent = %q want %q (非法 convReqID 不落 W3C 头)", got, want)
+	}
+}
+
+// TestChatHeadersTraceparentUses32HexTrace 入站透传 16 hex conversationRequestID：
+// B3 允许 16 hex 直接沿用，W3C traceparent 只认 32 hex，故那里单独回落 messageID。
+func TestChatHeadersTraceparentUses32HexTrace(t *testing.T) {
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	req := mustRequest(t)
+	c := &Client{}
+	sixteen := "0123456789abcdef"
+	c.ChatHeaders(req, a, "", ChatMeta{ConversationRequestID: sixteen})
+
+	if got := req.Header.Get("X-B3-TraceId"); got != sixteen {
+		t.Errorf("X-B3-TraceId = %q want %q (B3 接受 16 hex)", got, sixteen)
+	}
+	msgID := req.Header.Get("X-Conversation-Message-ID")
+	want := "00-" + msgID + "-" + msgID[:16] + "-01"
+	if got := req.Header.Get("traceparent"); got != want {
+		t.Errorf("traceparent = %q want %q (W3C trace-id 必须 32 hex)", got, want)
+	}
+	if got, wantB3 := req.Header.Get("b3"), sixteen+"-"+msgID[:16]+"-1-"+msgID[16:]; got != wantB3 {
+		t.Errorf("b3 = %q want %q", got, wantB3)
 	}
 }
