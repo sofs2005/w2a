@@ -366,9 +366,9 @@ func carryPreservedFields(a *auth.Auth, file string) bool {
 	if err != nil {
 		return false
 	}
-	a.Proxy = old.Proxy
+	a.ProxyName = old.ProxyName
 	a.DeviceToken = old.DeviceToken
-	return old.Proxy != ""
+	return old.ProxyName != ""
 }
 
 // doCheckin 首次签到（幂等）。失败仅提示，不阻断——调度器每日 09:00/21:00 会重试。
@@ -387,6 +387,9 @@ func doCheckin(tb tokenBundle, realm string, out io.Writer) {
 		Nickname:     tb.Nickname,
 	}
 	a.SetRealm(realm)
+	// 账号级出口线路：新登录的号若已有线路绑定（上面 carryPreservedFields 带过来的），
+	// 首次签到也应经该线路出网。
+	upstream.LoadRouteTable("")
 	if err := upstream.New().DailyCheckin(a); err != nil {
 		fmt.Fprintf(out, "签到: 失败（%v）—— 调度器会于 09:00/21:00 重试\n", err)
 		return

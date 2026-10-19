@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +25,14 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// Proxies 账号级出口线路表：线路名 → 代理地址（http / https / socks5 / socks5h）。
+	//
+	// 面板会给账号绑一条线路（auths/*.json 顶层 `proxy` 写的是**线路名**），这个名字
+	// 在这里解析成地址；线路名查不到时上游**明确报错、不静默直连**（静默直连等于
+	// 「以为隔离了其实没隔离」，见 upstream.TransportFor）。保留名 "__direct__"
+	// 表示显式直连（忽略环境变量代理），不需要在表里配置。
+	Proxies map[string]string `json:"proxies"`
 
 	// Server 入站 HTTP 服务参数（issue #100）。
 	//
@@ -464,6 +473,14 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PROXY_GLOBAL"); v != "" {
 		c.Proxy.Global = v
 	}
+	// WB2A_PROXIES：账号级线路表（JSON 对象，如 {"route-a":"socks5h://u:p@h:1080"}）。
+	// 解析失败静默忽略是刻意的（与其它环境变量同口径）；normalize 会再校验地址。
+	if v := strings.TrimSpace(os.Getenv("WB2A_PROXIES")); v != "" {
+		var table map[string]string
+		if err := json.Unmarshal([]byte(v), &table); err == nil {
+			c.Proxies = table
+		}
+	}
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
 	}
@@ -651,6 +668,34 @@ func (c *Config) normalize() error {
 			log.Printf("WARN: [config] proxy.global 非法，按未配置处理（回落环境变量代理）: %v", err)
 			c.Proxy.Global = ""
 		}
+	}
+	// 出口线路表（proxies）：名字与地址都去空白；scheme 只认 http/https/socks5/socks5h。
+	// 与上面域级 proxy 的「WARN 回落」不同，这里**启动即报错**：线路是账号级强绑定，
+	// 配错后静默回退等于「以为隔离了其实没隔离」——这是本功能唯一要避免的结果。
+	// 线路名查不到（账号引用了不存在的名字）则在用时明确报错，不静默直连。
+	if len(c.Proxies) > 0 {
+		clean := make(map[string]string, len(c.Proxies))
+		for name, addr := range c.Proxies {
+			n := strings.TrimSpace(name)
+			v := strings.TrimSpace(addr)
+			if n == "" || v == "" {
+				continue
+			}
+			u, err := url.Parse(v)
+			if err != nil {
+				return fmt.Errorf("proxies[%s]: %w", n, err)
+			}
+			switch strings.ToLower(u.Scheme) {
+			case "http", "https", "socks5", "socks5h":
+			default:
+				return fmt.Errorf("proxies[%s]: 不支持的协议 %q（只能是 http/https/socks5/socks5h）", n, u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("proxies[%s]: 地址缺少主机名（%q）", n, v)
+			}
+			clean[n] = v
+		}
+		c.Proxies = clean
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

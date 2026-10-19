@@ -152,12 +152,13 @@ func TestNewLoginClientHTTPProxyRoutesThroughProxy(t *testing.T) {
 }
 
 // TestCarryPreservedFieldsKeepsAccountProxy 重新登录（runOnce 落盘）是**整份覆盖**：
-// 已存在文件里手写的账号级 proxy 与 device_token 必须被带过去，否则「重新登录一次」
-// 就把它们悄悄抹掉。面板侧的 preserve.go 只护住面板自己的保存路径，护不到 login。
+// 已存在文件里的账号级线路名（`proxy`，面板写入）与 device_token 必须被带过去，
+// 否则「重新登录一次」就把它们悄悄抹掉 —— 线路被解绑意味着出口静默改变。
+// 面板侧的 preserve.go 只护住面板自己的保存路径，护不到 login。
 func TestCarryPreservedFieldsKeepsAccountProxy(t *testing.T) {
 	fp := filepath.Join(t.TempDir(), "workbuddy-u1.json")
 	existing := `{"auth":{"accessToken":"old","refreshToken":"ort","expiresAt":1},"account":{"uid":"u1"},` +
-		`"device_token":"dev-tok","proxy":"socks5://10.0.0.1:1080"}`
+		`"device_token":"dev-tok","proxy":"route-a"}`
 	if err := os.WriteFile(fp, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -166,8 +167,8 @@ func TestCarryPreservedFieldsKeepsAccountProxy(t *testing.T) {
 	if carried := carryPreservedFields(a, fp); !carried {
 		t.Error("carryPreservedFields should report that an account proxy was carried")
 	}
-	if a.Proxy != "socks5://10.0.0.1:1080" {
-		t.Errorf("Proxy=%q want carried from existing file", a.Proxy)
+	if a.ProxyName != "route-a" {
+		t.Errorf("ProxyName=%q want carried from existing file", a.ProxyName)
 	}
 	if a.DeviceToken != "dev-tok" {
 		t.Errorf("DeviceToken=%q want carried from existing file", a.DeviceToken)
@@ -185,8 +186,8 @@ func TestCarryPreservedFieldsKeepsAccountProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auth.Parse: %v", err)
 	}
-	if back.Proxy != "socks5://10.0.0.1:1080" || back.DeviceToken != "dev-tok" {
-		t.Errorf("after re-login: proxy=%q device_token=%q（重新登录不得抹掉手写配置）", back.Proxy, back.DeviceToken)
+	if back.ProxyName != "route-a" || back.DeviceToken != "dev-tok" {
+		t.Errorf("after re-login: proxy=%q device_token=%q（重新登录不得抹掉线路绑定）", back.ProxyName, back.DeviceToken)
 	}
 	if back.AccessToken != "new" {
 		t.Errorf("AccessToken=%q want new (新凭证必须覆盖旧的)", back.AccessToken)
@@ -201,8 +202,8 @@ func TestCarryPreservedFieldsNewAccountIsNoop(t *testing.T) {
 	if carried := carryPreservedFields(a, fp); carried {
 		t.Error("new account should report nothing carried")
 	}
-	if a.Proxy != "" || a.DeviceToken != "" {
-		t.Errorf("new account should not gain fields: proxy=%q device_token=%q", a.Proxy, a.DeviceToken)
+	if a.ProxyName != "" || a.DeviceToken != "" {
+		t.Errorf("new account should not gain fields: proxy=%q device_token=%q", a.ProxyName, a.DeviceToken)
 	}
 }
 

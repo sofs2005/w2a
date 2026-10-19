@@ -40,6 +40,13 @@ const (
 	ErrImageInvalid                    // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                          // 其他 4xx / 业务错误
 	ErrToolCallMismatch                // 11148 工具调用/结果历史错配 → 请求级错误：不罚号、不轮转
+	// ErrEmptyMessage 11151「a message has empty content」→ 请求级错误：同 body 换
+	// 任何账号都是同一结果，换号只会白扔健康号配额、最后把 400 包装成 503（issue #203）。
+	ErrEmptyMessage
+	// ErrRouteUnavailable 账号绑定的出口线路名在本进程解析不出来（没配 / 名字不存在 /
+	// 地址非法）→ **配置错误**，不是账号问题：不罚号、不轮转、不进熔断，直接 503。
+	// 换多少个号结果都一样（见 clientFor / TransportFor）。
+	ErrRouteUnavailable
 )
 
 func (k ErrKind) String() string {
@@ -70,6 +77,10 @@ func (k ErrKind) String() string {
 		return "image_invalid"
 	case ErrToolCallMismatch:
 		return "tool_call_mismatch"
+	case ErrEmptyMessage:
+		return "empty_message"
+	case ErrRouteUnavailable:
+		return "route_unavailable"
 	case ErrClient:
 		return "client"
 	default:
@@ -724,6 +735,12 @@ func Classify(status int, body string) ErrKind {
 	if status == http.StatusBadRequest && isToolCallMismatch(lower) {
 		return ErrToolCallMismatch
 	}
+	// 11151「a message has empty content」：同样是**请求内容**决定的结果（issue #203）。
+	// 判在通用 4xx 之前：否则它落 ErrClient「只换号不罚号」，轮完一圈拿 503 收场 ——
+	// 客户端看到的是「服务不可用」，而真实原因只是对话里有一条空消息。
+	if status == http.StatusBadRequest && isEmptyMessage(lower) {
+		return ErrEmptyMessage
+	}
 	// 内容策略拦截（HTTP 400 + 审核文案）：判在通用 ErrClient 之前。
 	// 这是误报信号，不罚账号，由网关降级重试处理（见 handler.applyErrorPolicy）。
 	// 请求体解析失败（HTTP 400 + Unmarshal chat params failed / code 11101）：
@@ -754,6 +771,17 @@ func isToolCallMismatch(lower string) bool {
 	return strings.Contains(lower, "tool calls and tool results do not match") ||
 		strings.Contains(lower, "tool_call_sequence_broken") ||
 		codeMarker(lower, "11148")
+}
+
+// isEmptyMessage 11151「a message has empty content」的判定：code 标记 + 文案双通道。
+// 文案在中文体里也可能出现，所以同时认 code（宽松形态，见 codeMarker）。
+//
+// 请求级错误（issue #203）：同一份 body 换任何账号都是同一结果，换号只会白扔
+// 健康号配额，最后把确定性 400 包装成 503「服务暂时不可用」。
+func isEmptyMessage(lower string) bool {
+	return codeMarker(lower, "11151") ||
+		strings.Contains(lower, "a message has empty content") ||
+		strings.Contains(lower, "存在空白消息")
 }
 
 // apiEnvelope 上游统一信封。
@@ -982,6 +1010,51 @@ func (c *Client) chatHTTPFor(a *auth.Auth) *http.Client {
 		return c.ChatHTTPGlobal
 	}
 	return c.chatHTTP()
+}
+
+// clientFor 返回该账号出站应使用的 client（账号级出口线路，面板「出口线路」）。
+//
+// 未绑线路（ProxyName 为空）→ 原样走 httpFor / chatHTTPFor：行为一字不变，也是
+// 「不绑线路的部署零回归」的落点。
+// 绑了线路 → 换成按线路缓存的 Transport（连接池按线路分开，出口不串）。
+// 线路名未知 / 地址非法 → 返回 *Error{Kind: ErrRouteUnavailable}，**不静默直连**：
+// 静默直连等于「以为隔离了其实没隔离」，这是本功能唯一要避免的结果。
+//
+// 错误必须是 *upstream.Error（而不是普通 error）：handler 会把非 *Error 的传输层
+// 失败当网络抖动 → NoteFailures + 轮转，于是健康的号被线路配置错误连坐罚分。
+func (c *Client) clientFor(a *auth.Auth, chat bool) (*http.Client, error) {
+	name := ""
+	if a != nil {
+		name = strings.TrimSpace(a.ProxyName)
+	}
+	if name == "" {
+		if chat {
+			return c.chatHTTPFor(a), nil
+		}
+		return c.httpFor(a), nil
+	}
+	tr, err := TransportFor(name)
+	if err != nil {
+		label := ""
+		if a != nil {
+			label = logfmt.Label(a.UID, a.Nickname) + " "
+		}
+		return nil, &Error{
+			Kind:   ErrRouteUnavailable,
+			Status: 0,
+			Msg:    fmt.Sprintf("账号 %s出口线路不可用：%v", label, err),
+		}
+	}
+	if chat {
+		// 聊天无总时长（SSE 长流），首字节由 Transport 的 ResponseHeaderTimeout 管。
+		return &http.Client{Timeout: 0, Transport: tr}, nil
+	}
+	// 短 RPC：沿用同域 client 的总时长（main 已按 config 设好），未设置时 120s。
+	timeout := 120 * time.Second
+	if c.HTTP != nil && c.HTTP.Timeout > 0 {
+		timeout = c.HTTP.Timeout
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}, nil
 }
 
 // ModelsDevHTTP models.dev 兜底拉取（国外站）专用的 client：优先 global 侧
@@ -1238,8 +1311,13 @@ func (c *Client) checkinMeterPaths(a *auth.Auth) []string {
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 //
 // a 用于按 realm 选 client（global 域可能经代理出网）；a 为 nil 时回落 CN 侧。
+// 账号绑了出口线路时改走该线路的 Transport（见 clientFor）。
 func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
-	resp, err := c.httpFor(a).Do(req)
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1411,6 +1489,13 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
 	paths := c.chatPaths(a)
+	// 账号级出口线路：未绑线路时与 chatHTTPFor 完全一致（零回归）；绑了则用该线路的
+	// Transport。解析失败是*配置错误*，立刻返回 *Error（ErrRouteUnavailable），
+	// 绝不进下面按号轮转的链路（换号无用，见 clientFor）。
+	chatClient, cerr := c.clientFor(a, true)
+	if cerr != nil {
+		return nil, 0, nil, cerr
+	}
 	for i, path := range paths {
 		url := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
@@ -1422,7 +1507,6 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		chatClient := c.chatHTTPFor(a)
 		resp, err := chatClient.Do(req)
 		if err != nil {
 			cancel()
@@ -1765,7 +1849,11 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.httpFor(a).Do(req)
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1979,7 +2067,11 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.httpFor(a).Do(req)
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

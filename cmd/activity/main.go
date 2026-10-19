@@ -117,6 +117,9 @@ func main() {
 func newUpstream(c *cfgFile) *upstream.Client {
 	up := upstream.New()
 	up.GlobalEnabled = true
+	// 账号级出口线路：本工具按账号的 proxy 名选 Transport，与网关共用同一张表。
+	// config.json 是它的必需输入（main 开头就 ReadFile），故直接按该路径加载。
+	upstream.LoadRouteTable("config.json")
 	if c.Upstream.TimeoutSeconds > 0 {
 		up.HTTP.Timeout = time.Duration(c.Upstream.TimeoutSeconds) * time.Second
 	}

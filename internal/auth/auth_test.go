@@ -140,48 +140,49 @@ func TestSaveAtomicPreservesDeviceToken(t *testing.T) {
 	}
 }
 
-// TestParseAccountProxy 嵌套形与扁平形 auth 文件的顶层 proxy 键（账号级出站代理）
-// 均被解析。本期只保留不调度，但**必须解析**——见下方 roundtrip 测试的说明。
+// TestParseAccountProxy 嵌套形与扁平形 auth 文件的顶层 proxy 键（账号级出口**线路名**，
+// 面板写入）均被解析。值从「直连代理地址」改为「线路名」，语义见 Auth.ProxyName。
 func TestParseAccountProxy(t *testing.T) {
-	nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1},"account":{"uid":"u1"},"proxy":"socks5://10.0.0.1:1080"}`)
+	nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1},"account":{"uid":"u1"},"proxy":"route-a"}`)
 	sa, err := Parse(nested)
 	if err != nil {
 		t.Fatalf("nested parse: %v", err)
 	}
-	if sa.Proxy != "socks5://10.0.0.1:1080" {
-		t.Errorf("nested Proxy = %q want socks5://10.0.0.1:1080", sa.Proxy)
+	if sa.ProxyName != "route-a" {
+		t.Errorf("nested ProxyName = %q want route-a", sa.ProxyName)
 	}
 
-	flat := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u2","proxy":"http://user:pw@proxy.corp:3128"}`)
+	// 扁平形：顺带验证去空白（面板/手写都可能带空格）
+	flat := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u2","proxy":"  route-b  "}`)
 	fa, err := Parse(flat)
 	if err != nil {
 		t.Fatalf("flat parse: %v", err)
 	}
-	if fa.Proxy != "http://user:pw@proxy.corp:3128" {
-		t.Errorf("flat Proxy = %q", fa.Proxy)
+	if fa.ProxyName != "route-b" {
+		t.Errorf("flat ProxyName = %q want route-b（应去空白）", fa.ProxyName)
 	}
 
-	// 未写该键 = 空串（老文件零回归：无代理）。
+	// 未写该键 = 空串（老文件零回归：跟随进程级代理）。
 	none := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":1,"uid":"u3"}`)
 	na, err := Parse(none)
 	if err != nil {
 		t.Fatalf("plain parse: %v", err)
 	}
-	if na.Proxy != "" {
-		t.Errorf("absent proxy should be empty, got %q", na.Proxy)
+	if na.ProxyName != "" {
+		t.Errorf("absent proxy should be empty, got %q", na.ProxyName)
 	}
 }
 
-// TestSaveAtomicPreservesAccountProxy 账号级 proxy 必须**熬过** token 续期落盘。
+// TestSaveAtomicPreservesAccountProxy 账号级线路绑定必须**熬过** token 续期落盘。
 //
 // 这是本字段最容易被做错的地方：SaveAtomic 是从结构体重建整份文档再覆盖文件，
-// 不写回 = 用户手写的 proxy 键在下一次保活刷新（每日 22:00 全量）时被静默删除。
-// 「只留个 JSON 键不写代码」在这里等于「写下去必丢」，故本测试是口子成立的前提。
+// 不写回 = 面板绑好的出口线路在下一次保活刷新（每日 22:00 全量）时被静默解绑，
+// 出口随之改变而没人会发现。
 func TestSaveAtomicPreservesAccountProxy(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "workbuddy-px.json")
 	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1,
-		UID: "u1", Proxy: "socks5://10.0.0.1:1080", FilePath: fp}
+		UID: "u1", ProxyName: "route-a", FilePath: fp}
 	if err := a.SaveAtomic(); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -193,8 +194,8 @@ func TestSaveAtomicPreservesAccountProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reparse: %v", err)
 	}
-	if b.Proxy != "socks5://10.0.0.1:1080" {
-		t.Errorf("roundtrip Proxy = %q want socks5://10.0.0.1:1080", b.Proxy)
+	if b.ProxyName != "route-a" {
+		t.Errorf("roundtrip ProxyName = %q want route-a", b.ProxyName)
 	}
 }
 
@@ -212,7 +213,7 @@ func TestSaveAtomicOmitsEmptyAccountProxy(t *testing.T) {
 		t.Fatalf("read: %v", err)
 	}
 	if bytesContainsKey(raw, "proxy") {
-		t.Errorf("empty Proxy should not introduce a proxy key: %s", raw)
+		t.Errorf("empty ProxyName should not introduce a proxy key: %s", raw)
 	}
 }
 

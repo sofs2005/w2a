@@ -44,6 +44,8 @@ func main() {
 	}
 	up := upstream.New()
 	up.GlobalEnabled = true // 允许按 realm 路由：global 账查积分走 workbuddy.ai
+	// 账号级出口线路：按账号文件里的 proxy 名选 Transport（查积分也要经该线路）。
+	upstream.LoadRouteTable("")
 	accounts := collect(authDir, up)
 	printAccounts(accounts, pretty)
 }

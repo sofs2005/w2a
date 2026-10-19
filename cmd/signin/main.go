@@ -38,6 +38,9 @@ func main() {
 		os.Exit(1)
 	}
 	up := upstream.New()
+	// 账号级出口线路：按账号文件里的 proxy 名选 Transport，与网关共用同一张表
+	// （不注入的话，绑了线路的号在这里会逐个报 route_unavailable）。
+	upstream.LoadRouteTable("")
 	// 允许按 realm 路由：global 账号的签到/余额会打到 global base（workbuddy.ai），
 	// 由幂等码兜底为「未开启/不适用」，而不是误打到 CN base 产生签到成功的假象。
 	// 纯 CN 部署无 global 账号时此开关无影响（账号 realm 全 cn → 全走 CN base）。

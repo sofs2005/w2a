@@ -75,6 +75,8 @@ func main() {
 	// trial 是 global 专属端点：必须开启 global realm 路由，否则 upstream.New() 的
 	// GlobalEnabled 零值 false 会把请求路由到 CN base（codebuddy.cn）而必然失败。
 	up.GlobalEnabled = true
+	// 账号级出口线路：按账号文件里的 proxy 名选 Transport。
+	upstream.LoadRouteTable("")
 	var rows []trialRow
 	for _, f := range files {
 		r := trialRow{uid: filepath.Base(f)}

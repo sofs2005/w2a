@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -226,6 +227,16 @@ func main() {
 	// 也要同步，保证两域参数逐字一致）。
 	if tr, ok := up.ChatHTTPGlobal.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = up.HeaderTimeout
+	}
+	// 账号级出口线路（config proxies 段）：面板把账号绑在线路名上（auths/*.json 的
+	// 顶层 proxy），这里把名字解析成地址。线路 Transport 是惰性构造的，构造时读取
+	// HeaderTimeout，故两者顺序固定：先设超时、再注线路表。
+	// 未配置线路时保持零日志 —— 不绑线路的部署与历史行为逐字节一致。
+	upstream.SetRouteHeaderTimeout(up.HeaderTimeout)
+	upstream.ConfigureProxies(cfg.Proxies)
+	if names := upstream.RouteNames(); len(names) > 0 {
+		log.Printf("INFO: [upstream] 出口线路已加载 %d 条（%s）—— 账号绑定的线路名按它解析",
+			len(names), strings.Join(names, ", "))
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second

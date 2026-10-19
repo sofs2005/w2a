@@ -513,15 +513,23 @@ handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与�
    `.row` 的 `align-items: flex-end` 会以该格底部对齐，把两格的输入框顶成垂直错位
    （第 13 条修过的同一个坑，见该节末）。
 
-**未做**：面板的账号页**不加**代理字段。账号级代理本期只在 `auths/*.json` 顶层预留
-`proxy` 键（手写生效，无调度逻辑），面板保存账号时靠 `preserve.go`（第 1 条）保证
-该键不丢——这正是第 1 条那个「未知键保留」机制在本期的第二次派上用场。
+**未做**：面板的账号页**不加**代理字段。账号级代理只在 `auths/*.json` 顶层 `proxy`
+键上承载，面板保存账号时靠 `preserve.go`（第 1 条）保证该键不丢——这正是第 1 条
+那个「未知键保留」机制在本期的第二次派上用场。
 
 > **注意**：`preserve.go` 只护住**面板自己的保存路径**。网关侧 `auth.SaveAtomic`
 > 也是整份重建文档，所以网关这边另外做了两件事（都在根 module，不在 panel）：
-> `Auth` 结构体增 `Proxy` 字段并 Parse/SaveAtomic 往返保留；`cmd/login` 重新登录
-> 落盘前先读回旧文件的 `proxy` / `device_token`（`carryPreservedFields`）。三处
-> 缺一处，手写的账号级代理就会在某条路径上被静默抹掉。
+> `Auth` 结构体增 `ProxyName` 字段（JSON 键仍是顶层 `proxy`）并 Parse/SaveAtomic
+> 往返保留；`cmd/login` 重新登录落盘前先读回旧文件的 `proxy` / `device_token`
+> （`carryPreservedFields`）。三处缺一处，账号级线路绑定就会在某条路径上被静默抹掉。
+
+> **语义变更（本期）**：账号文件顶层 `proxy` 的值已从「直连代理地址」改为
+> **线路名**（面板「出口线路」写入的形态），地址表在网关 `config.json` 的 `proxies`
+> 段（线路名 → `http/https/socks5/socks5h` 地址），保留名 `__direct__` = 显式直连。
+> 网关按线路名取独立 Transport（连接池按线路分开），名字查不到时**明确报错并回 503、
+> 不罚账号**，绝不静默直连。面板的 `preserve.go` 按未知键原样保留，行为不变；面板
+> 后端自身仍走环境变量代理（`panel/internal/upstream/client.go` 的
+> `ProxyFromEnvironment`），不消费该字段——面板探测不参与选号，无需按线路隔离。
 
 **上游冲突面**：两处 `Transport` 各一行（上游若重写这两个 `New()` 需重放）；
 `ConfigPage.tsx` 新增一整张卡片（上游若改该文件的卡片排布需重放）。网关侧的

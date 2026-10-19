@@ -434,7 +434,11 @@ func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) ([]string, []
 		req.Header.Set("User-Agent", ua) // 探测专用 UA 覆盖（见函数注释）
 	}
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.httpFor(a).Do(req)
+	client, cerr := c.clientFor(a, false)
+	if cerr != nil {
+		return nil, nil, nil, nil, cerr
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

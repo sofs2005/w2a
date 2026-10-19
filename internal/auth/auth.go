@@ -43,21 +43,20 @@ type Auth struct {
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
 
-	// Proxy 本账号专属出站代理（形如 "socks5://user:pass@host:1080"），来源 auth 文件的
-	// 顶层 proxy 键。**本期只做「保留」不做「调度」**：网关按域分代理（config 的
-	// proxy.cn / proxy.global）已覆盖常规诉求，本字段是留给「某些号走特定出口」的
-	// 口子（如给某个号单独挂一条落地 IP）。
+	// ProxyName 账号级出口线路**名**（不是地址），来源 auth 文件顶层 `proxy` 键，
+	// 由面板的「出口线路」功能写入；线路名 → 代理地址的映射在上游 config.json 的
+	// `proxies` 段。空 = 跟随进程级代理（域级 proxy.cn/global 或环境变量）。
 	//
 	// ⚠️ 为什么必须真的解析 + 写回，而不是「只留个 JSON 键」：SaveAtomic 是从
 	// Auth 结构体**重建整份文档**再覆盖文件的（见其注释），不在结构体里的键会被
 	// 静默抹掉。手写的 proxy 键若无人解析，下一次 token 续期（保活任务每日 22:00
-	// 全量刷新）就会把它连根删掉——那不是「预留的口子」，是「写下去必丢的坑」。
-	// 故此处与 DeviceToken 同款：Parse 读进来、SaveAtomic 非空时写回。
+	// 全量刷新）就会把它连根删掉——等于把面板绑好的出口线路静默解绑，出口随之
+	// 改变而没人会发现。故此处与 DeviceToken 同款：Parse 读进来、SaveAtomic
+	// 非空时写回。
 	//
-	// 与 DeviceToken 的区别：DeviceToken 有消费方（出站请求头），Proxy 暂无——
-	// 结构体里存着、文件里留着，等调度侧实现后直接读它即可（届时注意与
-	// config proxy 段的优先级：账号级应优先于域级）。
-	Proxy string
+	// 消费方：upstream.clientFor / TransportFor（按名取 Transport，连接池按线路
+	// 分开）。地址解析失败或线路名不存在时上游**明确报错、不静默直连**。
+	ProxyName string
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -277,7 +276,7 @@ func Parse(raw []byte) (*Auth, error) {
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用）。
 			// 放在 auth 段之外，手写时无需嵌进 auth 对象，降低配置门槛。
 			DeviceToken string `json:"device_token"`
-			// Proxy 顶层 proxy（账号级出站代理；本期只保留不调度，见 Auth.Proxy 注释）。
+			// Proxy 顶层 proxy（线路名，面板写入；见 Auth.ProxyName）。
 			Proxy string `json:"proxy"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
@@ -293,7 +292,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: n.Account.EnterpriseID,
 			Nickname:     n.Account.Nickname,
 			DeviceToken:  n.DeviceToken,
-			Proxy:        n.Proxy,
+			ProxyName:    strings.TrimSpace(n.Proxy),
 		}
 	} else {
 		var f struct {
@@ -321,7 +320,7 @@ func Parse(raw []byte) (*Auth, error) {
 			EnterpriseID: f.EnterpriseID,
 			Nickname:     f.Nickname,
 			DeviceToken:  f.DeviceToken,
-			Proxy:        f.Proxy,
+			ProxyName:    strings.TrimSpace(f.Proxy),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -361,11 +360,10 @@ func (a *Auth) SaveAtomic() error {
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
 	}
-	// Proxy 同款（非空才写）：本函数是从结构体重建整份文档，不写回 = 下次续期时
-	// 把用户手写的账号级代理静默删掉。本期没有消费方，但「保留」正是这个口子的
-	// 全部意义（见 Auth.Proxy 注释）。
-	if a.Proxy != "" {
-		doc["proxy"] = a.Proxy
+	// ProxyName 同款（非空才写）：本函数是从结构体重建整份文档，不写回 = 下次
+	// 续期时把面板绑好的出口线路静默解绑（出口随之改变而没人会发现）。
+	if a.ProxyName != "" {
+		doc["proxy"] = a.ProxyName
 	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

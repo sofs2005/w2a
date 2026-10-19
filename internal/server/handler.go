@@ -1009,6 +1009,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if errors.As(terr, &uerr) {
 			status = uerr.Status
 		}
+		// 账号级出口线路解析失败（线路名没配 / 地址非法）：**配置错误**，不是账号问题。
+		// 换多少个号结果都一样（线路名来自账号文件，或线路表本身缺失），所以终止
+		// 轮转、不 NoteFailures、不 fail、不喂熔断，直接 503 让运维看到配置问题。
+		// 注意必须在这里判（uerr 非 nil 且 Status=0，走不到下面的 status>=400 与
+		// 「非 *Error 传输层错误」两条分支）。
+		if uerr != nil && uerr.Kind == upstream.ErrRouteUnavailable {
+			releaseHeld()
+			st.status = http.StatusServiceUnavailable
+			lastErr = terr
+			log.Printf("WARN: [server] route config error acct=%s: %v (rotation stopped, account not penalized)",
+				logfmt.Label(acct.UID, acct.Nickname), terr)
+			break
+		}
 		if uerr == nil && terr != nil {
 			// 上游超时 / 停滞：**不换号、不罚号**。
 			//
@@ -1123,6 +1136,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				writeOpenAIErrorHint(w, http.StatusBadRequest, "tool_call_mismatch",
 					string(respBody), h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
+			// 11151「对话里有空消息」：请求内容的问题（同一 body 换任何号都一样）。
+			// 以前它落通用 4xx → 只换号不罚号，轮一圈后拿 503 收场（issue #203：客户端
+			// 看到「服务暂时不可用」，而真实原因只是某条消息内容为空）。这里直接 400 +
+			// 上游原文（含 code/requestId，客户端按它自查），不罚号、不轮转。
+			if kind == upstream.ErrEmptyMessage {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr, outModel)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "a message in the conversation has empty content"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "empty_message", msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
 				st.status = http.StatusBadRequest
 				return
 			}
@@ -1636,6 +1665,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 为何不轮转：11101 发生在上游解析请求体阶段，还没走到模型路由，所以
 		// 「不同账号可能有不同模型权限」这条轮转理由实际属于 11102
 		// （ErrModelBlocked），那里已有 (账号, 模型) 负缓存避让。
+	case upstream.ErrEmptyMessage:
+		// 11151「对话里有空消息」：请求内容的问题（同 body 换任何号结果相同）。
+		// 零动作（不冷却/不熔断/不 NoteError），chatCompletions 已 fail-fast 400 透传。
+	case upstream.ErrRouteUnavailable:
+		// 账号绑定的出口线路名解析不出来：**配置错误**，不是账号问题。
+		// 零动作（不冷却/不熔断/不 NoteError）；chatCompletions 在 errors.As 之后
+		// 立即终止轮转并回 503（见那里的分支）。该分支只为文档完备与纵深防御。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶

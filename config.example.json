@@ -48,6 +48,7 @@
     "cn": "",
     "global": ""
   },
+  "proxies": {},
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
