@@ -30,6 +30,11 @@ interface Row {
   expireSec?: number
   /** 与该到期时间同时刻作废的积分量。 */
   expiring?: number
+  /** 未来 7 / 30 天内到期的全部有余额积分之和（窗口总量）。
+   *  汇总卡片必须用它，不能用 expiring —— 后者只是「最早一个到期时刻」那批，
+   *  同一号在窗口内的后续批次会被漏掉。 */
+  expiring7d: number
+  expiring30d: number
   /** 距到期秒数（负数 = 已过期）。阈值判定用它，不用天数 ——
    *  floor 会把 7.7 天压成 7，导致「8 天后到期」被算进「7 天内作废」。
    *  展示用 fmtTime（内部 round），两者不冲突。 */
@@ -41,6 +46,8 @@ function buildRow(a: Account, packs?: CreditPack[] | null): Row {
   let remain = queried ? (a.live_credits ?? a.credits) : undefined
   let expireSec = upstreamSec(a.credits_expire_at)
   let expiring = expireSec !== undefined ? a.credits_expiring : undefined
+  let expiring7d = queried ? (a.credits_expiring_7d ?? 0) : 0
+  let expiring30d = queried ? (a.credits_expiring_30d ?? 0) : 0
 
   // 该号没走过批量查询、但展开过明细时，用明细补齐：
   // 否则行上写着「未查询 / —」，底下却列着一堆有余额的积分包，自相矛盾。
@@ -55,6 +62,10 @@ function buildRow(a: Account, packs?: CreditPack[] | null): Row {
         .filter((p) => upstreamSec(p.end_time) === expireSec)
         .reduce((n, p) => n + (p.remain || 0), 0)
     }
+    // 窗口总量按同一口径现算：只算有余额、且到期在未来的包。
+    const w = windowTotals(packs)
+    expiring7d = w[0]
+    expiring30d = w[1]
   }
 
   const left = expireSec !== undefined ? expireSec - Date.now() / 1000 : undefined
@@ -63,8 +74,32 @@ function buildRow(a: Account, packs?: CreditPack[] | null): Row {
     remain,
     expireSec,
     expiring,
+    expiring7d,
+    expiring30d,
     left,
   }
+}
+
+/** 未来 7 / 30 天内到期的有余额积分之和（秒级阈值，与后端口径一致）。
+ *  用 upstreamSec 的秒值比较，避免 floor 天数把 7.7 天压成 7 这类边界错判。 */
+function windowTotals(packs: CreditPack[]): [number, number] {
+  const now = Date.now() / 1000
+  let d7 = 0
+  let d30 = 0
+  for (const p of packs) {
+    if (!p.remain || p.remain <= 0) continue
+    const sec = upstreamSec(p.end_time)
+    if (sec === undefined) continue
+    const left = sec - now
+    if (left <= 0) continue
+    if (left <= SOON_DAYS * DAY) {
+      d7 += p.remain
+      d30 += p.remain
+    } else if (left <= NEAR_DAYS * DAY) {
+      d30 += p.remain
+    }
+  }
+  return [d7, d30]
 }
 
 export default function Credits() {
@@ -192,9 +227,13 @@ export default function Credits() {
         continue
       }
       total += r.remain
-      if (r.expireSec !== undefined && r.left !== undefined && r.left > 0 && r.expiring) {
-        if (r.left <= SOON_DAYS * DAY) soon += r.expiring
-        if (r.left <= NEAR_DAYS * DAY) near += r.expiring
+      // 窗口统计用后端算好的真实窗口合计（逐包到期时刻的全量），
+      // 不能用 r.expiring —— 那只是「最早一个到期时刻」那批。
+      // 也不以 r.expireSec 为门槛：过期包已在 windowTotals / 后端里排除，
+      // 前置判断反而会在「最早那批已过期」时漏掉后面仍在窗口内的批次。
+      soon += r.expiring7d
+      near += r.expiring30d
+      if (r.expireSec !== undefined && r.left !== undefined && r.left > 0) {
         if (earliest === undefined || r.expireSec < earliest) earliest = r.expireSec
       }
     }
@@ -465,6 +504,9 @@ export default function Credits() {
           <span className="mono">CycleEndTime</span>，周期边界，积分到期即作废），「到期时剩余」是同一时刻作废的那批积分量
           —— 两者一起看才知道哪些积分快打水漂。<span className="text-faint">
           官方赠送积分按批过期，不用就归零，所以选号算法会优先消耗快过期的那批。</span>
+          <br />
+          顶部「7 / 30 天内作废」是**窗口内全部批次的合计**（不只看最近一次到期），
+          按每个号的积分包到期时间逐包累加，不含已过期与已用光的包。
           <br />
           积分必须主动查询才有数据：<span className="mono">—</span> 表示还没查过（不是 0）。
           刷新走的是批量任务，18 个号大约十几秒。

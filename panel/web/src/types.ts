@@ -56,7 +56,12 @@ export interface Account {
   credits_at?: string
   /** 积分到期：与 live_credits 同源同时刻。 */
   credits_expire_at?: string
+  /** 与 credits_expire_at 同一时刻作废的那批积分量（只是「最早一个到期时刻」）。 */
   credits_expiring?: number
+  /** 未来 7 天内到期的**全部**有余额积分之和（窗口总量，不是最近一批）。 */
+  credits_expiring_7d: number
+  /** 未来 30 天内到期的全部有余额积分之和（含 7 天那批）。 */
+  credits_expiring_30d: number
 }
 
 /** 单个被限流模型的台账行（账号详情用）。 */

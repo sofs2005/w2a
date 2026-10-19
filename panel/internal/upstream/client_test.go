@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy2api-gui/internal/authstore"
 )
@@ -234,5 +235,44 @@ func TestRegionBases(t *testing.T) {
 	chat, billing, origin = regionBases(RegionCN)
 	if chat != "https://copilot.tencent.com" || billing != "https://www.codebuddy.cn" || origin != "https://www.codebuddy.cn" {
 		t.Errorf("cn bases = %q/%q/%q", chat, billing, origin)
+	}
+}
+
+// TestSummarizeExpiringWindows 面板「N 天内作废」是窗口总量，不是「最近一次到期那批」。
+//
+// 反例正是旧实现的错：一个号有 3 天内 / 20 天后 / 100 天后三批，
+// 「最近一次到期」只报 3 天那批，20 天后那批被漏掉；窗口统计必须两批都算。
+func TestSummarizeExpiringWindows(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.Local)
+	fmtPack := func(d time.Duration) string {
+		return now.Add(d).Format(creditPackLayout)
+	}
+	packs := []CreditPack{
+		{Name: "3天", EndTime: fmtPack(3 * 24 * time.Hour), Remain: 10},
+		{Name: "20天", EndTime: fmtPack(20 * 24 * time.Hour), Remain: 20},
+		{Name: "100天", EndTime: fmtPack(100 * 24 * time.Hour), Remain: 40},
+		// 已用光：到期时丢不了东西，不计入（与 summarizeExpiry 同口径）。
+		{Name: "0余额", EndTime: fmtPack(2 * 24 * time.Hour), Remain: 0},
+		// 已过期：不再是「将作废」。
+		{Name: "已过期", EndTime: fmtPack(-2 * 24 * time.Hour), Remain: 7},
+		// 无到期：不计入。
+		{Name: "无到期", Remain: 5},
+	}
+	d7, d30 := summarizeExpiringWindows(packs, now)
+	if d7 != 10 {
+		t.Errorf("7 天窗口 = %d, want 10", d7)
+	}
+	if d30 != 30 {
+		t.Errorf("30 天窗口 = %d, want 30（3 天 + 20 天，旧口径会只算 10）", d30)
+	}
+
+	// 边界：恰好 7 天 / 恰好 30 天都算在窗口内。
+	edge := []CreditPack{
+		{EndTime: fmtPack(7 * 24 * time.Hour), Remain: 1},
+		{EndTime: fmtPack(30 * 24 * time.Hour), Remain: 2},
+	}
+	d7, d30 = summarizeExpiringWindows(edge, now)
+	if d7 != 1 || d30 != 3 {
+		t.Errorf("边界窗口 = %d/%d, want 1/3", d7, d30)
 	}
 }

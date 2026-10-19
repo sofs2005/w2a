@@ -704,6 +704,14 @@ type Credits struct {
 	ExpiresAt string `json:"expires_at,omitempty"`
 	// ExpiringRemain 与 ExpiresAt 同一时刻到期的那批积分剩余量。
 	ExpiringRemain int64 `json:"expiring_remain"`
+	// Expiring7d / Expiring30d 未来 7 / 30 天内到期的**全部**有余额积分之和
+	// （窗口含边界，30d 含其中的 7d 那批）。
+	//
+	// 与 ExpiringRemain 的区别：后者只是「最近一个到期时刻」那一批。用它做面板上的
+	// 窗口统计会系统性漏算 —— 一个号若有 10/1、10/20、11/5 三批，最近一次只报 10/1
+	// 那批，10/20 那批明明在 30 天内却不算进去。
+	Expiring7d  int64 `json:"expiring_7d"`
+	Expiring30d int64 `json:"expiring_30d"`
 	// Details 逐包明细，按到期时间升序，无到期的排最后。
 	Details []CreditPack `json:"details,omitempty"`
 }
@@ -765,6 +773,32 @@ func summarizeExpiry(packs []CreditPack, now time.Time) (at string, expiring int
 		}
 	}
 	return at, expiring
+}
+
+// summarizeExpiringWindows 统计未来 7 / 30 天内到期的全部有余额积分之和
+// （口径同 summarizeExpiry：只算解析成功、晚于 now、remain > 0 的包）。
+//
+// 面板的「N 天内作废」是**窗口总量**，不是「最近一次到期那批」—— 后者只覆盖最早
+// 一个时刻，同一号在窗口内的后续批次会被漏掉。两个窗口同源同一遍扫描，保证
+// 「30 天含 7 天」这一层关系不会因两处阈值漂移而破。
+func summarizeExpiringWindows(packs []CreditPack, now time.Time) (d7, d30 int64) {
+	for _, p := range packs {
+		if p.EndTime == "" || p.Remain <= 0 {
+			continue
+		}
+		t, err := time.ParseInLocation(creditPackLayout, p.EndTime, now.Location())
+		if err != nil || !t.After(now) {
+			continue
+		}
+		switch left := t.Sub(now); {
+		case left <= 7*24*time.Hour:
+			d7 += p.Remain
+			d30 += p.Remain
+		case left <= 30*24*time.Hour:
+			d30 += p.Remain
+		}
+	}
+	return d7, d30
 }
 
 // sortPacksByExpiry 按到期时间升序重排明细；无到期（或解析失败）的排最后，组内保持原序。
@@ -849,6 +883,7 @@ func (c *Client) UserResource(a *authstore.Account) (*Credits, error) {
 	}
 	out.Details = sortPacksByExpiry(out.Details)
 	out.ExpiresAt, out.ExpiringRemain = summarizeExpiry(out.Details, now)
+	out.Expiring7d, out.Expiring30d = summarizeExpiringWindows(out.Details, now)
 	if out.Size > 0 {
 		if derived := out.Size - out.Remain; derived > out.Used {
 			out.Used = derived
