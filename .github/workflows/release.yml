@@ -1,14 +1,16 @@
-# release.yml — 编译 linux/amd64 静态二进制并随 v* 标签发布 GitHub Release。
+# release.yml — 编译 linux/amd64 静态二进制，随 master 推送与 v* 标签发布。
 #
 # 与 build.yml / docker.yml 的分工：
 #   - docker.yml   master 推送：跑测试 + 构建 GHCR 镜像（只推镜像）
 #   - build.yml    v* 标签：推 GHCR 镜像 + 导出离线镜像 tar.gz
 #   - release.yml  本文件：产出**裸二进制**，供没有 Docker 的服务器直接下载运行
 #
-# 触发：
-#   - push 分支（master）      → 只做编译检查，不产出、不发布
-#   - push v* 标签             → 构建 + 冒烟 + 发布 Release
-#   - workflow_dispatch        → 手动构建，产物进 Actions artifact（不建 Release）
+# 触发与发布去向：
+#   - push master         → 构建 + 冒烟，覆盖发布到滚动 Release `latest`
+#                           （下载 URL 恒定，服务器可钉死用于自动更新）
+#   - push v* 标签        → 构建 + 冒烟，发布该标签的版本 Release
+#   - workflow_dispatch   → 构建 + 冒烟，产物只进 Actions artifact，不发布
+#                           （避免在任意分支手动跑一次就覆盖 latest）
 #
 # 产物名固定（服务器可按固定 URL 自动下载，见 README「下载预编译二进制」）：
 #   wb2api-linux-amd64       ./cmd/server  → 网关（含内置面板前端）
@@ -23,41 +25,22 @@ name: Release Binaries
 on:
   push:
     branches: [master]
-    tags: ['v*'] # 打 tag 触发发布
+    tags: ['v*'] # 打 tag 触发版本发布
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # tag 构建不可取消：中途取消会留下半截 Release；分支构建后到先得地覆盖旧的。
+  # 同一 ref 上的并发构建：后到的覆盖先到的，避免旧提交的构建最后完成、
+  # 把 latest 指回旧代码。tag 构建不可取消——中途取消会留下半截 Release。
   group: release-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  # 普通推送只验证「能编译」：不跑前端构建、不出二进制、不发布。
-  compile-check:
-    if: github.event_name == 'push' && github.ref_type == 'branch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod # 版本唯一来源：go.mod 的 go 指令
-
-      # 面板是独立 module（panel/go.mod），根 module 的 ./... 会在 module 边界停下，
-      # 必须显式带上 workbuddy2api-gui/...，否则面板代码不参与编译检查。
-      - name: Compile check (gateway + panel)
-        env:
-          CGO_ENABLED: "0"
-        run: go build ./... workbuddy2api-gui/...
-
   build:
-    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # 建 Release / 上传资产需要写权限；工作流其余步骤不接触任何额外密钥。
+    # 建 Release / 上传资产 / 移动 latest 标签需要写权限。
     permissions:
       contents: write
     steps:
@@ -97,7 +80,8 @@ jobs:
           grep -q '/assets/' panel/internal/webui/dist/index.html
           echo "frontend dist ok:" && ls -1 panel/internal/webui/dist/assets
 
-      # 版本标签在 tag 推送时取 ref 名，手动触发时用 dev-<短 commit>。
+      # 版本：tag 推送取 ref 名；master 推送用 dev-<短 commit>（build-info.json 里
+      # 仍带完整 commit，可精确追溯）；手动触发同 master 口径。
       - name: Compute version metadata
         id: meta
         shell: bash
@@ -109,8 +93,18 @@ jobs:
             version="dev-${GITHUB_SHA::7}"
           fi
           built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # publish：master 推送覆盖滚动 Release `latest`；tag 推送发版本 Release；
+          # 手动触发不发布（任意分支手动跑一次不该把 latest 指过去）。
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            publish="tag"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" = "master" ]; then
+            publish="latest"
+          else
+            publish="none"
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "built_at=$built_at" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
       - name: Build linux/amd64 binaries
         env:
@@ -253,59 +247,111 @@ jobs:
             dist/checksums.txt
             dist/build-info.json
           if-no-files-found: error
-
       # 只有 tag 推送才建 Release；workflow_dispatch 只把产物留在 artifact 里。
+      # 发布去向由 meta.publish 决定：
+      #   tag    → 该标签的版本 Release
+      #   latest → 滚动 Release `latest`（master 每次推送覆盖，下载 URL 恒定）
+      #   none   → 手动触发，只留 artifact
       - name: Publish GitHub Release
-        # 仅 tag 推送发布；workflow_dispatch 手动构建只留 artifact，绝不覆盖已有 tag 的 Release。
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+        if: steps.meta.outputs.publish != 'none'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          PUBLISH: ${{ steps.meta.outputs.publish }}
           VERSION: ${{ steps.meta.outputs.version }}
           BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
           notes="$RUNNER_TEMP/release-notes.md"
-          cat > "$notes" <<EOF
-          ## WorkBuddy2API ${VERSION}
-
-          - commit: \`${GITHUB_SHA}\`
-          - 构建时间: \`${BUILT_AT}\`
-          - 目标平台: \`linux/amd64\`（CGO 关闭，静态链接）
-
-          资产（文件名固定，便于服务器自动下载）：
-
-          | 文件 | 说明 |
-          |---|---|
-          | \`wb2api-linux-amd64\` | 网关主程序（含内置面板前端） |
-          | \`wb2api-login-linux-amd64\` | OAuth 登录工具 |
-          | \`checksums.txt\` | SHA-256 校验和 |
-          | \`build-info.json\` | 版本 / commit / 构建时间 / Go 版本 / 目标平台 |
-
-          \`\`\`bash
-          curl -fsSLO ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/checksums.txt
-          sha256sum -c checksums.txt --ignore-missing
-          \`\`\`
-          EOF
-
           assets=(
             dist/wb2api-linux-amd64
             dist/wb2api-login-linux-amd64
             dist/checksums.txt
             dist/build-info.json
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # 重跑同一 tag（例如上次上传中断）：覆盖同名资产而不是报错退出。
-            gh release upload "$TAG" "${assets[@]}" --clobber
+
+          if [ "$PUBLISH" = "latest" ]; then
+            TAG="latest"
+            # latest 是**移动标签**：每次 master 推送都把它指到新提交。滚动 Release
+            # 的内容随最新构建变化，release notes 必须写明是哪次提交，否则无法追溯。
+            title="最新构建 (master)"
+            {
+              echo "## WorkBuddy2API 滚动构建"
+              echo
+              echo "每次推送到 \`master\` 自动重建并覆盖本 Release。"
+              echo "需要可追溯的固定版本请用 [版本 Release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases)。"
+              echo
+              echo "- commit: \`${COMMIT}\`"
+              echo "- 短版本: \`${VERSION}\`"
+              echo "- 构建时间: \`${BUILT_AT}\`"
+              echo "- 目标平台: \`linux/amd64\`（CGO 关闭，静态链接）"
+              echo
+              echo "| 文件 | 说明 |"
+              echo "|---|---|"
+              echo "| \`wb2api-linux-amd64\` | 网关主程序（含内置面板前端） |"
+              echo "| \`wb2api-login-linux-amd64\` | OAuth 登录工具 |"
+              echo "| \`checksums.txt\` | SHA-256 校验和 |"
+              echo "| \`build-info.json\` | 版本 / commit / 构建时间 / Go 版本 / 目标平台 |"
+            } > "$notes"
           else
-            gh release create "$TAG" "${assets[@]}" \
-              --title "$TAG" --notes-file "$notes" --verify-tag
+            # VERSION 在 tag 推送时就是标签名；不查 git describe——checkout 默认
+            # fetch-depth 1，本地未必有 tag 对象。
+            TAG="$VERSION"
+            title="$TAG"
+            {
+              echo "## WorkBuddy2API ${VERSION}"
+              echo
+              echo "- commit: \`${COMMIT}\`"
+              echo "- 构建时间: \`${BUILT_AT}\`"
+              echo "- 目标平台: \`linux/amd64\`（CGO 关闭，静态链接）"
+              echo
+              echo "| 文件 | 说明 |"
+              echo "|---|---|"
+              echo "| \`wb2api-linux-amd64\` | 网关主程序（含内置面板前端） |"
+              echo "| \`wb2api-login-linux-amd64\` | OAuth 登录工具 |"
+              echo "| \`checksums.txt\` | SHA-256 校验和 |"
+              echo "| \`build-info.json\` | 版本 / commit / 构建时间 / Go 版本 / 目标平台 |"
+            } > "$notes"
+          fi
+
+          {
+            echo
+            echo '```bash'
+            echo "curl -fsSLO ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/checksums.txt"
+            echo "sha256sum -c checksums.txt --ignore-missing"
+            echo '```'
+          } >> "$notes"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑同一目标（滚动 latest，或上次上传中断的 tag）：覆盖同名资产。
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --notes-file "$notes" --title "$title"
+          else
+            # latest 的 tag 不存在时由 gh 在该次提交上自动创建（不能用 --verify-tag），
+            # 否则用 --verify-tag 确保 tag 确实由人工打过。
+            if [ "$PUBLISH" = "latest" ]; then
+              gh release create "$TAG" "${assets[@]}" \
+                --title "$title" --notes-file "$notes" \
+                --target "$COMMIT" --latest=false
+            else
+              gh release create "$TAG" "${assets[@]}" \
+                --title "$title" --notes-file "$notes" --verify-tag
+            fi
+          fi
+
+          # 滚动 Release 的 latest 标签必须跟着最新提交走：只覆盖资产而不移动 tag，
+          # Release 页上的「Source code」会一直停在首次构建的提交上。
+          # 用 API 强制更新 ref（git push --force 需要额外配置远端凭据）。
+          if [ "$PUBLISH" = "latest" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
+              -f sha="$COMMIT" -F force=true >/dev/null
           fi
 
       - name: Summary
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          PUBLISH: ${{ steps.meta.outputs.publish }}
         run: |
           set -euo pipefail
           {
@@ -316,11 +362,18 @@ jobs:
             echo '```'
             cat dist/checksums.txt
             echo '```'
-            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-              echo
-              echo "Release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
-            else
-              echo
-              echo "手动构建（未发布 Release），产物见本次运行 artifacts。"
-            fi
+            case "$PUBLISH" in
+              tag)
+                echo
+                echo "Release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+                ;;
+              latest)
+                echo
+                echo "已覆盖滚动 Release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/latest"
+                ;;
+              *)
+                echo
+                echo "手动构建（未发布 Release），产物见本次运行 artifacts。"
+                ;;
+            esac
           } >> "$GITHUB_STEP_SUMMARY"

@@ -581,12 +581,22 @@ docker compose pull && docker compose up -d
 | `checksums.txt` | SHA-256 校验和 |
 | `build-info.json` | 版本、commit、构建时间、Go 版本、目标平台 |
 
-二进制由 GitHub Actions 在 `v*` 标签推送时自动构建并发布，静态链接（`CGO_ENABLED=0`），
-不依赖宿主机 glibc。下载并校验：
+二进制由 GitHub Actions 自动构建，静态链接（`CGO_ENABLED=0`），不依赖宿主机 glibc。
+发布去向随触发方式不同（与 Docker 镜像一样，**推 `master` 就会更新**）：
+
+| 触发 | 结果 |
+|---|---|
+| 推送到 `master` | 重建并覆盖滚动 Release [`latest`](https://github.com/sofs2005/w2a/releases/tag/latest)，URL 恒定 |
+| 推送 `v*` 标签 | 发布该标签的固定版本 Release |
+| Actions 手动 `Run workflow` | 只产出 Actions artifact，不发布 |
+
+因此**想跟随最新代码**就用 `latest`（与 `docker pull` 的节奏一致），
+**想固定版本**就用具体标签。下载并校验：
 
 ```bash
-VERSION=v1.0.0   # 换成你要的标签
-BASE="https://github.com/sofs2005/w2a/releases/download/$VERSION"
+# 跟随最新构建；固定版本把 latest 换成 v1.0.0 这类标签
+CHANNEL=latest
+BASE="https://github.com/sofs2005/w2a/releases/download/$CHANNEL"
 
 curl -fsSLO "$BASE/wb2api-linux-amd64"
 curl -fsSLO "$BASE/wb2api-login-linux-amd64"
@@ -603,12 +613,12 @@ chmod +x wb2api-linux-amd64 wb2api-login-linux-amd64
 cat build-info.json              # 这份二进制对应的版本 / commit / Go 版本
 ```
 
-> 校验和应**先通过在浏览器打开 Release 页面核对**，再执行上面的 `sha256sum -c`：
-> 从同一个已被篡改的渠道同时取二进制和校验和，校验本身证明不了什么。
-> `build-info.json` 里的 `commit` 是构建源码的精确提交，排查问题时先看它，
-> 而不是看文件名里的版本号。
+> `latest` 会随每次 `master` 推送被覆盖，下载到的内容随时可能变；自动化部署建议
+> 记住 `build-info.json` 里的 `commit`，重启前比对一次，避免「表面没升级、实际已变」。
+> 校验和应**先在浏览器打开 Release 页面核对**再执行 `sha256sum -c`：从同一个已被
+> 篡改的渠道同时取二进制和校验和，校验本身证明不了什么。
 
-**创建版本标签**（只有打 `v*` 标签才会发布 Release；普通 push 到 `master` 只做编译检查）：
+**发布固定版本**（`master` 推送已自动出二进制，打标签是为了留一个不再变化的版本号）：
 
 ```bash
 git checkout master && git pull
@@ -616,9 +626,8 @@ git tag -a v1.0.0 -m "v1.0.0"
 git push origin v1.0.0
 ```
 
-推送后 [Actions 的 Release Binaries 工作流](https://github.com/sofs2005/w2a/actions/workflows/release.yml)
-会构建 → 冒烟测试 → 发布 Release。也可在 Actions 页面用 `Run workflow` 手动构建：
-**手动构建只把产物留在本次运行的 artifacts 里，不创建 Release、也不覆盖已有标签**。
+推送后 [Release Binaries 工作流](https://github.com/sofs2005/w2a/actions/workflows/release.yml)
+会构建 → 冒烟测试 → 发布该标签的 Release。
 
 > 构建方式：`CGO_ENABLED=0` + `-trimpath -ldflags="-s -w"` 交叉编译，Go 版本取自
 > `go.mod`，前端先用 `npm ci && npm run build` 生成 `panel/internal/webui/dist` 再 embed。
