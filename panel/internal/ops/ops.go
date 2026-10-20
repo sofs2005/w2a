@@ -82,6 +82,9 @@ type AccountView struct {
 	// 积分到期：与 LiveCredits 同源同时刻（来自主动查询的积分包明细）。
 	CreditsExpireAt *string `json:"credits_expire_at,omitempty"`
 	CreditsExpiring *int64  `json:"credits_expiring,omitempty"`
+	// 从最近到期时刻起 24 小时内到期的全部有余额积分之和（面板行上「24 小时内到期」）。
+	// 与 credits_expiring 的区别：后者只算卡在同一秒的那批，同轮发放差几小时到期的会漏。
+	CreditsExpiring24h int64 `json:"credits_expiring_24h"`
 	// 未来 7 / 30 天内到期的**全部**有余额积分之和（不是「最近一次到期那批」）。
 	// 面板的窗口统计用这两个；credits_expiring 仍表示最早那个到期时刻的批次。
 	CreditsExpiring7d  int64 `json:"credits_expiring_7d"`
@@ -384,6 +387,7 @@ func (s *Service) Accounts(ctx context.Context) ([]AccountView, *gateway.Status,
 			}
 			expiring := c.credits.ExpiringRemain
 			v.CreditsExpiring = &expiring
+			v.CreditsExpiring24h = c.credits.Expiring24h
 			v.CreditsExpiring7d = c.credits.Expiring7d
 			v.CreditsExpiring30d = c.credits.Expiring30d
 		}

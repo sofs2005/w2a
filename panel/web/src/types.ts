@@ -58,6 +58,8 @@ export interface Account {
   credits_expire_at?: string
   /** 与 credits_expire_at 同一时刻作废的那批积分量（只是「最早一个到期时刻」）。 */
   credits_expiring?: number
+  /** 从 credits_expire_at 起 24 小时内到期的全部有余额积分之和（行上「24 小时内到期」）。 */
+  credits_expiring_24h: number
   /** 未来 7 天内到期的**全部**有余额积分之和（窗口总量，不是最近一批）。 */
   credits_expiring_7d: number
   /** 未来 30 天内到期的全部有余额积分之和（含 7 天那批）。 */

@@ -704,6 +704,10 @@ type Credits struct {
 	ExpiresAt string `json:"expires_at,omitempty"`
 	// ExpiringRemain 与 ExpiresAt 同一时刻到期的那批积分剩余量。
 	ExpiringRemain int64 `json:"expiring_remain"`
+	// Expiring24h 从 ExpiresAt 起 24 小时内到期的**全部**有余额积分之和。
+	// 面板行上的「24 小时内到期」用它：上游的包按批下发，同一轮发放的包不一定卡在
+	// 同一秒，只算同一时刻那批会把相邻几小时作废的漏掉。
+	Expiring24h int64 `json:"expiring_24h"`
 	// Expiring7d / Expiring30d 未来 7 / 30 天内到期的**全部**有余额积分之和
 	// （窗口含边界，30d 含其中的 7d 那批）。
 	//
@@ -748,13 +752,18 @@ type CreditPack struct {
 // creditPackLayout 上游 CycleEndTime 的格式（与 billing 请求体里的时间格式同源）。
 const creditPackLayout = "2006-01-02 15:04:05"
 
+// expiryWindow 是面板行上「最近一次到期起 24 小时内作废」的窗口长度。
+// 上游同一轮发放的包常常差几小时到期，只合并同一秒那批会低估这一栏。
+const expiryWindow24h = 24 * time.Hour
+
 // summarizeExpiry 从逐包明细里挑出最近一次**有余额的**到期：解析成功且晚于 now 的最小时间，
-// 并把同一时刻到期的包剩余量合并计入 expiring。没有这样的包 → 返回空。
+// 并把同一时刻到期的包剩余量合并计入 expiring、把该时刻起 24 小时内到期的合并计入 within24h。
+// 没有这样的包 → 返回空。
 //
 // 为什么跳过 remain <= 0 的包：一个已经用光的包到期时丢不了任何东西，但它的到期时间
 // 往往最早（实测：最早到期的是 9/30 的 0 余额包，而真正有余额的是 10/1 的 45 分）。
 // 拿它当「最近到期」会把有余额的那批挤出视野，正好把这一栏的用途反掉了。
-func summarizeExpiry(packs []CreditPack, now time.Time) (at string, expiring int64) {
+func summarizeExpiry(packs []CreditPack, now time.Time) (at string, expiring, within24h int64) {
 	best := time.Time{}
 	for _, p := range packs {
 		if p.EndTime == "" || p.Remain <= 0 {
@@ -772,7 +781,24 @@ func summarizeExpiry(packs []CreditPack, now time.Time) (at string, expiring int
 			expiring += p.Remain
 		}
 	}
-	return at, expiring
+	if best.IsZero() {
+		return "", 0, 0
+	}
+	// 第二遍按「距 best 的间隔」累计 24h 窗口：窗口起点是最近到期时刻而非 now，
+	// 这样「最近到期还有 3 天」的号也能显示那 3 天后一天内会作废的总量。
+	for _, p := range packs {
+		if p.EndTime == "" || p.Remain <= 0 {
+			continue
+		}
+		t, err := time.ParseInLocation(creditPackLayout, p.EndTime, now.Location())
+		if err != nil || !t.After(now) {
+			continue
+		}
+		if left := t.Sub(best); left >= 0 && left <= expiryWindow24h {
+			within24h += p.Remain
+		}
+	}
+	return at, expiring, within24h
 }
 
 // summarizeExpiringWindows 统计未来 7 / 30 天内到期的全部有余额积分之和
@@ -882,7 +908,7 @@ func (c *Client) UserResource(a *authstore.Account) (*Credits, error) {
 		out.Details = append(out.Details, pack)
 	}
 	out.Details = sortPacksByExpiry(out.Details)
-	out.ExpiresAt, out.ExpiringRemain = summarizeExpiry(out.Details, now)
+	out.ExpiresAt, out.ExpiringRemain, out.Expiring24h = summarizeExpiry(out.Details, now)
 	out.Expiring7d, out.Expiring30d = summarizeExpiringWindows(out.Details, now)
 	if out.Size > 0 {
 		if derived := out.Size - out.Remain; derived > out.Used {

@@ -238,6 +238,40 @@ func TestRegionBases(t *testing.T) {
 	}
 }
 
+// TestSummarizeExpiry24h 「24 小时内到期」以最近到期时刻为窗口起点，不是同一秒那批。
+//
+// 反例是旧口径：上游同轮发放的包常差几小时（实测 9/30 23:00 与 10/1 04:00），
+// 只合并与最近到期同一秒的包会把后面几小时到期的漏掉，面板显示偏小。
+func TestSummarizeExpiry24h(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.Local)
+	fmtPack := func(d time.Duration) string { return now.Add(d).Format(creditPackLayout) }
+	packs := []CreditPack{
+		{Name: "最近", EndTime: fmtPack(3 * 24 * time.Hour), Remain: 10},
+		{Name: "同一天稍晚", EndTime: fmtPack(3*24*time.Hour + 5*time.Hour), Remain: 7},
+		{Name: "恰好24h", EndTime: fmtPack(4 * 24 * time.Hour), Remain: 3},
+		{Name: "超窗1秒", EndTime: fmtPack(4*24*time.Hour + time.Second), Remain: 100},
+		{Name: "更晚", EndTime: fmtPack(20 * 24 * time.Hour), Remain: 40},
+		// 已用光 / 已过期：不计入（与窗口统计同口径）。
+		{Name: "0余额", EndTime: fmtPack(3 * 24 * time.Hour), Remain: 0},
+		{Name: "已过期", EndTime: fmtPack(-2 * 24 * time.Hour), Remain: 9},
+	}
+	at, expiring, within24h := summarizeExpiry(packs, now)
+	if at != fmtPack(3*24*time.Hour) {
+		t.Errorf("最近到期 = %q, want %q", at, fmtPack(3*24*time.Hour))
+	}
+	if expiring != 10 {
+		t.Errorf("同一时刻那批 = %d, want 10", expiring)
+	}
+	if within24h != 20 {
+		t.Errorf("24 小时窗口 = %d, want 20（10+7+3，边界 24h 含、超 1 秒不含）", within24h)
+	}
+
+	// 没有可计算的有余额到期 → 三项都归零，不编造。
+	if at, e, w := summarizeExpiry(nil, now); at != "" || e != 0 || w != 0 {
+		t.Errorf("空明细 = %q/%d/%d, want 空/0/0", at, e, w)
+	}
+}
+
 // TestSummarizeExpiringWindows 面板「N 天内作废」是窗口总量，不是「最近一次到期那批」。
 //
 // 反例正是旧实现的错：一个号有 3 天内 / 20 天后 / 100 天后三批，

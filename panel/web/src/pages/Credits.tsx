@@ -28,7 +28,7 @@ interface Row {
   remain?: number
   /** 最近一次积分包到期时间（Unix 秒）。 */
   expireSec?: number
-  /** 与该到期时间同时刻作废的积分量。 */
+  /** 从 expireSec 起 24 小时内到期的积分合计（不是只算同一秒那批）。 */
   expiring?: number
   /** 未来 7 / 30 天内到期的全部有余额积分之和（窗口总量）。
    *  汇总卡片必须用它，不能用 expiring —— 后者只是「最早一个到期时刻」那批，
@@ -45,7 +45,7 @@ function buildRow(a: Account, packs?: CreditPack[] | null): Row {
   const queried = !!a.credits_at
   let remain = queried ? (a.live_credits ?? a.credits) : undefined
   let expireSec = upstreamSec(a.credits_expire_at)
-  let expiring = expireSec !== undefined ? a.credits_expiring : undefined
+  let expiring = expireSec !== undefined ? a.credits_expiring_24h : undefined
   let expiring7d = queried ? (a.credits_expiring_7d ?? 0) : 0
   let expiring30d = queried ? (a.credits_expiring_30d ?? 0) : 0
 
@@ -58,8 +58,12 @@ function buildRow(a: Account, packs?: CreditPack[] | null): Row {
       .filter((x): x is number => x !== undefined)
     if (ends.length > 0) {
       expireSec = Math.min(...ends)
+      // 窗口起点是该号最近到期时刻：同一轮发放的包常差几小时，只合并同一秒那批会漏。
       expiring = packs
-        .filter((p) => upstreamSec(p.end_time) === expireSec)
+        .filter((p) => {
+          const sec = upstreamSec(p.end_time)
+          return sec !== undefined && sec >= expireSec! && sec - expireSec! <= DAY
+        })
         .reduce((n, p) => n + (p.remain || 0), 0)
     }
     // 窗口总量按同一口径现算：只算有余额、且到期在未来的包。
@@ -368,7 +372,7 @@ export default function Credits() {
                   <th>域</th>
                   <th className="num">剩余积分</th>
                   <th>最近到期</th>
-                  <th className="num">到期时剩余</th>
+                  <th className="num">24 小时内到期</th>
                   <th>状态</th>
                   <th>明细</th>
                 </tr>
@@ -501,8 +505,9 @@ export default function Credits() {
 
         <p className="text-faint" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.7 }}>
           「最近到期」是账号各积分包里最早的**真实到期时间**（上游{' '}
-          <span className="mono">CycleEndTime</span>，周期边界，积分到期即作废），「到期时剩余」是同一时刻作废的那批积分量
-          —— 两者一起看才知道哪些积分快打水漂。<span className="text-faint">
+          <span className="mono">CycleEndTime</span>，周期边界，积分到期即作废）；
+          「24 小时内到期」是从这个时刻起一天内作废的**全部**积分合计 —— 同一轮发放的包常差几小时到期，
+          只算同一秒那批会低估。两者一起看才知道哪些积分快打水漂。<span className="text-faint">
           官方赠送积分按批过期，不用就归零，所以选号算法会优先消耗快过期的那批。</span>
           <br />
           顶部「7 / 30 天内作废」是**窗口内全部批次的合计**（不只看最近一次到期），
