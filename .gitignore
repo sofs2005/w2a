@@ -21,6 +21,8 @@ data/
 config.json
 
 # Build artifacts
+# /dist/ 是 release.yml 的二进制输出目录，二进制只进 Release/artifact，绝不入库
+/dist/
 *.tmp
 __pycache__/
 # Windows 下 `go build ./cmd/server` 会在仓库根留下 server.exe

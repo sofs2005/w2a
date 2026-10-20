@@ -1,0 +1,326 @@
+# release.yml — 编译 linux/amd64 静态二进制并随 v* 标签发布 GitHub Release。
+#
+# 与 build.yml / docker.yml 的分工：
+#   - docker.yml   master 推送：跑测试 + 构建 GHCR 镜像（只推镜像）
+#   - build.yml    v* 标签：推 GHCR 镜像 + 导出离线镜像 tar.gz
+#   - release.yml  本文件：产出**裸二进制**，供没有 Docker 的服务器直接下载运行
+#
+# 触发：
+#   - push 分支（master）      → 只做编译检查，不产出、不发布
+#   - push v* 标签             → 构建 + 冒烟 + 发布 Release
+#   - workflow_dispatch        → 手动构建，产物进 Actions artifact（不建 Release）
+#
+# 产物名固定（服务器可按固定 URL 自动下载，见 README「下载预编译二进制」）：
+#   wb2api-linux-amd64       ./cmd/server  → 网关（含内置面板前端）
+#   wb2api-login-linux-amd64 ./cmd/login   → OAuth 登录工具
+#   checksums.txt            sha256 校验和
+#   build-info.json          版本 / commit / 构建时间 / Go 版本 / 目标平台
+#
+# 安全：工作流不写入任何密钥，日志里不出现 Token / Cookie / 账号。二进制只进
+# Release 与 Actions artifact，**不提交回源码分支**。
+name: Release Binaries
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*'] # 打 tag 触发发布
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # tag 构建不可取消：中途取消会留下半截 Release；分支构建后到先得地覆盖旧的。
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # 普通推送只验证「能编译」：不跑前端构建、不出二进制、不发布。
+  compile-check:
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod # 版本唯一来源：go.mod 的 go 指令
+
+      # 面板是独立 module（panel/go.mod），根 module 的 ./... 会在 module 边界停下，
+      # 必须显式带上 workbuddy2api-gui/...，否则面板代码不参与编译检查。
+      - name: Compile check (gateway + panel)
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./... workbuddy2api-gui/...
+
+  build:
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # 建 Release / 上传资产需要写权限；工作流其余步骤不接触任何额外密钥。
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # 必须与 Dockerfile 的第一个阶段保持同一 Node 主版本，避免「CI 用 22、镜像用 20」
+      # 这样前端产物只在其中一条路径上能构建出来。
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+
+      # 面板前端产物（panel/internal/webui/dist）不入库，仓库里只有占位 index.html。
+      # 必须先构建，否则 embed 进二进制的就是那张「前端未构建」引导页。
+      - name: Build panel frontend
+        working-directory: panel/web
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run build
+
+      # 显式确认产物落到了 embed 目录：vite outDir 是 ../internal/webui/dist，
+      # 这里同时校验 index.html 真实生成且引用了带哈希的 assets，防止「构建成功但
+      # 产物落在别处」被后面的 go build 静默吞掉（它只要求 dist 存在）。
+      - name: Verify frontend dist
+        run: |
+          set -euo pipefail
+          test -f panel/internal/webui/dist/index.html
+          ls panel/internal/webui/dist/assets/*.js >/dev/null
+          grep -q '/assets/' panel/internal/webui/dist/index.html
+          echo "frontend dist ok:" && ls -1 panel/internal/webui/dist/assets
+
+      # 版本标签在 tag 推送时取 ref 名，手动触发时用 dev-<短 commit>。
+      - name: Compute version metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "built_at=$built_at" >> "$GITHUB_OUTPUT"
+
+      - name: Build linux/amd64 binaries
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/wb2api-linux-amd64 ./cmd/server
+          go build -trimpath -ldflags="-s -w" -o dist/wb2api-login-linux-amd64 ./cmd/login
+
+      - name: Generate build-info.json
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+          COMMIT: ${{ github.sha }}
+          REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          go_version="$(go env GOVERSION)"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg commit "$COMMIT" \
+            --arg commit_short "${COMMIT:0:7}" \
+            --arg built_at "$BUILT_AT" \
+            --arg go_version "$go_version" \
+            --arg goos "linux" \
+            --arg goarch "amd64" \
+            --arg ref "$REF" \
+            --arg event "$EVENT" \
+            '{
+              version: $version,
+              commit: $commit,
+              commit_short: $commit_short,
+              built_at: $built_at,
+              go_version: $go_version,
+              goos: $goos,
+              goarch: $goarch,
+              target: ($goos + "/" + $goarch),
+              cgo_enabled: "0",
+              trimpath: true,
+              ldflags: "-s -w",
+              ref: $ref,
+              event: $event,
+              assets: ["wb2api-linux-amd64", "wb2api-login-linux-amd64"]
+            }' > build-info.json
+          cat build-info.json
+
+      - name: Generate checksums.txt
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum wb2api-linux-amd64 wb2api-login-linux-amd64 > checksums.txt
+          cat checksums.txt
+
+      # 冒烟测试：产物必须真是 linux/amd64 静态 ELF、--help 退出码为 0、校验和自洽，
+      # 并且能用一份临时配置真正起服务、返回面板页面。任何一项失败都让 Workflow 失败，
+      # 避免「构建成功但跑不起来」的二进制被发布。
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          cd dist
+          bin="$PWD/wb2api-linux-amd64"
+          login="$PWD/wb2api-login-linux-amd64"
+
+          echo "== file =="
+          file "$bin" "$login"
+          file "$bin" | grep -q 'ELF 64-bit LSB.*x86-64'
+          file "$bin" | grep -q 'statically linked'
+          file "$login" | grep -q 'ELF 64-bit LSB.*x86-64'
+          file "$login" | grep -q 'statically linked'
+
+          echo "== --help =="
+          "$bin" -h >/dev/null 2>&1
+          # login 的 -h/--help 走「打印用法后正常返回」，用 grep 再确认输出非空，
+          # 防止将来 help 被改成静默 exit 0 时这条冒烟悄悄失效。
+          # 先存进变量再匹配，避免 `| grep -q` 提前关管道引发 SIGPIPE（pipefail 下会失败）。
+          help="$("$login" --help)"
+          case "$help" in
+            *用法*) echo "login help ok" ;;
+            *) echo "::error::login --help printed nothing"; exit 1 ;;
+          esac
+
+          echo "== sha256sum -c =="
+          sha256sum -c checksums.txt
+
+          echo "== runtime =="
+          # 在临时目录里跑，避免 auths/ data/ 等运行痕迹混进待上传的 dist。
+          tmp="$(mktemp -d)"
+          printf '{"listen":"127.0.0.1:17863","api_key":"ci-smoke-key-not-a-secret"}\n' \
+            > "$tmp/config.json"
+          # exec 让二进制替换子 shell：$! 拿到的就是进程本身，trap 才能真的把它杀掉
+          # （否则杀掉的只是子 shell，二进制会残留在 runner 上继续占端口）。
+          ( cd "$tmp" && exec "$bin" -config config.json > server.log 2>&1 ) &
+          pid=$!
+          # wait 回收进程后再删临时目录：kill 返回时子进程可能还持有文件句柄，
+          # 直接 rm 会偶发 "Device or resource busy"。
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$tmp" || true' EXIT
+
+          code=""
+          for _ in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+              http://127.0.0.1:17863/healthz || true)"
+            # 无账号时 /healthz 按设计返回 503，200/503 都算服务已起。
+            # 不能写成 `[ .. ] || [ .. ] && break`：两个判断都为假时整条链返回非零，
+            # 在 set -e 下会直接终止脚本（首次 curl 必然拿不到响应）。
+            if [ "$code" = "200" ] || [ "$code" = "503" ]; then
+              break
+            fi
+            sleep 1
+          done
+          if [ "$code" != "200" ] && [ "$code" != "503" ]; then
+            echo "::error::server did not answer /healthz (last code: ${code:-none})"
+            tail -30 "$tmp/server.log" || true
+            exit 1
+          fi
+          echo "healthz -> $code"
+
+          # 前端产物确实被 embed 进二进制：首页引用了带哈希的 /assets/ 资源。
+          root="$(curl -s --max-time 5 http://127.0.0.1:17863/)"
+          case "$root" in
+            *'/assets/'*) echo "panel frontend embedded ok" ;;
+            *) echo "::error::panel frontend not embedded in binary"; exit 1 ;;
+          esac
+          # 面板 API 与网关同端口装配是否成功。
+          curl -s --max-time 5 http://127.0.0.1:17863/api/session | grep -q '"authenticated"' \
+            || { echo "::error::panel routes not mounted"; exit 1; }
+          echo "panel api ok"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wb2api-linux-amd64
+          path: |
+            dist/wb2api-linux-amd64
+            dist/wb2api-login-linux-amd64
+            dist/checksums.txt
+            dist/build-info.json
+          if-no-files-found: error
+
+      # 只有 tag 推送才建 Release；workflow_dispatch 只把产物留在 artifact 里。
+      - name: Publish GitHub Release
+        # 仅 tag 推送发布；workflow_dispatch 手动构建只留 artifact，绝不覆盖已有 tag 的 Release。
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<EOF
+          ## WorkBuddy2API ${VERSION}
+
+          - commit: \`${GITHUB_SHA}\`
+          - 构建时间: \`${BUILT_AT}\`
+          - 目标平台: \`linux/amd64\`（CGO 关闭，静态链接）
+
+          资产（文件名固定，便于服务器自动下载）：
+
+          | 文件 | 说明 |
+          |---|---|
+          | \`wb2api-linux-amd64\` | 网关主程序（含内置面板前端） |
+          | \`wb2api-login-linux-amd64\` | OAuth 登录工具 |
+          | \`checksums.txt\` | SHA-256 校验和 |
+          | \`build-info.json\` | 版本 / commit / 构建时间 / Go 版本 / 目标平台 |
+
+          \`\`\`bash
+          curl -fsSLO ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/checksums.txt
+          sha256sum -c checksums.txt --ignore-missing
+          \`\`\`
+          EOF
+
+          assets=(
+            dist/wb2api-linux-amd64
+            dist/wb2api-login-linux-amd64
+            dist/checksums.txt
+            dist/build-info.json
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑同一 tag（例如上次上传中断）：覆盖同名资产而不是报错退出。
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --title "$TAG" --notes-file "$notes" --verify-tag
+          fi
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BUILT_AT: ${{ steps.meta.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### 构建完成：${VERSION}"
+            echo
+            echo "目标平台：\`linux/amd64\`　构建时间：\`${BUILT_AT}\`"
+            echo
+            echo '```'
+            cat dist/checksums.txt
+            echo '```'
+            if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+              echo
+              echo "Release: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}"
+            else
+              echo
+              echo "手动构建（未发布 Release），产物见本次运行 artifacts。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

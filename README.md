@@ -569,6 +569,62 @@ docker compose pull && docker compose up -d
 > `gui-credentials.json` / `backups` 任一存在），会**拒绝生成新配置并报错退出**，
 > 而不是悄悄换掉 `api_key`。日志会直接打印上面这条 `docker inspect` 命令。
 
+### 下载预编译二进制（linux/amd64）
+
+不想装 Go、也不想跑 Docker 的服务器，可以直接下载 Release 里的静态二进制。文件名**固定**
+（不随版本变化），因此升级脚本可以钉死 URL：
+
+| 文件 | 说明 |
+|---|---|
+| `wb2api-linux-amd64` | 网关主程序（**已内置面板前端**，单文件即可起服务） |
+| `wb2api-login-linux-amd64` | OAuth 登录工具（对应容器里的 `/app/login`） |
+| `checksums.txt` | SHA-256 校验和 |
+| `build-info.json` | 版本、commit、构建时间、Go 版本、目标平台 |
+
+二进制由 GitHub Actions 在 `v*` 标签推送时自动构建并发布，静态链接（`CGO_ENABLED=0`），
+不依赖宿主机 glibc。下载并校验：
+
+```bash
+VERSION=v1.0.0   # 换成你要的标签
+BASE="https://github.com/sofs2005/w2a/releases/download/$VERSION"
+
+curl -fsSLO "$BASE/wb2api-linux-amd64"
+curl -fsSLO "$BASE/wb2api-login-linux-amd64"
+curl -fsSLO "$BASE/checksums.txt"
+curl -fsSLO "$BASE/build-info.json"
+
+# 校验。注意 checksums.txt 里两个文件都列了，只下其中一个时用 --ignore-missing，
+# 否则 sha256sum 会因找不到另一个文件而报错。
+sha256sum -c checksums.txt --ignore-missing
+
+# 校验无误后再加执行权限并运行
+chmod +x wb2api-linux-amd64 wb2api-login-linux-amd64
+./wb2api-linux-amd64 -h          # 用法
+cat build-info.json              # 这份二进制对应的版本 / commit / Go 版本
+```
+
+> 校验和应**先通过在浏览器打开 Release 页面核对**，再执行上面的 `sha256sum -c`：
+> 从同一个已被篡改的渠道同时取二进制和校验和，校验本身证明不了什么。
+> `build-info.json` 里的 `commit` 是构建源码的精确提交，排查问题时先看它，
+> 而不是看文件名里的版本号。
+
+**创建版本标签**（只有打 `v*` 标签才会发布 Release；普通 push 到 `master` 只做编译检查）：
+
+```bash
+git checkout master && git pull
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
+```
+
+推送后 [Actions 的 Release Binaries 工作流](https://github.com/sofs2005/w2a/actions/workflows/release.yml)
+会构建 → 冒烟测试 → 发布 Release。也可在 Actions 页面用 `Run workflow` 手动构建：
+**手动构建只把产物留在本次运行的 artifacts 里，不创建 Release、也不覆盖已有标签**。
+
+> 构建方式：`CGO_ENABLED=0` + `-trimpath -ldflags="-s -w"` 交叉编译，Go 版本取自
+> `go.mod`，前端先用 `npm ci && npm run build` 生成 `panel/internal/webui/dist` 再 embed。
+> 冒烟测试会真正起一次服务（临时配置 + 回环地址），验证 `/healthz`、`/api/session`
+> 与首页引用的 `/assets/` 资源都在，任一失败即让工作流失败，不会发布跑不起来的二进制。
+
 ### 同步官方客户端版本（每次官方发版时）
 
 上游风控会按客户端版本与请求头指纹判定请求合法性，官方发版后需要把内置版本号跟进。
