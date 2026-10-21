@@ -36,8 +36,9 @@ func globalAcct() *auth.Auth {
 
 // TestGlobalChatUsesV2PathAndBase 断言 global 账号的 chat 打到 ChatBaseGlobal + /v2/chat/completions
 // （#119：/console 挂腾讯云 WAF body 内容规则，固定 /v2 单路径），chat 不发 Origin，
-// 且**不**注入 system 兜底（官方国际版分发包里 "You are a helpful assistant." grep 计数 0，
-// 自造 system 属于「我们发了、官方没发」，见 prepareBody 注释）。
+// 且首条 user 的请求会被补一条开头 system（补的是官方 base-agent-instructions 模板
+// 原文，不是 "You are a helpful assistant." 那种自造句子，见 prepareBody 注释）。
+// 两域同口径：global 也走 prepareBody，形态兜底不按 realm 分流。
 func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	var gotPath, gotOrigin, gotModel string
 	var calls []string
@@ -90,9 +91,12 @@ func TestGlobalChatUsesV2PathAndBase(t *testing.T) {
 	if gotModel != "gpt-5.4" {
 		t.Errorf("model=%q", gotModel)
 	}
-	// 不注入兜底 system：body 原样透传（官方客户端也不注入）。
-	if len(gotMsgs) != 1 || gotMsgs[0]["role"] != "user" {
-		t.Errorf("expected passthrough user-only messages (no injected system), got %v", gotMsgs)
+	// 开头 system 兜底：客户端只发 user 时补一条官方 base-agent-instructions 模板句。
+	// 官方客户端从不发「首条 user」的请求（Agent Runners 恒 unshift systemInstructions，
+	// security-review 无 system 时也 unshift 一条），漏这条会被上游判 11-128
+	// 「first message is not system prompt」。
+	if len(gotMsgs) != 2 || gotMsgs[0]["role"] != "system" || gotMsgs[1]["role"] != "user" {
+		t.Errorf("want [system 兜底, user], got %v", gotMsgs)
 	}
 }
 
@@ -190,7 +194,7 @@ func TestGlobalRefreshUsesGlobalChatBase(t *testing.T) {
 }
 
 // TestCNChatPathUnchanged 零回归：CN 账号（realm=cn）chat 仍打 CN base + /v2/chat/completions，
-// body 原样透传（两域都不再补 system）。
+// 首条 user 的请求由 prepareBody 补一条开头 system（与 global 同口径）。
 func TestCNChatPathUnchanged(t *testing.T) {
 	var gotPath, gotMsgsJSON string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
@@ -212,9 +216,9 @@ func TestCNChatPathUnchanged(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("cn chat path=%q", gotPath)
 	}
-	// 零回归：body 不被补 system。
-	if bytes.Contains([]byte(gotMsgsJSON), []byte(`"system"`)) {
-		t.Errorf("cn chat body should not be modified with system fallback: %s", gotMsgsJSON)
+	// 开头 system 兜底两域同口径（上游两域是同一套 API 的两次部署，形态校验一致）。
+	if !bytes.Contains([]byte(gotMsgsJSON), []byte(`"role":"system"`)) {
+		t.Errorf("cn chat body should carry a leading system (first message is not system prompt): %s", gotMsgsJSON)
 	}
 }
 

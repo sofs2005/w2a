@@ -19,6 +19,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/prompt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -1115,11 +1116,14 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // 显式传 realm 使 effort 降级按域取桶：CN 探测信息不得作用到 global 请求（C-2）。
 //
-// 不注入 prompt_cache_key：该字段在官方国际版全量分发包（渲染层 main/server.js
-// 3.6 MB + CLI dist/codebuddy-lite-wb.mjs 9.5 MB）里 grep 计数恒为 0，取值形态
-// `wb2a-<uid8>-<hex>` 更是我们独有。上游 11-128 的业务判据是 displayTips 里的
-// 「渠道校验 / channel verification」——判有没有按官方客户端发，而非内容审查，
-// 因此任何官方从不发送的自造字段都直接构成指纹。前缀缓存收益让位于可用性。
+// 两条对 wire 形态的纪律，方向相反但判据相同——「官方客户端发什么，我们就发什么」：
+//   - 不注入 prompt_cache_key：该字段在官方国际版全量分发包（渲染层 main/server.js
+//     3.6 MB + CLI dist/codebuddy-lite-wb.mjs 9.5 MB）里 grep 计数恒为 0，取值形态
+//     `wb2a-<uid8>-<hex>` 更是我们独有。前缀缓存收益让位于可用性。
+//   - 首条不是 system 时补一条开头 system：官方客户端每次请求都带（见下方调用处
+//     注释），而这条形态是上游 11-128 形态校验的直接判据，缺了就是「官方发了、
+//     我们没发」。
+//
 // uid / conversationID 参数保留在签名里（既有调用方与测试依赖），当前仅用于
 // 语义表达，不再参与 body 改写。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
@@ -1131,6 +1135,16 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints, efforts, defs)
+	// 开头 system 兜底（11-128「first message is not system prompt」）：上游对部分
+	// 账号灰度启用请求**形态**校验，messages[0] 不是 system 即整单拦截 —— 官方客户端
+	// 从不发这种形态（Agent Runners 恒 `o.unshift({content:systemInstructions,role:"system"})`，
+	// security-review 的 injectTrustInstructions 在没有 system 时也 unshift 一条），
+	// 而客户端只发 user 时（面板试用台未填系统提示词、scripts/task_common.py 的探测请求）
+	// passthrough 会把 user 原样放到第一位。补的是官方 product.json 的
+	// base-agent-instructions 模板原文（prompt.FallbackSystem），不是网关自造文案。
+	// 位置在 prepareBody 而非 payload.go：这是生产出站唯一的收口，且必须在
+	// normalizeRoles（developer→system）之后判定，否则开头是 developer 的请求会多插一条。
+	body = prompt.EnsureLeadingSystem(body)
 	return body
 }
 
@@ -1480,10 +1494,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// 出站 body 只做措辞/参数归一，不再补 system、不再注入 prompt_cache_key：
-	// 这两项在官方国际版全量分发包（渲染层 main/server.js + CLI dist）里 grep 计数
-	// 均为 0，属于「我们发了、官方从没发过」的自造形态，是 11-128 渠道校验最直接的
-	// 特征。详见 prepareBody 注释。
+	// 出站 body 只做措辞/参数归一，不再注入 prompt_cache_key —— 该字段在官方国际版
+	// 全量分发包（渲染层 main/server.js + CLI dist）里 grep 计数为 0，属于「我们发了、
+	// 官方从没发过」的自造形态，是 11-128 渠道校验最直接的特征。开头 system 的兜底
+	// 在 prepareBody 收口处（见其注释），补的是官方模板原文。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部

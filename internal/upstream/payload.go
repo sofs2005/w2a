@@ -367,12 +367,18 @@ func normalizeImageURL(obj map[string]any) {
 
 // ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45）。
 //
-// ⚠️ 当前**不在生产链路上**（prepareBody 已不再调用）：官方国际版全量分发包
-// （D:\PG\workbuddyAI 的 main/server.js + cli/dist/codebuddy-lite-wb.mjs）里
-// 字面量 "You are a helpful assistant." 的 grep 计数为 0，说明官方客户端从不在
-// 客户端侧补这条 system。我们补了就变成「我们发了、官方从没发过」的自造形态，
-// 是 11-128 渠道校验（displayTips：这次调用没通过渠道校验）最直接的特征之一。
-// 保留函数体仅为记录历史修复与便于日后取证对照，禁止重新接回 prepareBody。
+// ⚠️ 当前**不在生产链路上**（prepareBody 已不再调用），且**禁止重新接回**：
+// 它补的 "You are a helpful assistant." 在官方全量分发包（D:\PG\workbuddyAI 的
+// main/server.js + cli/dist/codebuddy-lite-wb.mjs）里 grep 计数为 0，是「我们发了、
+// 官方从没发过」的自造形态 —— 那是 11-128 渠道校验（displayTips：这次调用没通过
+// 渠道校验）最直接的特征之一。
+//
+// 与现行兜底的区别：现在由 prompt.EnsureLeadingSystem（internal/prompt，在
+// prepareBody 收口处调用）在「首条不是 system」时补一条官方 product.json 的
+// base-agent-instructions 模板原文（"You are CodeBuddy Code.\n"）。上游对部分账号
+// 灰度启用的形态校验要求 messages[0] 必须是 system（11-128「first message is not
+// system prompt」），而官方客户端每次请求都带开头 system —— 补官方字节是补齐形态，
+// 补自造句子才是加指纹。保留本函数体仅为记录历史修复与便于日后取证对照。
 //
 // 原始行为：首条消息非 system 时在 messages 最前补一条 fallback system。
 // body 不可解析时原样返回（与 prepareBody 语义一致：坏 body 不在这里二次错误化）。

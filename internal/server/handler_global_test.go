@@ -167,8 +167,8 @@ func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("global chat path=%q want /v2/chat/completions", gotPath)
 	}
-	if gotMsgs != 1 { // 官方客户端不注入 system：body 原样透传（prepareBody 不再补 system）
-		t.Errorf("global chat messages=%d want 1 (passthrough, no system fallback)", gotMsgs)
+	if gotMsgs != 2 { // 客户端只发 user → 网关补一条开头 system（官方客户端恒带 system 开头）
+		t.Errorf("global chat messages=%d want 2 (user + 兜底开头 system)", gotMsgs)
 	}
 
 	// 裸名请求（CN 零回归）
@@ -193,8 +193,8 @@ func TestChatRealmSelectionAndBodyRewrite(t *testing.T) {
 	if gotPath != "/v2/chat/completions" {
 		t.Errorf("cn chat path=%q want /v2/chat/completions", gotPath)
 	}
-	if gotMsgs != 1 { // CN 不补 system
-		t.Errorf("cn chat messages=%d want 1 (no system fallback)", gotMsgs)
+	if gotMsgs != 2 { // CN 同口径：只带 user 的请求补开头 system
+		t.Errorf("cn chat messages=%d want 2 (user + 兜底开头 system)", gotMsgs)
 	}
 }
 

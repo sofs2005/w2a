@@ -12,10 +12,65 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed defaultprompt.md
 var defaultPrompt string
+
+// FallbackSystem 客户端未提供开头 system 时补的兜底 system 消息内容。
+//
+// 取官方分发包（backups/official-cn-5.8.3-20261019/cli/product.json 与
+// D:\PG\workbuddyAI 国际版同构）里 base-agent-instructions 的模板原文，
+// 不是网关自造文案——上游按「是不是官方客户端的请求形态」判渠道校验，
+// 补的这行本身就是官方字节。
+const FallbackSystem = "You are CodeBuddy Code.\n"
+
+// EnsureLeadingSystem 保证出站 messages 的第一条是 system（无 messages/空数组则原样返回）。
+//
+// 背景（11-128「first message is not system prompt」）：上游对部分账号灰度启用
+// 请求形态校验，messages[0] 不是 system 即整单拦截（HTTP 400 + 业务码 11-128 +
+// displayTips 渠道校验）。官方客户端每次请求都带开头 system：
+//   - Agent Runners：`e.systemInstructions && o.unshift({content:..., role:"system"})`；
+//   - security-review：`injectTrustInstructions` 在没有任何 system 时
+//     `t.unshift({role:"system", content:z.M5})`。
+//
+// 而网关缺省 passthrough 会把「只带 user」的请求原样转发（面板试用台未填系统提示词、
+// scripts/task_common.py 的探测请求都是这种形态）——那是官方从不会发出的 wire 形态，
+// 命中校验后被归为渠道校验、账号软冷却，客户端最终只看到 no_healthy_account。
+//
+// 该函数只补角色形态，不动任何既有消息（与 Append 的「既有消息逐字不动」同纪律）：
+//   - 首条已是 system/developer（大小写/空白容错，与 normalizeRoles 同口径）→ 原样；
+//   - 首条是 user/assistant/tool/非对象 → 在 messages 最前插入一条 FallbackSystem；
+//   - body 不可解析 / 无 messages / messages 为 [] → 原样返回（不替上游编造对话）。
+func EnsureLeadingSystem(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return body
+	}
+	if first, ok := msgs[0].(map[string]any); ok {
+		if role, _ := first["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") ||
+			strings.EqualFold(strings.TrimSpace(role), "developer") {
+			return body // 开头已是 system/developer（后者下游归一为 system）：不插入
+		}
+	}
+	rewritten := make([]any, 0, len(msgs)+1)
+	rewritten = append(rewritten, map[string]any{"role": "system", "content": FallbackSystem})
+	rewritten = append(rewritten, msgs...)
+	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
 
 // Degraded 降级提示词：误报处理用，刻意极简中性。
 //

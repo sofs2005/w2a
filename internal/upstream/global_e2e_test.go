@@ -116,8 +116,8 @@ func redactToken(tok string) string {
 }
 
 // chatProbeBody 组装 chat 探测请求体（与生产同链路：仅 prepareBody）。
-// 不补 system：官方客户端从不在客户端侧注入兜底 system（见 payload.go 注释），
-// 探测必须与生产出站形态一致，否则验证的不是真实指纹。
+// 故意只给 user：走 prepareBody 的开头 system 兜底（prompt.EnsureLeadingSystem），
+// 探测到的正是客户端只发 user 时生产真正发出的字节形态。
 func chatProbeBody(cl *Client, a *auth.Auth, model string, maxTokens int) []byte {
 	raw, _ := json.Marshal(map[string]any{
 		"model":      model,

@@ -100,6 +100,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
   - `custom`：网关用自有提示词**替换**客户端 system/developer（从源头消除模板句误报；不参与降级）
   - `append`：**两者并用**——开头连续 system/developer 块之后插入网关自有提示词，客户端项目规范/工具约定与网关人格共存（issue #129）；降级期与拦截首遇重试时退化为 `custom` 语义（换中性提示词，原文 system 移除）
   - `prompt.file`（custom/append 生效）指向自定义提示词文件，空 = 内置默认
+- **开头 system 兜底** — 无论哪种模式，出站请求若 `messages[0]` 不是 system/developer（客户端只发 user，如面板试用台未填系统提示词、脚本探测请求），网关补一条官方 `product.json` 的 `base-agent-instructions` 模板原文 `You are CodeBuddy Code.`。官方客户端每次请求都带开头 system，而上游对部分账号灰度启用的形态校验以「首条是不是 system」为判据：缺了会被判 11-128 `first message is not system prompt`（渠道校验），账号软冷却后客户端只看到 `no_healthy_account`。已有 system 的请求逐字透传，不追加、不替换
 - **会话头族注入** — 出站携带官方客户端会话头族（`X-Conversation-Request-ID` 聚合主键 · `X-Conversation-ID` 透传 · B3 链路），轮转 / 重试 / 路径回退复用同键，后台按对话轮聚合不再碎片化（issue #35）
 - **指纹脱敏** — 出站请求体黑名单指纹字段清洗（可开关），与提示词体系两层叠加
 

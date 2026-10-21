@@ -474,3 +474,74 @@ func TestAppendRoleVariantStopsRun(t *testing.T) {
 		t.Errorf("role variant changed: %v", msgs[2])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// EnsureLeadingSystem：开头 system 兜底（11-128「first message is not system prompt」）
+// ---------------------------------------------------------------------------
+
+func TestEnsureLeadingSystemPrependsForUserFirst(t *testing.T) {
+	in := []byte(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)
+	out := EnsureLeadingSystem(in)
+	roles := systemRoles(t, out)
+	if len(roles) != 2 || roles[0] != "system" || roles[1] != "user" {
+		t.Fatalf("roles=%v want [system user]", roles)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msgs := obj["messages"].([]any)
+	if got := msgs[0].(map[string]any)["content"]; got != FallbackSystem {
+		t.Errorf("兜底 system content=%v want %q", got, FallbackSystem)
+	}
+	// 既有消息逐字不动（含其它顶层字段）。
+	if msgs[1].(map[string]any)["content"] != "hi" || obj["model"] != "glm-5.2" {
+		t.Errorf("existing message/field changed: %s", out)
+	}
+}
+
+func TestEnsureLeadingSystemNoopWhenSystemFirst(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"system","content":"项目规范"},{"role":"user","content":"hi"}]}`)
+	if out := EnsureLeadingSystem(in); string(out) != string(in) {
+		t.Errorf("首条已是 system 应零改动，got %s", out)
+	}
+}
+
+// developer 是 system 的 OpenAI 别名，下游 normalizeRoles 会归一；此处不得再插一条，
+// 否则出站会出现两条 system（多一条官方从不发的形态）。
+func TestEnsureLeadingSystemAcceptsDeveloperFirst(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"developer","content":"dev"},{"role":"user","content":"hi"}]}`)
+	if out := EnsureLeadingSystem(in); string(out) != string(in) {
+		t.Errorf("首条 developer 不该再插 system，got %s", out)
+	}
+	// 大小写 / 空白变体同口径（与 normalizeRoles 的 EqualFold+TrimSpace 一致）。
+	variant := []byte(`{"messages":[{"role":" System ","content":"s"},{"role":"user","content":"hi"}]}`)
+	if out := EnsureLeadingSystem(variant); string(out) != string(variant) {
+		t.Errorf("角色变体应被认作 system，got %s", out)
+	}
+}
+
+// 守卫：空 body / 坏 JSON / 无 messages / messages=[] 一律原样返回 —— 不替上游编造对话，
+// 空消息数组补一条孤零零的 system 只会换来上游另一条 400。
+func TestEnsureLeadingSystemGuards(t *testing.T) {
+	for _, in := range []string{
+		``,
+		`{not valid json`,
+		`{"model":"glm-5.2"}`,
+		`{"messages":[]}`,
+		`{"messages":"not-an-array"}`,
+	} {
+		if out := EnsureLeadingSystem([]byte(in)); string(out) != in {
+			t.Errorf("in=%q 应原样返回，got %q", in, out)
+		}
+	}
+}
+
+// assistant/tool 开头同样要补：上游只看「首条是不是 system」，不看后面的角色序列。
+func TestEnsureLeadingSystemPrependsForAssistantFirst(t *testing.T) {
+	in := []byte(`{"messages":[{"role":"assistant","content":"a"},{"role":"user","content":"u"}]}`)
+	roles := systemRoles(t, EnsureLeadingSystem(in))
+	if len(roles) != 3 || roles[0] != "system" || roles[1] != "assistant" || roles[2] != "user" {
+		t.Fatalf("roles=%v want [system assistant user]", roles)
+	}
+}
