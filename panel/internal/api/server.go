@@ -725,13 +725,26 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	msg := "配置已保存。网关只在启动时读取 config.json，需重启进程才会生效"
+	// 保存成功后立刻通知网关热重载（同进程部署）：把「保存」与「生效」压成同一步。
+	// 独立面板模式未注入回调，此时只能靠重启进程生效。
+	var msg string
+	reloaded, rerr := s.svc.NotifyConfigSaved()
+	switch {
+	case rerr != nil:
+		msg = "配置已写入，但立即重载失败：" + rerr.Error() +
+			"。现有配置仍在生效；修正文件内容后重新保存即可，或重启进程"
+	case reloaded:
+		msg = "配置已保存并立即生效。listen / auth_dir / state_file / upstash 这四项仍需重启进程"
+	default:
+		msg = "配置已保存。当前面板未与网关同进程运行，改动需重启网关进程才生效（listen / auth_dir / state_file / upstash 同样如此）"
+	}
 	if fallback {
 		msg += "。注意：当前 config.json 以 Docker 单文件方式挂载，无法原子替换，本次为原地写入"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"message": msg,
+		"ok":       true,
+		"message":  msg,
+		"reloaded": reloaded,
 	})
 }
 

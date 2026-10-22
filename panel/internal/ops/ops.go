@@ -158,8 +158,12 @@ type Service struct {
 	// admin 网关侧账号管理能力（停用/启用/复活）。宿主同进程部署时经
 	// SetAccountAdmin 注入；独立面板模式下为 nil，三个操作返回 ErrAdminUnavailable。
 	// 定义见 account_admin.go。
-	admin  AccountAdmin
-	logins *LoginManager
+	admin AccountAdmin
+	// reloader 配置热重载能力（保存后立即生效）。宿主同进程部署时经
+	// SetConfigReloader 注入；独立面板模式下为 nil，改动需重启网关进程。
+	// 定义见 config_reload.go。
+	reloader ConfigReloader
+	logins   *LoginManager
 
 	mu      sync.RWMutex
 	credits map[string]creditCache

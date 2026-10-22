@@ -27,7 +27,7 @@ func TestScheduledAccountGapBoundsAndManualBypass(t *testing.T) {
 	if got := s.accountGap(ctx, base); got == base {
 		t.Fatal("scheduled pacing did not add jitter")
 	}
-	s.cfg.AccountDelayMinSeconds, s.cfg.AccountDelayMaxSeconds = 0, 0
+	s.mutate(func(c *Config) { c.AccountDelayMinSeconds, c.AccountDelayMaxSeconds = 0, 0 })
 	if got := s.accountGap(ctx, base); got != base {
 		t.Fatalf("zero range changed old pacing: %s", got)
 	}
@@ -37,7 +37,7 @@ func TestScheduledAccountGapBoundsAndManualBypass(t *testing.T) {
 func TestScheduledCheckinAccountWaitCanBeCancelled(t *testing.T) {
 	s, p := newCheckinS(t, &checkinStub{checkinBody: `{"code":0,"data":{}}`, resourceRemain: 100})
 	p.Add(&auth.Auth{UID: "u2", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
-	s.cfg.AccountDelayMinSeconds, s.cfg.AccountDelayMaxSeconds = 30, 120
+	s.mutate(func(c *Config) { c.AccountDelayMinSeconds, c.AccountDelayMaxSeconds = 30, 120 })
 	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), scheduledAccountKey{}, true), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
@@ -181,7 +181,7 @@ func TestRandomScheduleNewDateTaskAndDeploymentDrawIndependently(t *testing.T) {
 	at := s.scheduledSlot(day, 9, taskCheckin)
 	base := at.Sub(day.Add(9 * time.Hour))
 	other := jitterScheduler(60)
-	other.cfg.RandomDelaySeed = "other-synthetic-deployment"
+	other.mutate(func(c *Config) { c.RandomDelaySeed = "other-synthetic-deployment" })
 	for name, actual := range map[string]time.Duration{
 		"date":       s.scheduledSlot(day.AddDate(0, 0, 1), 9, taskCheckin).Sub(day.AddDate(0, 0, 1).Add(9 * time.Hour)),
 		"task":       s.scheduledSlot(day, 9, taskTravel).Sub(day.Add(9 * time.Hour)),
@@ -196,13 +196,13 @@ func TestRandomScheduleNewDateTaskAndDeploymentDrawIndependently(t *testing.T) {
 // 多时点 + 禁用任务：随机偏移下仍按时间顺序取最近的一个。
 func TestRandomScheduleDisabledTaskAndMultipleHours(t *testing.T) {
 	s := jitterScheduler(60)
-	s.cfg.CheckinDisabled = true
+	s.mutate(func(c *Config) { c.CheckinDisabled = true })
 	day := time.Date(2026, 10, 14, 0, 0, 0, 0, cstZone)
 	if at, kinds := s.nextWake(day); !at.IsZero() || len(kinds) != 0 {
 		t.Fatal("disabled task was scheduled")
 	}
-	s.cfg.CheckinDisabled = false
-	s.cfg.CheckinHours = []int{9, 21}
+	s.mutate(func(c *Config) { c.CheckinDisabled = false })
+	s.mutate(func(c *Config) { c.CheckinHours = []int{9, 21} })
 	at, kinds := s.nextWake(day)
 	want := s.scheduledSlot(day, 9, taskCheckin)
 	if !at.Equal(want) || len(kinds) != 1 {

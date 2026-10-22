@@ -91,7 +91,11 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 
 // TestNextWakeNothingScheduled 两类任务全空时返回零值，Run 只等退出信号。
 func TestNextWakeNothingScheduled(t *testing.T) {
-	s := &Scheduler{cfg: Config{}}
+	// 七类任务全禁用（normalizeConfig 只在缺省时补小时，禁用开关原样保留）。
+	s := New(Config{
+		CheckinDisabled: true, TravelDisabled: true, ActivityDisabled: true,
+		KeepaliveDisabled: true, CatDisabled: true, GrowthDisabled: true, LimitedDisabled: true,
+	})
 	at, kinds := s.nextWake(time.Now())
 	if !at.IsZero() || len(kinds) != 0 {
 		t.Errorf("at=%v kinds=%v want zero/nil", at, kinds)

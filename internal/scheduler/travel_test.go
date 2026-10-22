@@ -451,7 +451,10 @@ func TestRunTravelActionErrorsDoNotAbort(t *testing.T) {
 
 // TestRunTravelLoopCancelsWhenDisabled 无任何整点任务时 Run 不空转，ctx 取消即返回。
 func TestRunTravelLoopCancelsWhenDisabled(t *testing.T) {
-	s := &Scheduler{cfg: Config{}, adoptTried: map[string]string{}}
+	s := New(Config{
+		CheckinDisabled: true, TravelDisabled: true, ActivityDisabled: true,
+		KeepaliveDisabled: true, CatDisabled: true, GrowthDisabled: true, LimitedDisabled: true,
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { s.Run(ctx); close(done) }()

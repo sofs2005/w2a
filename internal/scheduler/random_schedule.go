@@ -34,10 +34,10 @@ func isScheduled(ctx context.Context) bool {
 // 配置越界（min<0 / max<min / max>600）时静默回落到 base 而不是 panic：
 // config.Normalize 已在启动时挡过，运行期再炸一次只会让调度循环整个停摆。
 func (s *Scheduler) accountGap(ctx context.Context, base time.Duration) time.Duration {
-	if !isScheduled(ctx) || s.cfg.AccountDelayMaxSeconds <= 0 {
+	if !isScheduled(ctx) || s.snapshot().AccountDelayMaxSeconds <= 0 {
 		return base
 	}
-	lo, hi := s.cfg.AccountDelayMinSeconds, s.cfg.AccountDelayMaxSeconds
+	lo, hi := s.snapshot().AccountDelayMinSeconds, s.snapshot().AccountDelayMaxSeconds
 	if lo < 0 || hi < lo || hi > 600 {
 		return base
 	}
@@ -48,11 +48,11 @@ func (s *Scheduler) accountGap(ctx context.Context, base time.Duration) time.Dur
 // accountScriptArgs 给 Python 脚本追加账号间隔参数（脚本侧在账号循环里
 // AccountSpacing.wait()）。手动入口不追加 —— 保持旧命令行逐字节不变。
 func (s *Scheduler) accountScriptArgs(ctx context.Context, args []string) []string {
-	if !isScheduled(ctx) || s.cfg.AccountDelayMaxSeconds <= 0 {
+	if !isScheduled(ctx) || s.snapshot().AccountDelayMaxSeconds <= 0 {
 		return args
 	}
-	return append(args, "--account-delay-min", fmt.Sprint(s.cfg.AccountDelayMinSeconds),
-		"--account-delay-max", fmt.Sprint(s.cfg.AccountDelayMaxSeconds))
+	return append(args, "--account-delay-min", fmt.Sprint(s.snapshot().AccountDelayMinSeconds),
+		"--account-delay-max", fmt.Sprint(s.snapshot().AccountDelayMaxSeconds))
 }
 
 // scheduledSlot 返回「day 当天 hour 点这个任务」的实际触发时刻。
@@ -67,7 +67,7 @@ func (s *Scheduler) accountScriptArgs(ctx context.Context, args []string) []stri
 // RandomDelayMinutes <= 0 时返回整点（与改造前逐字节一致）。
 func (s *Scheduler) scheduledSlot(day time.Time, hour int, kind taskKind) time.Time {
 	at := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, day.Location())
-	minutes := s.cfg.RandomDelayMinutes
+	minutes := s.snapshot().RandomDelayMinutes
 	if minutes <= 0 {
 		return at
 	}
@@ -79,7 +79,7 @@ func (s *Scheduler) scheduledSlot(day time.Time, hour int, kind taskKind) time.T
 	if seconds >= 3600 {
 		seconds = 3599
 	}
-	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%d", s.cfg.RandomDelaySeed,
+	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%d", s.snapshot().RandomDelaySeed,
 		at.Format("2006-01-02"), hour, kind)
 	digest := sha256.Sum256([]byte(identity))
 	offset := binary.BigEndian.Uint64(digest[:8]) % uint64(seconds+1)
@@ -91,7 +91,7 @@ func (s *Scheduler) scheduledSlot(day time.Time, hour int, kind taskKind) time.T
 // 只扫今天与明天两天：任意 hours 下最近时点必定落在这两天内（与 nextFire
 // 的口径一致），多扫无益。未配置随机偏移时直接走 nextFire，保证零回归。
 func (s *Scheduler) nextScheduledFire(now time.Time, hours []int, kind taskKind) time.Time {
-	if s.cfg.RandomDelayMinutes <= 0 {
+	if s.snapshot().RandomDelayMinutes <= 0 {
 		return nextFire(now, hours)
 	}
 	var earliest time.Time

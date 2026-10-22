@@ -1278,6 +1278,38 @@ func (c *Client) ModelRate(realm, model string) string {
 	return c.modelRates[realmKey(realm)][model]
 }
 
+// AdoptCachesFrom 把旧实例的探测类缓存整体搬到新实例上（配置热重载用）。
+//
+// 为什么需要：热重载 config.json 会重建 Client（超时/代理/指纹等参数散落在
+// Transport 与 Client 字段上，逐字段热改既是并发雷区，也漏得掉），但模型目录、
+// effort 档位、积分倍率这些缓存是**上游探测的结果、与配置无关**——不搬的话每次
+// 保存配置都要重新打一遍上游目录接口，且积分保底的目录兜底会经历一段空窗期
+// （那正是 warmModelRates 存在要避免的场景）。
+//
+// 调用时机：新实例尚未对外发布前（main 装配期单 goroutine），故不加锁读写另一
+// 实例是安全的；本方法自身持锁，与旧实例上的并发探测/读取互斥。
+func (c *Client) AdoptCachesFrom(old *Client) {
+	if c == nil || old == nil || c == old {
+		return
+	}
+	old.effortsMu.RLock()
+	c.effortsMu.Lock()
+	c.efforts = old.efforts
+	c.defaultEfforts = old.defaultEfforts
+	c.modelRates = old.modelRates
+	c.effortsMu.Unlock()
+	old.effortsMu.RUnlock()
+
+	old.globalModels.Lock()
+	c.globalModels.Lock()
+	c.globalModels.names = old.globalModels.names
+	c.globalModels.infos = old.globalModels.infos
+	c.globalModels.fetched = old.globalModels.fetched
+	c.globalModels.lastFail = old.globalModels.lastFail
+	c.globalModels.Unlock()
+	old.globalModels.Unlock()
+}
+
 // GlobalEffortSnapshot 导出 global 域 effort 能力缓存（探测下发 ∪ 静态兜底合并后的桶），
 // 供 /v1/models 输出 reasoning_supported_efforts / reasoning_default_effort。
 // 返回副本；桶未填充（无 global 账号或从未探测）→ nil（调用方回落静态兜底表）。

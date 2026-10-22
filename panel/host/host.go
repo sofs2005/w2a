@@ -10,10 +10,14 @@
 package host
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 
 	panelapi "workbuddy2api-gui/internal/api"
 	panelstore "workbuddy2api-gui/internal/authstore"
@@ -46,8 +50,36 @@ type Options struct {
 	// 由 *pool.Pool 适配的实现；独立面板模式留 nil，三个操作会明确报
 	// 「当前部署形态不支持」而不是静默失败。
 	Admin panelops.AccountAdmin
+	// ConfigReloader 网关侧配置热重载能力。宿主同进程部署时传入，面板保存
+	// config.json 后立刻触发重载；留 nil 时保存仍有效，但改动需重启网关进程。
+	ConfigReloader panelops.ConfigReloader
 	// Version 面板版本，仅用于展示。
 	Version string
+}
+
+// readGatewayAPIKey 现场读取网关 config.json 的 api_key（热重载后的最新值）。
+//
+// 面板对网关的回环调用（/status、模型页、聊天台）都要带这把 key，而 key 现在可以
+// 在运行期被改（cmd/server 的配置热重载）。每次调用读一次文件：文件只有几百字节，
+// 且这些调用都是人工触发/低频，开销可忽略；换来的是「改完 key 立刻还能用」。
+//
+// 任何异常（文件不存在 / 非法 JSON / 字段为空/非字符串）都返回空串，由调用方决定
+// 回落——这里不猜、不缓存过期值。
+func readGatewayAPIKey(configFile string) string {
+	if configFile == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.APIKey)
 }
 
 // New 装配面板并返回其 http.Handler。
@@ -82,8 +114,9 @@ func New(opts Options) (http.Handler, error) {
 	// 容器控制（见 panel/web/src/pages/System.tsx 与 HOST-PATCHES.md）。
 	//
 	// 账号加载不需要重启：网关另有目录监听热加载（cmd/server/reload.go，5s）。
-	// 配置变更仍必须重启进程（网关只在启动时读 config.json，无 SIGHUP / 文件监听），
-	// 但这由运维在宿主机执行 `docker compose restart`——网页端无法安全地做这件事。
+	// 配置变更在面板保存时立即热生效（cmd/server/configreload.go），
+	// 只有 listen / auth_dir / state_file / upstash 这类绑定进程级资源的字段仍需
+	// 宿主机 `docker compose restart`。
 	pcfg.RefreshConfigOnLogin = false
 
 	dataDir := opts.DataDir
@@ -104,13 +137,40 @@ func New(opts Options) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化面板凭证存储: %w", err)
 	}
-	gw := panelgateway.New(pcfg.GatewayURL, func() string { return pcfg.GatewayAPIKey }, pcfg.Timeout())
+	// 网关 api_key 用**闭包按需解析**而不是启动时拷一份值：config.json 现在会热重载
+	// （cmd/server/configreload.go），面板保存新 key 后若还拿旧值，面板对网关的
+	// /status、模型页、聊天台会全部 401，直到重启。回环调用不该有这种耦合。
+	//
+	// 优先级：显式 WBGUI_GATEWAY_API_KEY / Options 覆盖 > config.json 现场读。
+	// 解析失败（文件正在原子替换、字段缺失）回落启动时的值，绝不返回空（空 = 不鉴权，
+	// 面板会以"无 key"去调网关，同样 401 且更难归因）。
+	keyOverride := pcfg.GatewayAPIKey
+	var lastKey atomic.Value // string：上次成功读到的网关 key（文件暂时读不到时回落）
+	lastKey.Store(keyOverride)
+	gw := panelgateway.New(pcfg.GatewayURL, func() string {
+		if keyOverride != "" {
+			return keyOverride
+		}
+		k := readGatewayAPIKey(pcfg.UpstreamConfigFile)
+		if k == "" {
+			if v, ok := lastKey.Load().(string); ok {
+				return v // 现场读失败：沿用上次成功值（见下方说明）
+			}
+			return ""
+		}
+		lastKey.Store(k)
+		return k
+	}, pcfg.Timeout())
 	up := panelupstream.New(pcfg.Timeout())
 	svc := panelops.New(pcfg, store, gw, up)
 	// 账号管理（停用/启用/复活）走进程内接口，不经网关 HTTP——nil 时保持
 	// 「未接入」状态，三个操作会明确报错（独立面板模式）。
 	if opts.Admin != nil {
 		svc.SetAccountAdmin(opts.Admin)
+	}
+	// 配置热重载：保存后直调网关（同进程），保存即生效。
+	if opts.ConfigReloader != nil {
+		svc.SetConfigReloader(opts.ConfigReloader)
 	}
 
 	static, err := panelwebui.Handler()

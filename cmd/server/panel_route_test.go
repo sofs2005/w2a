@@ -38,8 +38,8 @@ func newTestRootHandler(t *testing.T) http.Handler {
 	})
 
 	// 第 4 参（账号池）传 nil：本测试不校验进程内桥，nil 会让面板保持「未接入」，
-	// 恰好也钉住「池缺失时装配不 panic」。
-	h, err := newRootHandler(cfg, cfgPath, gw, nil)
+	// 恰好也钉住「池缺失时装配不 panic」。第 5 参（配置重载）同样传 nil。
+	h, err := newRootHandler(cfg, cfgPath, gw, nil, nil)
 	if err != nil {
 		t.Fatalf("newRootHandler: %v", err)
 	}

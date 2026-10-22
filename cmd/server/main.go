@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -168,13 +169,16 @@ func main() {
 	}
 
 	// 会话粘性路由（可配关闭）。
-	var sessRouter *session.Router
+	//
+	// 总是构建一个 router：session_sticky.enabled 能热重载（面板勾/取消都很常见），
+	// 而「启用/禁用」只是 handler 是否使用它——用 nil 表示关闭会导致开关一改就再也
+	// 装不回去（main 只在启动时跑一次）。禁用时同样不启动后台 GC，与旧行为一致。
 	redisMode := "noop"
 	if _, ok := store.(redisstore.Noop); !ok {
 		redisMode = "upstash"
 	}
-	if cfg.SessionSticky.Enabled {
-		sessRouter = session.New(session.Config{
+	newSessRouter := func() *session.Router {
+		r := session.New(session.Config{
 			TTL:        cfg.SessionTTL,
 			GCInterval: cfg.SessionGCInterval,
 			Store:      store,
@@ -187,57 +191,44 @@ func main() {
 			// 紧急到期优先候选集：仅新建/失效重绑时生效（见 session.Config.UrgentForModel）。
 			UrgentForModel: realmAwareUrgentForModel(p, aliasStore),
 		})
-		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
-		sessRouter.StartGC()
-		defer sessRouter.StopGC()
+		r.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
+		r.StartGC()
+		return r
 	}
-	sessCount := func() int {
-		if sessRouter != nil {
-			return sessRouter.Count()
-		}
-		return 0
+	sessRouter := newSessRouter()
+	defer sessRouter.StopGC()
+	// stickyEnabled 粘性开关的原子位：handler 每次请求据此判定，配置热重载负责翻转
+	// 并同时启停后台 GC（router 常驻，绑定表在关闭期间保留，重开即恢复）。
+	stickyEnabled := &atomic.Bool{}
+	stickyEnabled.Store(cfg.SessionSticky.Enabled)
+	if !stickyEnabled.Load() {
+		sessRouter.StopGC() // 禁用时不跑后台 GC（启用后由热重载重新拉起）
 	}
+	sessCount := func() int { return sessRouter.Count() }
 
-	up := upstream.New()
+	// 出站客户端：按 config 装配（超时/代理/指纹/base 全在里面，与热重载共用同一份
+	// 接线，见 configreload.go 的 buildUpstream）。
+	//
+	// 经 upHolder 间接持有：配置热重载要**整体替换**这个客户端（参数散落在 Transport
+	// 与十几个字段上，逐字段热改既漏得掉又是并发雷区）。凡是需要跟随热重载的读取方
+	// 都必须经 holder 取值（原地改写结构体字段是数据竞争）；持有一份固定 *Client 的
+	// 地方由热重载层各自替换快照（handler → ApplyConfig，scheduler → Reload）。
+	upHolder := newUpstreamHolder(buildUpstream(cfg))
+	up := upHolder.Load()
 
-	// 出站代理（按域分档，config proxy 段）：CN / global 各自可配，空 = 回落
-	// HTTP_PROXY/HTTPS_PROXY 环境变量（零回归）。必须在下面所有业务装配之前调用——
-	// 它替换 global 侧的 Transport，晚于任何在途请求会打断连接。
-	up.SetProxies(cfg.Proxy.CN, cfg.Proxy.Global)
 	if cfg.Proxy.CN != "" || cfg.Proxy.Global != "" {
-		log.Printf("INFO: [upstream] 出站代理已启用 cn=%q global=%q（改配置需重启）",
+		log.Printf("INFO: [upstream] 出站代理已启用 cn=%q global=%q（改配置后数秒内热生效）",
 			descOrDirect(up.ProxyCN), descOrDirect(up.ProxyGlobal))
 	}
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
 	// （实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
-	// 位于 up 装配之后：倍率表由探测下发，闭包每次调用读实时快照。
-	p.SetModelRateOf(func(realm, model string) string { return up.ModelRate(realm, model) })
+	// 闭包每次调用经 holder 取实时客户端，热重载换掉客户端后自动跟随。
+	p.SetModelRateOf(func(realm, model string) string { return upHolder.Load().ModelRate(realm, model) })
 
-	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
-	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
-	// global 侧同款：两域超时口径一致（代理引入的额外 RTT 不该改变业务超时语义）。
-	up.HTTPGlobal.Timeout = up.HTTP.Timeout
-	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
-	up.HeaderTimeout = time.Duration(cfg.Upstream.HeaderTimeoutSeconds) * time.Second
-	if tr, ok := up.ChatHTTP.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = up.HeaderTimeout
-	}
-	// global 侧 Transport 同步（SetProxies 刚换过它，此处是新实例；即使未配代理
-	// 也要同步，保证两域参数逐字一致）。
-	if tr, ok := up.ChatHTTPGlobal.Transport.(*http.Transport); ok {
-		tr.ResponseHeaderTimeout = up.HeaderTimeout
-	}
-	// 账号级出口线路（config proxies 段）：面板把账号绑在线路名上（auths/*.json 的
-	// 顶层 proxy），这里把名字解析成地址。线路 Transport 是惰性构造的，构造时读取
-	// HeaderTimeout，故两者顺序固定：先设超时、再注线路表。
-	// 未配置线路时保持零日志 —— 不绑线路的部署与历史行为逐字节一致。
-	upstream.SetRouteHeaderTimeout(up.HeaderTimeout)
-	upstream.ConfigureProxies(cfg.Proxies)
 	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
 	// 只看 content 的客户端又空了"变成悬案。
-	upstream.ConfigureReasoningFallback(cfg.ReasoningAsContent == nil || *cfg.ReasoningAsContent)
 	if !upstream.ReasoningFallbackEnabled() {
 		log.Printf("思考通道兜底已关闭：只含 reasoning_content 的回复不会再补成 content")
 	}
@@ -245,60 +236,12 @@ func main() {
 		log.Printf("INFO: [upstream] 出口线路已加载 %d 条（%s）—— 账号绑定的线路名按它解析",
 			len(names), strings.Join(names, ", "))
 	}
-	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
-	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
-	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
-	// 出站 UA（A 段）：非空才做显式覆盖，空 = 默认 WorkBuddy 三段式
-	// `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`。
-	up.UserAgent = cfg.Upstream.UserAgent
-	// 版本段（upstream.client_version / cli_version）：空 = 各走内置默认。
-	up.ClientVersion = cfg.Upstream.ClientVersion
-	up.CliVersion = cfg.Upstream.CliVersion
-	// OpenAI SDK 指纹段（X-Stainless-*）：空 = 内置默认（见 headers.go injectStainlessHeaders）。
-	up.StainlessRuntimeVersion = cfg.Upstream.StainlessRuntimeVersion
-	up.StainlessTimeoutSeconds = cfg.Upstream.StainlessTimeoutSeconds
-	// 设备风控头（X-Device-Token）全局兜底 + 文件读取路径；空 = 不注入。
-	up.DeviceToken = cfg.Upstream.DeviceToken
-	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
-	// 用量归属头（X-Product/X-IDE-*）+ 客户端 IP 透传开关（见 ChatHeaders / handler）。
-	up.ClientName = cfg.Upstream.ClientName
-	up.PassthroughIP = cfg.Upstream.PassthroughIP
-	// global realm 双域路由（config global 段）：base 空回落内置默认 https://www.workbuddy.ai；
-	// GlobalEnabled 与 auth 包开关一致（双保险第二道闸在 upstream.globalOn）。
-	up.ChatBaseGlobal = cfg.Global.ChatBase
-	up.BillingBaseGlobal = cfg.Global.BillingBase
-	up.GlobalEnabled = cfg.Global.Enabled
 
-	// 私有部署标识：让每日随机偏移在重启后保持不变、且与其他部署互不相同。
-	// **绝不打印** —— 知道 seed 就能反推出每天的实际触发时刻。
-	scheduleSeed := cfg.APIKey
-	if scheduleSeed == "" {
-		scheduleSeed = cfg.AuthDir
-	}
-	sch := scheduler.New(scheduler.Config{
-		AccountDelayMinSeconds: cfg.Schedule.AccountDelayMinSeconds,
-		AccountDelayMaxSeconds: cfg.Schedule.AccountDelayMaxSeconds,
-		RandomDelayMinutes:     cfg.Schedule.RandomDelayMinutes,
-		RandomDelaySeed:        scheduleSeed,
-		Pool:                   p,
-		Upstream:               up,
-		CheckinHours:           cfg.Schedule.CheckinHours,
-		TravelHours:            cfg.Schedule.TravelHours,
-		ActivityHours:          cfg.Schedule.ActivityHours,
-		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
-		CatHours:               cfg.Schedule.CatHours,
-		GrowthHours:            cfg.Schedule.GrowthHours,
-		LimitedHours:           cfg.Schedule.LimitedHours,
-		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
-		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
-		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
-		TravelDisabled:         !cfg.Schedule.TravelEnabled,
-		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
-		KeepaliveDisabled:      !cfg.Schedule.KeepaliveEnabled,
-		CatDisabled:            !cfg.Schedule.CatEnabled,
-		GrowthDisabled:         !cfg.Schedule.GrowthEnabled,
-		LimitedDisabled:        !cfg.Schedule.LimitedEnabled,
-	})
+	// 调度器：排程段由 schedulerConfig 统一组装（启动与热重载共用，避免两处漂移）。
+	schCfg := schedulerConfig(cfg)
+	schCfg.Pool = p
+	schCfg.Upstream = upHolder.Load()
+	sch := scheduler.New(schCfg)
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
@@ -347,25 +290,40 @@ func main() {
 	}
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		Pool:          p,
+		Upstream:      upHolder.Load(),
+		APIKey:        cfg.APIKey,
+		Session:       sessRouter,
+		StickyEnabled: stickyEnabled.Load,
+		StickyCount:   sessCount,
+		RedisMode:     redisMode,
+		SoftCooldown:  cfg.SoftRateDur,
+		PromptMode:    cfg.Prompt.Mode,
+		PromptText:    cfg.PromptText,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 模型别名表（热加载；nil 时 handler 按无别名运行）。
 		Aliases: aliasStore,
 	})
 
+	// 配置热重载（见 configreload.go）：面板点保存 → 进程内立即重载，不做轮询。
+	// loaded 是 diff 基准，随每次成功重载就地更新（同一指针，面板与重载器共用）。
+	loaded := cfg
+	configReloader := newConfigReloaderAdapter(*cfgPath, configTargets{
+		pool:          p,
+		up:            upHolder,
+		handler:       h,
+		sched:         sch,
+		sess:          sessRouter,
+		stickyEnabled: stickyEnabled,
+		loaded:        loaded,
+	})
+
 	// 单端口对外：网关 handler 与面板 handler 合成一个 mux（见 panel.go）。
 	// 装配失败不让网关跟着起不来 —— 面板是附属能力，降级为「仅网关」并明确告警。
 	// p 一并传入：面板的停用/启用/复活需要进程内直达账号池（网关侧已无 /admin 端点）。
-	rootHandler, err := newRootHandler(cfg, *cfgPath, h, p)
+	// configReloader 让面板保存配置后直调热重载（同进程，保存即生效）。
+	rootHandler, err := newRootHandler(cfg, *cfgPath, h, p, configReloader)
 	if err != nil {
 		log.Printf("WARN: [panel] 面板装配失败，本次仅提供网关接口: %v", err)
 		rootHandler = h
@@ -426,7 +384,7 @@ func main() {
 	// 会被当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发仍可补上）。
-	go warmModelRates(ctx, up, p)
+	go warmModelRates(ctx, upHolder, p)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -479,7 +437,8 @@ func main() {
 //
 // 失败处理：单域失败只记 WARN（不阻塞、不致命——后续懒触发仍会补上）；global 域
 // 仅在其路由开关开启时预热（逃生门关锁时按 CN 处理，无需探测）。
-func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
+func warmModelRates(ctx context.Context, holder *upstreamHolder, p *pool.Pool) {
+	up := holder.Load()
 	// 预热不得拖住进程退出：ctx 取消（SIGINT/SIGTERM）时立刻放弃剩余域。
 	if ctx.Err() != nil {
 		return

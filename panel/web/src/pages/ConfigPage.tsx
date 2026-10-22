@@ -280,8 +280,13 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
       )}
 
       <Alert kind="info">
-        <strong>修改后需重启网关进程才生效。</strong> 保存只会写文件，面板不会也不该替你重启
-        —— 面板与网关同进程，网页触发重启只会把当前请求掐断。请在宿主机执行：
+        <strong>保存后立即生效，无需重启。</strong> 面板与网关同进程，保存完直接通知网关重载：
+        排程、冷却、池参数、超时、代理、指纹、提示词、api_key、会话粘性都会当场应用。
+        <div style={{ marginTop: 5, fontSize: 12.5 }}>
+          以下改动仍需重启进程：<span className="mono">listen</span>、
+          <span className="mono"> auth_dir</span>、<span className="mono"> state_file</span>、
+          <span className="mono"> upstash</span>（它们绑定监听端口、目录与 Redis 连接）。请在宿主机执行：
+        </div>
         <div className="muted-box" style={{ marginTop: 7 }}>docker compose restart</div>
         {meta?.backup_path ? (
           <div style={{ marginTop: 5, fontSize: 12.5 }}>
@@ -637,7 +642,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                 余额低于<strong>所属域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
                 防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
                 两域各自独立取值，留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
-                紧急时可改小或改 0 放行，改后需重启网关生效。
+                紧急时可改小或改 0 放行，保存即生效。
               </div>
             </div>
           </div>
@@ -717,7 +722,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                 <span className="mono"> HTTPS_PROXY</span> 环境变量，再空则直连；
                 填了就<strong>只走该代理</strong>（不叠加 NO_PROXY）。
                 国外域填本机 clash/v2ray 端口（如 <span className="mono">socks5://127.0.0.1:7890</span>）
-                即可让国内服务器上的国际版账号跑通。<strong>改后需重启网关生效</strong>。
+                即可让国内服务器上的国际版账号跑通。保存即生效。
               </div>
             </div>
           </div>

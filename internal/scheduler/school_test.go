@@ -163,8 +163,8 @@ func TestNextWakeGrowthDisabled(t *testing.T) {
 // 与其余六类同口径——否则 len==0 的 nextFire 返回零时点，任务静默永不触发。
 func TestNewGrowthHoursDefaults(t *testing.T) {
 	s := New(Config{})
-	if len(s.cfg.GrowthHours) != 1 || s.cfg.GrowthHours[0] != 8 {
-		t.Errorf("GrowthHours=%v want [8]", s.cfg.GrowthHours)
+	if g := s.snapshot().GrowthHours; len(g) != 1 || g[0] != 8 {
+		t.Errorf("GrowthHours=%v want [8]", g)
 	}
 }
 

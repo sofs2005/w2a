@@ -575,9 +575,9 @@ func (h *Handler) enrichCredits(snap *MetricsSnapshot) {
 		}
 	}
 	var global map[string]string
-	if h.cfg.Upstream != nil {
+	if h.config().Upstream != nil {
 		global = make(map[string]string)
-		for _, mi := range h.cfg.Upstream.GlobalModelInfosSnapshot() {
+		for _, mi := range h.config().Upstream.GlobalModelInfosSnapshot() {
 			if mi.Credits != "" {
 				global[mi.ID] = mi.Credits
 			}

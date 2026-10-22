@@ -36,7 +36,7 @@ func (s *Service) ReadUpstreamConfig() (map[string]any, *UpstreamConfigMeta, err
 	}
 	meta := &UpstreamConfigMeta{
 		Path:        path,
-		RestartNote: "修改 config.json 后必须重启网关进程才会生效（面板与其同进程，请用 docker compose restart）",
+		RestartNote: "保存后立即热生效（面板直调网关重载）；只有 listen / auth_dir / state_file / upstash 改动仍需重启进程。手工改文件不触发热重载",
 	}
 	st, err := os.Stat(path)
 	if err != nil {

@@ -203,7 +203,11 @@ func TestChatWafIPGateClearsAfterExpiryThenRotates(t *testing.T) {
 		}
 		return 200, sseOK, true
 	})
-	h.cfg.Upstream = up2 // 复用同一 Handler/IP 状态机（验证过期解除而非新实例）
+	// 复用同一 Handler/IP 状态机（验证过期解除而非新实例）：换的是配置快照里的
+	// 上游客户端，handler 内部状态（wafIP/degrade）原样保留。
+	cfg2 := h.config()
+	cfg2.Upstream = up2
+	h.ApplyConfig(cfg2)
 	rec2 := httptest.NewRecorder()
 	h.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec2.Code != 200 {

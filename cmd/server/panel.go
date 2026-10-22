@@ -111,7 +111,15 @@ func (a poolAdmin) AccountStatus(uid string) (bool, bool) {
 // 注意这里**没有** /admin/ 路由：账号停用/启用/复活已改为面板进程内直调池
 // （见 poolAdmin），网关侧不再注册该组 HTTP 端点——任何持有 api_key 的下游
 // 都无法再把账号摘出选号池。
-func newRootHandler(cfg *Config, cfgPath string, gwHandler http.Handler, p *pool.Pool) (http.Handler, error) {
+// configReloader 面板保存配置后触发的重载能力（进程内直调）。
+//
+// 方法集与 panel/internal/ops.ConfigReloader 逐字对齐，靠 Go 的隐式接口跨过 module
+// 边界（同 poolAdmin）：本文件不能 import 面板的 internal 包。
+type configReloader interface {
+	ReloadConfig() error
+}
+
+func newRootHandler(cfg *Config, cfgPath string, gwHandler http.Handler, p *pool.Pool, reloader configReloader) (http.Handler, error) {
 	base, err := loopbackURL(cfg.Listen)
 	if err != nil {
 		return nil, err
@@ -130,6 +138,8 @@ func newRootHandler(cfg *Config, cfgPath string, gwHandler http.Handler, p *pool
 	if p != nil {
 		opts.Admin = poolAdmin{p}
 	}
+	// 配置保存后直调网关热重载（同进程）：面板点保存即生效。
+	opts.ConfigReloader = reloader
 
 	panelHandler, err := panelhost.New(opts)
 	if err != nil {

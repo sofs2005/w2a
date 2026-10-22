@@ -220,7 +220,7 @@ func TestFetchGlobalModelsReturnsAccount(t *testing.T) {
 		t.Errorf("names missing probed hy3: %v", names)
 	}
 	// nil 账号路径（无 global 号）：FetchGlobalModelInfos(nil) 安稳返回 nil。
-	if got := h.cfg.Upstream.FetchGlobalModelInfos(nil); got != nil {
+	if got := h.config().Upstream.FetchGlobalModelInfos(nil); got != nil {
 		t.Errorf("FetchGlobalModelInfos(nil)=%v want nil", got)
 	}
 }

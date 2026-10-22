@@ -16,6 +16,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/redisstore"
@@ -57,7 +58,10 @@ type Router struct {
 	mu      sync.RWMutex
 	entries map[string]entry
 	cfg     Config
-	stop    chan struct{}
+	// ttlVal 生效的绑定 TTL（纳秒）。放 atomic 而不是 cfg.TTL：TTL 在每个请求的
+	// 快路径上被读，热重载又会在运行期改写它——走 atomic 免得给每次命中加锁。
+	ttlVal atomic.Int64
+	stop   chan struct{}
 }
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
@@ -72,7 +76,9 @@ func New(cfg Config) *Router {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = 5 * time.Minute
 	}
-	return &Router{entries: map[string]entry{}, cfg: cfg}
+	r := &Router{entries: map[string]entry{}, cfg: cfg}
+	r.ttlVal.Store(int64(cfg.TTL))
+	return r
 }
 
 // StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
@@ -117,6 +123,41 @@ func (r *Router) StopGC() {
 	}
 }
 
+// Reload 用新参数替换会话粘性的 TTL / GC 周期（配置热重载）。
+//
+// 只换这两个纯数值参数：Store 与可用性闭包属于「接线」而非「配置」，换掉会让
+// 正在跑的绑定失去镜像目标。TTL 变化对既有绑定立即生效（过期判定每次都读当前值）；
+// GC 周期变化需要重置 ticker，故后台 GC 停掉重启一次——重建的只是 ticker，
+// entries 与 stop 语义保持不变。
+func (r *Router) Reload(ttl, gcInterval time.Duration) {
+	if ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
+	if gcInterval <= 0 {
+		gcInterval = 5 * time.Minute
+	}
+	r.mu.Lock()
+	gcChanged := r.cfg.GCInterval != gcInterval
+	r.ttlVal.Store(int64(ttl))
+	r.cfg.GCInterval = gcInterval
+	running := r.stop != nil
+	if gcChanged && running {
+		close(r.stop)
+		r.stop = nil
+	}
+	r.mu.Unlock()
+
+	if gcChanged && running {
+		r.StartGC() // 以新周期重启后台 GC（StartGC 自身幂等）
+	}
+}
+
+// TTL 返回当前生效的绑定 TTL（/status 与测试观测用）。
+func (r *Router) TTL() time.Duration { return r.ttl() }
+
+// ttl 读取当前 TTL（热重载可改，故走 atomic；绑定读写路径全部经它取值）。
+func (r *Router) ttl() time.Duration { return time.Duration(r.ttlVal.Load()) }
+
 // LoadFromStore 启动时从 redisstore 恢复绑定（内存覆盖本地，读操作仅此处发生）。
 // 已有本地绑定被保留——Redis 仅为恢复备份，本地一旦建立即为权威。
 func (r *Router) LoadFromStore() {
@@ -155,7 +196,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	r.mu.RLock()
 	e, found := r.entries[key]
 	r.mu.RUnlock()
-	if found && !expired(e, now, r.cfg.TTL) {
+	if found && !expired(e, now, r.ttl()) {
 		if available[e.uid] {
 			r.touch(key, e.uid, now)
 			return e.uid, true
@@ -168,7 +209,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	defer r.mu.Unlock()
 
 	// re-check：并发同 key 可能已被其他 goroutine 分配好。
-	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.cfg.TTL) {
+	if e2, found2 := r.entries[key]; found2 && !expired(e2, now, r.ttl()) {
 		if available[e2.uid] {
 			r.entries[key] = entry{uid: e2.uid, lastActive: now}
 			return e2.uid, true
@@ -210,7 +251,7 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if existed && prev.uid != uid {
 		r.cfg.Store.DelBind(key)
 	}
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, r.ttl())
 	return uid, true
 }
 
@@ -219,7 +260,7 @@ func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, r.ttl())
 }
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
@@ -233,7 +274,7 @@ func (r *Router) Bind(key, uid string) {
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
-	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+	r.cfg.Store.SetBind(key, uid, r.ttl())
 }
 
 // Unbind 解除会话绑定（请求失败时调用，让该会话下次重新分配）。返回是否存在。
@@ -262,7 +303,7 @@ func (r *Router) gcOnce(now time.Time) int {
 	r.mu.Lock()
 	var expiredKeys []string
 	for key, e := range r.entries {
-		if now.Sub(e.lastActive) > r.cfg.TTL {
+		if now.Sub(e.lastActive) > r.ttl() {
 			expiredKeys = append(expiredKeys, key)
 		}
 	}
