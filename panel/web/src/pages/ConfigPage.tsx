@@ -45,6 +45,31 @@ function numText(v: unknown): string {
   return typeof v === 'number' ? String(v) : ''
 }
 
+/**
+ * 保存前校验 schedule 段，返回错误文案（null = 通过）。
+ *
+ * 与 internal/config/schedule.go 的 Normalize 同口径：这些约束后端在启动时才检查，
+ * 面板存进去的坏配置要等下次重启才炸（网关直接起不来）。这里提前拦住。
+ */
+function validateSchedule(doc: Doc): string | null {
+  const sched = getPath(doc, 'schedule')
+  if (!sched || typeof sched !== 'object') return null
+  const num = (key: string): number => {
+    const v = (sched as Doc)[key]
+    return typeof v === 'number' ? v : 0
+  }
+  const min = num('account_delay_min_seconds')
+  const max = num('account_delay_max_seconds')
+  if (min < 0 || max > 600 || max < min) {
+    return `账号间隔要求 0 ≤ 下限 ≤ 上限 ≤ 600（当前 ${min} / ${max}）`
+  }
+  const jitter = num('random_delay_minutes')
+  if (jitter < 0 || jitter > 60) {
+    return `时点随机偏移须在 0–60 分钟之间（当前 ${jitter}）`
+  }
+  return null
+}
+
 /** 小时数组的文本互转：逗号/空格分隔。 */
 function hoursToText(v: unknown): string {
   if (Array.isArray(v)) return v.join(', ')
@@ -107,6 +132,12 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
 
   const saveForm = async () => {
     if (!doc) return
+    const invalid = validateSchedule(doc)
+    if (invalid) {
+      setError(invalid)
+      setNotice(null)
+      return
+    }
     setSaving(true)
     setNotice(null)
     try {
@@ -147,6 +178,11 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       setJsonError('配置顶层必须是一个 JSON 对象')
+      return
+    }
+    const invalid = validateSchedule(parsed)
+    if (invalid) {
+      setJsonError(invalid)
       return
     }
     setSaving(true)
