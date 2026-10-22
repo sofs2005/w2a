@@ -40,6 +40,11 @@ function numOrUndefined(v: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+/** 数字字段的文本互转：未设置/空显示为空串。 */
+function numText(v: unknown): string {
+  return typeof v === 'number' ? String(v) : ''
+}
+
 /** 小时数组的文本互转：逗号/空格分隔。 */
 function hoursToText(v: unknown): string {
   if (Array.isArray(v)) return v.join(', ')
@@ -181,7 +186,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
   }
   // defaultOn 读「缺省即开启」的开关：网关侧 schedule 段的 enabled 语义是
   // 「缺省 true，只有显式 false 才关」（internal/config/schedule.go 的
-  // DefaultSchedule + Normalize）。旧 config.json 里没有 school/cat/growth 这些键，
+  // DefaultSchedule + Normalize）。旧 config.json 里没有 cat/growth/limited 这些键，
   // 用 bool() 的 === true 会把它们全渲染成未勾选——用户一保存就把任务全关掉。
   // 不复用 bool()：会话粘性等开关的既有勾选/点击语义不受本次改动影响。
   const defaultOn = (path: string) => {
@@ -357,14 +362,14 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
             </div>
             <div className="row">
               <div className="field" style={{ flex: 1 }}>
-                <label>开学季 school_hours</label>
+                <label>限时活动 limited_hours</label>
                 <input
                   type="text"
-                  value={hoursToText(getPath(doc, 'schedule.school_hours'))}
-                  onChange={(e) => update('schedule.school_hours', textToHours(e.target.value))}
+                  value={hoursToText(getPath(doc, 'schedule.limited_hours'))}
+                  onChange={(e) => update('schedule.limited_hours', textToHours(e.target.value))}
                   placeholder="12"
                 />
-                <div className="desc">调 school_open_day_2026.py ALL --run --yes，活动下线时脚本自行全量跳过。</div>
+                <div className="desc">调 task_runner.py ALL --yes --limited，只跑带有效期的活动任务；过期后脚本自行跳过。</div>
               </div>
               <div className="field" style={{ flex: 1 }}>
                 <label>夜猫子 cat_hours</label>
@@ -387,6 +392,38 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                   placeholder="8"
                 />
                 <div className="desc">每晚跑一遍 task_runner.py ALL --yes 补跑成长任务。脚本幂等：已领/已达标逐项跳过，新账号当天自动补齐。</div>
+              </div>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1 }}>
+                <label>时点随机偏移 random_delay_minutes</label>
+                <input
+                  type="text"
+                  value={numText(getPath(doc, 'schedule.random_delay_minutes'))}
+                  onChange={(e) => update('schedule.random_delay_minutes', numOrUndefined(e.target.value))}
+                  placeholder="0"
+                />
+                <div className="desc">0 = 整点。</div>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>账号间隔下限 account_delay_min_seconds</label>
+                <input
+                  type="text"
+                  value={numText(getPath(doc, 'schedule.account_delay_min_seconds'))}
+                  onChange={(e) => update('schedule.account_delay_min_seconds', numOrUndefined(e.target.value))}
+                  placeholder="0"
+                />
+                <div className="desc">0 = 不启用。</div>
+              </div>
+              <div className="field" style={{ flex: 1 }}>
+                <label>账号间隔上限 account_delay_max_seconds</label>
+                <input
+                  type="text"
+                  value={numText(getPath(doc, 'schedule.account_delay_max_seconds'))}
+                  onChange={(e) => update('schedule.account_delay_max_seconds', numOrUndefined(e.target.value))}
+                  placeholder="0"
+                />
+                <div className="desc">0 = 不启用。</div>
               </div>
             </div>
             <div className="row">
@@ -438,10 +475,10 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                 <label className="checkbox">
                   <input
                     type="checkbox"
-                    checked={defaultOn('schedule.school_enabled')}
-                    onChange={(e) => update('schedule.school_enabled', e.target.checked)}
+                    checked={defaultOn('schedule.limited_enabled')}
+                    onChange={(e) => update('schedule.limited_enabled', e.target.checked)}
                   />
-                  启用开学季
+                  启用限时活动
                 </label>
               </div>
               <div className="field" style={{ flex: 1 }}>

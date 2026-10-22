@@ -55,18 +55,18 @@ func TestScheduledCheckinAccountWaitCanBeCancelled(t *testing.T) {
 	}
 }
 
-// 脚本参数只对定时派发追加；手动入口（RunSchoolNow / RunCatNow）命令行逐字节不变。
+// 脚本参数只对定时派发追加；手动入口（RunLimitedTasksNow / RunCatNow）命令行逐字节不变。
 func TestScheduledScriptsReceiveAccountRangeOnlyOnAutomaticEntry(t *testing.T) {
 	f := installFakeExec(t)
 	s := New(Config{AccountDelayMinSeconds: 30, AccountDelayMaxSeconds: 120})
-	s.RunSchoolNow()
+	s.RunLimitedTasksNow()
 	if len(f.lastArgs) != 4 {
-		t.Fatalf("manual school flags changed: %v", f.lastArgs)
+		t.Fatalf("manual limited flags changed: %v", f.lastArgs)
 	}
-	s.dispatch(context.Background(), taskSchool)
+	s.dispatch(context.Background(), taskLimited)
 	if len(f.lastArgs) != 8 || f.lastArgs[4] != "--account-delay-min" || f.lastArgs[5] != "30" ||
 		f.lastArgs[6] != "--account-delay-max" || f.lastArgs[7] != "120" {
-		t.Fatalf("scheduled school flags missing: %v", f.lastArgs)
+		t.Fatalf("scheduled limited flags missing: %v", f.lastArgs)
 	}
 	s.RunCatNow()
 	if len(f.lastArgs) != 5 {
@@ -77,7 +77,6 @@ func TestScheduledScriptsReceiveAccountRangeOnlyOnAutomaticEntry(t *testing.T) {
 		t.Fatalf("scheduled cat flags missing: %v", f.lastArgs)
 	}
 }
-
 // spacingBatchCommand 记录脚本并发度：配了账号间隔时同槽任务必须串行。
 type spacingBatchCommand struct{ active, maximum, calls *atomic.Int32 }
 
@@ -103,7 +102,7 @@ func TestStaggeredCoincidentTaskTypesDoNotOverlap(t *testing.T) {
 	}
 	t.Cleanup(func() { newScriptCmd = old })
 	s := New(Config{AccountDelayMinSeconds: 30, AccountDelayMaxSeconds: 120})
-	s.runBatch(context.Background(), []taskKind{taskSchool, taskCat})
+	s.runBatch(context.Background(), []taskKind{taskLimited, taskCat})
 	if maximum.Load() != 1 || calls.Load() != 2 {
 		t.Fatalf("batches overlapped: max=%d calls=%d", maximum.Load(), calls.Load())
 	}
@@ -113,8 +112,8 @@ func jitterScheduler(minutes int) *Scheduler {
 	return New(Config{
 		RandomDelayMinutes: minutes, RandomDelaySeed: "synthetic-deployment",
 		CheckinHours: []int{9}, TravelDisabled: true, ActivityDisabled: true,
-		KeepaliveDisabled: true, SchoolDisabled: true, CatDisabled: true,
-		GrowthDisabled: true,
+		KeepaliveDisabled: true, CatDisabled: true,
+		GrowthDisabled: true, LimitedDisabled: true,
 	})
 }
 

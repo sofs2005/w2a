@@ -1,10 +1,15 @@
-// school.go 开学季任务、夜猫子任务与成长任务补跑的脚本类排程：从系统 crontab 迁入 Go scheduler。
+// school.go 夜猫子任务、成长任务补跑与限时活动任务的脚本类排程：从系统 crontab 迁入 Go scheduler。
 //
-// 背景：school（12:00）与 cat（01:00 夜猫窗口）原由系统 crontab 调
-// scripts/school_open_day_cron.sh 执行——依赖外部系统 cron、容器重建可能丢失、
-// 不在 config 里配置。迁入后成为第五、第六类任务，时点由 schedule.school_hours /
-// schedule.cat_hours 配置，school_open_day_cron.sh 保留为手动触发入口。
-// 第七类 growth（08:00）是后来补的：同脚本 task_runner.py 的全量入口，见 RunGrowthTasksNow。
+// 背景：cat（01:00 夜猫窗口）原由系统 crontab 调 scripts/school_open_day_cron.sh
+// 执行——依赖外部系统 cron、容器重建可能丢失、不在 config 里配置。迁入后成为独立
+// 任务，时点由 schedule.cat_hours 配置。
+//
+// 开学季排程（原第五类 school）已被限时活动排程取代：开学季本身就是一次性限时活动，
+// 活动结束后（in_period=false）不该继续占一个固定排程位。school_open_day_2026.py
+// 与 school_open_day_cron.sh 保留为手动入口，脚本自身在活动下线后全量跳过。
+//
+// growth（08:00）与 limited（12:00）都是 task_runner.py 的入口，见 RunGrowthTasksNow /
+// RunLimitedTasksNow。
 package scheduler
 
 import (
@@ -118,18 +123,6 @@ func runScriptContext(ctx context.Context, name, root string, commands [][]strin
 	}
 }
 
-// RunSchoolNow 立即执行开学季任务：school_open_day_2026.py ALL --run --yes。
-// 全量跑任务点亮 + 领奖 + 自动抽空抽奖余额。活动下线（in_period=false）时脚本
-// 各段全量跳过、正常退出，不视为失败。失败只记 WARN。
-func (s *Scheduler) RunSchoolNow() { s.runSchoolNow(context.Background()) }
-
-func (s *Scheduler) runSchoolNow(ctx context.Context) {
-	root := repoRoot()
-	runScriptContext(ctx, "school", root, [][]string{
-		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}),
-	})
-}
-
 // RunCatNow 立即执行夜猫子任务：task_runner.py ALL --yes --only black_cat。
 // black_cat 时段敏感：夜猫窗口 23:00–08:00 CST 内最多补 1 次（task_runner 内部
 // 判定，非窗口期打印 skip 正常退出）。失败只记 WARN。
@@ -176,5 +169,25 @@ func (s *Scheduler) runGrowthTasksNow(ctx context.Context) {
 	root := repoRoot()
 	runScriptContext(ctx, "growth", root, [][]string{
 		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes"}),
+	})
+}
+
+// RunLimitedTasksNow 立即执行限时活动任务：task_runner.py ALL --yes --limited。
+//
+// 与 growth 的分工：growth 跑长期的一次性成长任务（16 项），本入口只跑 MAPPING
+// 里带 valid_end 的限时活动任务（如 WorkBuddy_Valorant「体验无畏契约拼豆专家」，
+// 有效期至 2026-11-15）。活动下线后脚本侧按 valid_end 整体跳过、正常退出，
+// 因此排程无需感知具体活动的存亡——新增限时活动只需在 MAPPING 加 valid_end。
+//
+// 全量 growth 补跑会自动排除限时任务（脚本内 LIMITED_CODES），两个排程不会
+// 对同一任务重复点亮。共享 taskRunnerMu：两者是同一脚本、同一批 auth 文件。
+func (s *Scheduler) RunLimitedTasksNow() { s.runLimitedTasksNow(context.Background()) }
+
+func (s *Scheduler) runLimitedTasksNow(ctx context.Context) {
+	taskRunnerMu.Lock()
+	defer taskRunnerMu.Unlock()
+	root := repoRoot()
+	runScriptContext(ctx, "limited", root, [][]string{
+		s.accountScriptArgs(ctx, []string{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--limited"}),
 	})
 }

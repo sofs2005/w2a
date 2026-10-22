@@ -386,21 +386,27 @@ func TestScheduleEnabledByDefault(t *testing.T) {
 	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", c.Schedule.ActivityHours)
 	}
-	if len(c.Schedule.SchoolHours) != 1 || c.Schedule.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want [12]", c.Schedule.SchoolHours)
+	if len(c.Schedule.LimitedHours) != 1 || c.Schedule.LimitedHours[0] != 12 {
+		t.Errorf("limited_hours=%v want [12]", c.Schedule.LimitedHours)
 	}
 	if len(c.Schedule.CatHours) != 1 || c.Schedule.CatHours[0] != 1 {
 		t.Errorf("cat_hours=%v want [1]", c.Schedule.CatHours)
 	}
-	if !c.Schedule.SchoolEnabled || !c.Schedule.CatEnabled {
-		t.Errorf("school/cat enabled defaults want true/true, got %v/%v",
-			c.Schedule.SchoolEnabled, c.Schedule.CatEnabled)
+	if !c.Schedule.LimitedEnabled || !c.Schedule.CatEnabled {
+		t.Errorf("limited/cat enabled defaults want true/true, got %v/%v",
+			c.Schedule.LimitedEnabled, c.Schedule.CatEnabled)
 	}
 	if len(c.Schedule.GrowthHours) != 1 || c.Schedule.GrowthHours[0] != 8 {
 		t.Errorf("growth_hours=%v want [8]", c.Schedule.GrowthHours)
 	}
 	if !c.Schedule.GrowthEnabled {
 		t.Error("growth_enabled 默认应为 true（缺省即补跑，老 config 行为不受影响）")
+	}
+	if len(c.Schedule.LimitedHours) != 1 || c.Schedule.LimitedHours[0] != 12 {
+		t.Errorf("limited_hours=%v want [12]", c.Schedule.LimitedHours)
+	}
+	if !c.Schedule.LimitedEnabled {
+		t.Error("limited_enabled 默认应为 true（活动过期由脚本侧 valid_end 判定）")
 	}
 }
 
@@ -430,8 +436,8 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	if len(c.Schedule.ActivityHours) != 1 || c.Schedule.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want default [10]", c.Schedule.ActivityHours)
 	}
-	if len(c.Schedule.SchoolHours) != 1 || c.Schedule.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want default [12]", c.Schedule.SchoolHours)
+	if len(c.Schedule.LimitedHours) != 1 || c.Schedule.LimitedHours[0] != 12 {
+		t.Errorf("limited_hours=%v want default [12]", c.Schedule.LimitedHours)
 	}
 	if len(c.Schedule.CatHours) != 1 || c.Schedule.CatHours[0] != 1 {
 		t.Errorf("cat_hours=%v want default [1]", c.Schedule.CatHours)
@@ -439,8 +445,8 @@ func TestScheduleLegacyConfigKeepsRunning(t *testing.T) {
 	if len(c.Schedule.GrowthHours) != 1 || c.Schedule.GrowthHours[0] != 8 {
 		t.Errorf("growth_hours=%v want default [8]", c.Schedule.GrowthHours)
 	}
-	if !c.Schedule.SchoolEnabled || !c.Schedule.CatEnabled {
-		t.Errorf("school/cat switches must default true on legacy config: %+v", c.Schedule)
+	if !c.Schedule.LimitedEnabled || !c.Schedule.CatEnabled {
+		t.Errorf("limited/cat switches must default true on legacy config: %+v", c.Schedule)
 	}
 	if !c.Schedule.GrowthEnabled {
 		t.Errorf("growth switch must default true on legacy config: %+v", c.Schedule)
@@ -597,6 +603,7 @@ func TestScheduleInvalidHourRejected(t *testing.T) {
 		{`{"schedule":{"checkin_hours":[-1]}}`, "checkin_enabled"},
 		{`{"schedule":{"keepalive_hours":[-1]}}`, "keepalive_enabled"},
 		{`{"schedule":{"growth_hours":[24]}}`, "growth_enabled"},
+		{`{"schedule":{"limited_hours":[24]}}`, "limited_enabled"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
@@ -961,6 +968,12 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !c.Schedule.GrowthEnabled {
 		t.Errorf("示例的 growth_enabled 应为 true: %+v", c.Schedule)
+	}
+	if len(c.Schedule.LimitedHours) == 0 {
+		t.Errorf("示例缺 limited_hours（限时活动任务排程）: %+v", c.Schedule)
+	}
+	if !c.Schedule.LimitedEnabled {
+		t.Errorf("示例的 limited_enabled 应为 true: %+v", c.Schedule)
 	}
 }
 

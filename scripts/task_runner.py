@@ -104,6 +104,13 @@ MAPPING = {
     "automation_1":           {"kind": "automation", "target": 1, "src": "rrule 虚拟对象"},
     "playbook_prompt":        {"kind": "playbook",   "target": 1, "src": "playbook 案例 id"},
     "Expert_lighthouse":      {"kind": "lighthouse", "target": 1, "src": "轻量云专家 id"},
+    # 限时活动任务（valid_end 2026-11-15）：召唤指定专家并完成一次对话，
+    # 判据与 lighthouse 同族（召唤三连 + 真实对话 requestId + 六连 + actual_use），
+    # 差别在 actual_use 用 mode=CLOUD + 专家分类 type（市场类专家判据）。
+    # 「限时」语义由排程侧负责：独立的限时任务排程在 valid_end 之后整体跳过，
+    # 且全量成长补跑用 --skip 排除本 code，避免两个排程重复点亮。
+    "WorkBuddy_Valorant":     {"kind": "valorant",   "target": 1, "src": "agent_name=valorant-perler-expert",
+                               "valid_end": "2026-11-15T23:59:00+08:00"},
     "Buddy_App":              {"kind": "buddy5",     "target": 1, "src": "buddy 应用 id"},
     "Buddy_App_QQ":           {"kind": "buddy5",     "target": 1, "src": "企鹅教师助手 id"},
     "Hp_Appearance":          {"kind": "skin",       "target": 1, "src": "主题 resourceKey"},
@@ -136,6 +143,28 @@ MAPPING = {
     # 不可伪造（真实业务副作用）
     "Expert_Philanthropy":    {"unforgeable": True, "reason": "真实捐款动作(M8)"},
 }
+
+# 限时任务（MAPPING 里带 valid_end 的项）：专用排程入口 --limited 只处理这些 code，
+# 且已过期的一律跳过——任务下线后继续上报只是对上游刷无意义写请求。
+LIMITED_CODES = [c for c, spec in MAPPING.items() if spec.get("valid_end")]
+
+
+def within_valid_period(spec, now=None):
+    """限时任务是否仍在有效期（valid_end 未过）。无 valid_end 视为长期任务，恒 True。
+
+    时间统一按 CST（+08:00）比较：服务端 valid_end 带 +08:00 偏移，用 aware datetime
+    直接比较即可；解析失败按「未过期」放行，宁可多跑一轮也不因格式变化静默停摆。
+    """
+    end = spec.get("valid_end")
+    if not end:
+        return True
+    try:
+        import datetime as _dt
+        now = now or _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+        return now < _dt.datetime.fromisoformat(end)
+    except Exception:
+        return True
+
 
 # 夜猫时段（CST）23:00 - 次日 08:00
 def within_night_window():
@@ -254,6 +283,14 @@ LIGHTHOUSE_IDS = [("ex_2cvvUZQhDyeJ", {
     "name": "腾讯轻量云专家", "category": "02-Engineering",
     "expertType": "agent", "version": "1.0.2"})]
 LIGHTHOUSE_KEYWORDS = ["lighthouse", "轻量云"]
+# 限时任务「体验无畏契约拼豆专家」（WorkBuddy_Valorant，valid_end 2026-11-15）。
+# 专家市场按 agent_name 精确锁定：中文名/「拼豆」关键词都会命中同名的其它专家。
+VALORANT_AGENT_NAME = "valorant-perler-expert"
+VALORANT_KEYWORDS = ["无畏契约", "valorant"]
+VALORANT_EXPERT_IDS = [("ex_xQHHD1u5Jkua", {
+    "name": "无畏契约拼豆专家", "category": "03-GameSpatial",
+    "expertType": "agent", "version": "1.2.3",
+    "agent_name": VALORANT_AGENT_NAME})]
 
 # 连登/能量读数（只读 oracle，M15 实测 /v2/activity/growth/energy -> data.balance）
 PATH_ENERGY = "/v2/activity/growth/energy"
@@ -409,6 +446,20 @@ def _fetch_lighthouse(auth):
     return out
 
 
+def _fetch_valorant_expert(auth):
+    """市场按 agent_name 精确锁定「无畏契约拼豆专家」-> [(ex_id, meta)]。
+
+    不能用「拼豆」泛搜（实测命中 7 个拼豆/图纸类专家，会把召唤打给错误对象），
+    也不能只按中文名匹配——同名专家可能多版本并存。agent_name 是服务端稳定标识。
+    """
+    out = []
+    for kw in VALORANT_KEYWORDS:
+        for eid, meta in _fetch_market_experts(auth, keyword=kw):
+            if meta.get("agent_name") == VALORANT_AGENT_NAME:
+                out.append((eid, meta))
+    return out
+
+
 def _fetch_pe_theme(auth):
     """appearance/resources 目录过滤和平精英 -> [(resource_key, meta)]。"""
     out = []
@@ -476,6 +527,9 @@ def ids_for(kind, auth, need, offset=0):
         return _dedup_slice(_fetch_playbook_cases(), offset, need)
     if kind == "lighthouse":
         return _dedup_slice(_fetch_lighthouse(auth), offset, need)
+    if kind == "valorant":
+        # 精确 agent_name 过滤；市场不可用时回落内置 id（任务有 valid_end，不能静默不动作）
+        return _dedup_slice(_fetch_valorant_expert(auth) or VALORANT_EXPERT_IDS, offset, need)
     if kind == "skin":
         return _dedup_slice(_fetch_pe_theme(auth), offset, need)
     if kind in ("chat", "glmchat", "automation", "cat"):
@@ -666,6 +720,17 @@ def desktop_expert_actual_use_local(expert, conversation_id, request_id):
         "messageId": "msg-" + request_id[-8:],
         "requestModelId": "fast-model", "requestModelName": "fast-model",
     }
+
+
+def desktop_expert_actual_use_cloud(expert, conversation_id, request_id):
+    """mode=CLOUD 的 expert_actual_use（市场类专家判据：带分类 type，与 expert_5 同形状）。"""
+    eid, m = expert
+    name = m.get("name") or eid
+    ev = desktop_expert_actual_use_local(expert, conversation_id, request_id)
+    ev.update({"mode": "CLOUD", "type": m.get("category") or "", "source": "market",
+               "requestModelId": "deepseek-v4-flash",
+               "requestModelName": "DeepSeek V4 Flash"})
+    return ev
 
 
 def desktop_buddy5_sequence(auth, buddy_id, buddy_name):
@@ -1387,11 +1452,16 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
             if i < need - 1:
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
-    elif spec["kind"] == "lighthouse":
-        # 轻量云专家：召唤三连 → 真实桌面对话（取服务端 requestId）→ 带
-        # has_expert 的六连 → expert_actual_use(LOCAL)。不能沿用通用分支：
-        # 自造 requestId 服务端不计数（进度恒 0/1）。
-        ids = ids_for("lighthouse", auth, need, offset=cur)
+    elif spec["kind"] in ("lighthouse", "valorant"):
+        # 指定专家「召唤并完成一次对话」：召唤三连 → 真实桌面对话（取服务端 requestId）
+        # → 带 has_expert 的六连 → expert_actual_use。不能沿用通用分支：
+        # 自造 requestId 服务端不计数（进度恒 0/target）。
+        # 两类仅 actual_use 形态不同：轻量云判据 mode=LOCAL/type 空，市场类专家
+        # 判据 mode=CLOUD/type=分类（见各自构造器注释）。
+        kind = spec["kind"]
+        build_use = (desktop_expert_actual_use_cloud if kind == "valorant"
+                     else desktop_expert_actual_use_local)
+        ids = ids_for(kind, auth, need, offset=cur)
         if not ids:
             print(f"[task_runner] {uid8} {code}: report 无可用对象 id，skip")
             stats["fail"] += 1
@@ -1414,10 +1484,10 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
                     ev["expert_id"] = eid
                     ev["expert_name"] = expert[1].get("name") or eid
                     ev["expert_industry_id"] = ""
-            events.append(desktop_expert_actual_use_local(expert, conv, req_id))
+            events.append(build_use(expert, conv, req_id))
             st_r, sc = report_desktop_events(auth, events)
             print(f"[task_runner] {uid8} {code}: report {i + 1}/{need} {st_r} "
-                  f"code={sc} lighthouse req={req_id}")
+                  f"code={sc} {kind} req={req_id}")
             if i < len(ids) - 1:
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
@@ -1514,11 +1584,27 @@ def process_account(auth, opts, stats):
         codes = [c for c in opts.only_codes if c not in special]
         process_school = bool(set(opts.only_codes) & set(school_in_map))
         process_minichat = bool(set(opts.only_codes) & set(minichat_in_map))
+    elif opts.limited:
+        # 专用排程：只碰限时活动任务，且跳过已过期的（下线后上报只是无意义写请求）。
+        codes = [c for c in LIMITED_CODES if within_valid_period(MAPPING[c])]
+        expired = [c for c in LIMITED_CODES if c not in codes]
+        if expired:
+            print(f"[task_runner] {uid8} 限时任务已过期，skip: {expired}")
+        process_school = False
+        process_minichat = False
     else:
         codes = [c for c in MAPPING
                  if MAPPING[c].get("kind") not in ("school", "minichat", "schoolseason", "miniexpert")]
         process_school = True
         process_minichat = True
+        # 专用排程排除（--skip）：把该 code 当成"本次不处理"，避免同一任务被
+        # 两个排程各跑一遍（限时活动任务有自己的时点与过期判定）。
+        skip = set(opts.skip_codes or [])
+        if skip:
+            codes = [c for c in codes if c not in skip]
+        # 全量补跑不带 --skip 时也排除限时任务：它们由专用排程按 valid_end 管理，
+        # 在这里重复点亮只会让「限时任务排程」失去意义（时点/过期判定两处不一致）。
+        codes = [c for c in codes if c not in LIMITED_CODES]
         # 未在映射表但存在于任务列表的（如 Expert_Philanthropy）——只计数展示
         for t in tasks:
             c = t.get("task_code")
@@ -1590,6 +1676,10 @@ def main():
     ap.add_argument("--only-claim", action="store_true",
                     help="只领奖不点亮（已完成任务直接 claim，已领幂等）")
     ap.add_argument("--gap", type=float, default=1.0, help="动作间隔秒数（默认 1.0）")
+    ap.add_argument("--skip", action="append", default=None, dest="skip_codes",
+                    help="排除指定 task_code（可多次）；供专用排程只跑自己那类")
+    ap.add_argument("--limited", action="store_true",
+                    help="只跑限时活动任务（MAPPING 带 valid_end 的项），过期的自动跳过")
     tc.add_account_spacing_arguments(ap)
     a = ap.parse_args()
     account_spacing = tc.account_spacing_from_args(a, ap)

@@ -23,22 +23,22 @@
     "keepalive_hours": [
       22
     ],
-    "school_hours": [
-      12
-    ],
     "cat_hours": [
       1
     ],
     "growth_hours": [
       8
     ],
+    "limited_hours": [
+      12
+    ],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
     "keepalive_enabled": true,
-    "school_enabled": true,
     "cat_enabled": true,
     "growth_enabled": true,
+    "limited_enabled": true,
     "random_delay_minutes": 0,
     "account_delay_min_seconds": 0,
     "account_delay_max_seconds": 0

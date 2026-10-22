@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -79,24 +78,6 @@ func equalArgs(a, b []string) bool {
 	return true
 }
 
-// TestNextWakeSchoolSlot 开学季任务在 school_hours（默认 12 点）处有独立时点。
-func TestNextWakeSchoolSlot(t *testing.T) {
-	s := New(Config{
-		CheckinHours:      []int{9},
-		TravelDisabled:    true,
-		ActivityDisabled:  true,
-		KeepaliveDisabled: true,
-		SchoolHours:       []int{12},
-	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 11, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 12, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（school 12:00 独立时点）", at, want)
-	}
-	if len(kinds) != 1 || kinds[0] != taskSchool {
-		t.Errorf("kinds=%v want [school]", kinds)
-	}
-}
-
 // TestNextWakeCatSlot 夜猫子任务在 cat_hours（默认 1 点）处有独立时点。
 func TestNextWakeCatSlot(t *testing.T) {
 	s := New(Config{
@@ -115,21 +96,21 @@ func TestNextWakeCatSlot(t *testing.T) {
 	}
 }
 
-// TestNextWakeSchoolCatDisabled 显式禁用 school/cat 后排程只剩签到时点（互不影响）。
-func TestNextWakeSchoolCatDisabled(t *testing.T) {
+// TestNextWakeCatLimitedDisabled 显式禁用 cat/limited 后排程只剩签到时点（互不影响）。
+func TestNextWakeCatLimitedDisabled(t *testing.T) {
 	s := New(Config{
 		CheckinHours:      []int{21},
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolHours:       []int{12},
 		CatHours:          []int{1},
-		SchoolDisabled:    true,
+		LimitedHours:      []int{12},
 		CatDisabled:       true,
+		LimitedDisabled:   true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（school/cat 禁用 → 只有签到 21:00）", at, want)
+		t.Errorf("next=%v want %v（cat/limited 禁用 → 只有签到 21:00）", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
@@ -144,8 +125,8 @@ func TestNextWakeGrowthSlot(t *testing.T) {
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolDisabled:    true,
 		CatDisabled:       true,
+		LimitedDisabled:   true,
 		GrowthHours:       []int{8},
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 14, 7, 0, 0, 0, time.Local))
@@ -164,10 +145,10 @@ func TestNextWakeGrowthDisabled(t *testing.T) {
 		TravelDisabled:    true,
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
-		SchoolDisabled:    true,
 		CatDisabled:       true,
 		GrowthHours:       []int{8},
 		GrowthDisabled:    true,
+		LimitedDisabled:   true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local))
 	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, time.Local); !at.Equal(want) {
@@ -217,6 +198,55 @@ func TestDispatchGrowth(t *testing.T) {
 	}
 }
 
+// TestNextWakeLimitedSlot 限时活动任务在 limited_hours（默认 12 点）处有独立时点。
+func TestNextWakeLimitedSlot(t *testing.T) {
+	s := New(Config{
+		CheckinHours:      []int{9},
+		TravelDisabled:    true,
+		ActivityDisabled:  true,
+		KeepaliveDisabled: true,
+		CatDisabled:       true,
+		GrowthDisabled:    true,
+		LimitedHours:      []int{15},
+	})
+	at, kinds := s.nextWake(time.Date(2026, 10, 22, 14, 0, 0, 0, time.Local))
+	if want := time.Date(2026, 10, 22, 15, 0, 0, 0, time.Local); !at.Equal(want) {
+		t.Errorf("next=%v want %v（limited 15:00 独立时点）", at, want)
+	}
+	if len(kinds) != 1 || kinds[0] != taskLimited {
+		t.Errorf("kinds=%v want [limited]", kinds)
+	}
+}
+
+// TestRunLimitedTasksNowBuildsCommand 限时活动任务入口构造
+// python3 scripts/task_runner.py ALL --yes --limited：--limited 是重点，
+// 少了它就会退化成全量补跑（与 growth 重复点亮同一批任务）。
+func TestRunLimitedTasksNowBuildsCommand(t *testing.T) {
+	t.Setenv("WB2A_PYTHON", "")
+	f := installFakeExec(t)
+	s := New(Config{})
+	s.RunLimitedTasksNow()
+	want := []string{"scripts/task_runner.py", "ALL", "--yes", "--limited"}
+	if f.lastName != "python3" || !equalArgs(f.lastArgs, want) {
+		t.Errorf("cmd=%s %v want python3 %v", f.lastName, f.lastArgs, want)
+	}
+	if f.lastDir != repoRoot() {
+		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
+	}
+}
+
+// TestDispatchLimited dispatch 把 limited 分发给带 --limited 的入口。
+func TestDispatchLimited(t *testing.T) {
+	t.Setenv("WB2A_PYTHON", "")
+	f := installFakeExec(t)
+	s := New(Config{})
+	s.dispatch(context.Background(), taskLimited)
+	want := []string{"scripts/task_runner.py", "ALL", "--yes", "--limited"}
+	if f.runN != 1 || !equalArgs(f.lastArgs, want) {
+		t.Errorf("dispatch(limited) 未按限时入口执行: runN=%d last=%v", f.runN, f.lastArgs)
+	}
+}
+
 // TestTaskRunnerEntriesSerialized cat 与 growth 是同一脚本、同一批 auth 文件，
 // 配到同一小时时 runBatch 会并行派发两者——两个 python 进程同时读写同一份
 // auth 目录，结果不确定。taskRunnerMu 必须把它们串起来。
@@ -227,36 +257,13 @@ func TestTaskRunnerEntriesSerialized(t *testing.T) {
 	s := New(Config{})
 
 	// 两个任务族并行派发（复刻 runBatch 对同一槽位多类任务的处置）。
-	s.runBatch(context.Background(), []taskKind{taskCat, taskGrowth})
+	s.runBatch(context.Background(), []taskKind{taskCat, taskGrowth, taskLimited})
 
-	if f.runN != 2 {
-		t.Fatalf("两个入口都应执行: runN=%d want 2", f.runN)
+	if f.runN != 3 {
+		t.Fatalf("三个入口都应执行: runN=%d want 3", f.runN)
 	}
 	if peak := f.peakConcurrency(); peak != 1 {
 		t.Errorf("task_runner.py 两个入口并发执行了（peak=%d want 1）——auth 目录会被同时读写", peak)
-	}
-}
-
-// TestRunSchoolNowBuildsCommand RunSchoolNow 构造
-// python3 scripts/school_open_day_2026.py ALL --run --yes，工作目录设为仓库根。
-func TestRunSchoolNowBuildsCommand(t *testing.T) {
-	// 防环境泄漏：WB2A_PYTHON 若在测试机已设置会改写 pythonCmd()，使默认值断言失败。
-	t.Setenv("WB2A_PYTHON", "")
-	f := installFakeExec(t)
-	s := New(Config{})
-	s.RunSchoolNow()
-	if f.lastName != "python3" {
-		t.Errorf("name=%q want python3", f.lastName)
-	}
-	want := []string{"scripts/school_open_day_2026.py", "ALL", "--run", "--yes"}
-	if !equalArgs(f.lastArgs, want) {
-		t.Errorf("args=%v want %v", f.lastArgs, want)
-	}
-	if f.lastDir != repoRoot() {
-		t.Errorf("dir=%q want repo root %q", f.lastDir, repoRoot())
-	}
-	if _, err := os.Stat(filepath.Join(f.lastDir, "scripts", "school_open_day_2026.py")); err != nil {
-		t.Errorf("仓库根 %q 内应有 scripts/school_open_day_2026.py: %v", f.lastDir, err)
 	}
 }
 
@@ -276,9 +283,9 @@ func TestRunCatNowBuildsCommand(t *testing.T) {
 	}
 }
 
-// TestDispatchSchoolCatAndFailureWarnsOnly dispatch 把 school/cat 分发给对应脚本；
+// TestDispatchLimitedCatAndFailureWarnsOnly dispatch 把 limited/cat 分发给对应脚本；
 // 脚本失败只记 WARN（不 panic/不向上抛），且不影响后续任务继续分发。
-func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
+func TestDispatchLimitedCatAndFailureWarnsOnly(t *testing.T) {
 	t.Setenv("WB2A_PYTHON", "")
 	f := installFakeExec(t)
 	f.err = errors.New("boom boom")
@@ -292,17 +299,17 @@ func TestDispatchSchoolCatAndFailureWarnsOnly(t *testing.T) {
 		log.SetFlags(log.LstdFlags)
 	})
 
-	s.dispatch(context.Background(), taskSchool)
-	if f.runN != 1 || f.lastArgs[0] != "scripts/school_open_day_2026.py" {
-		t.Errorf("dispatch(school) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
+	s.dispatch(context.Background(), taskLimited)
+	if f.runN != 1 || f.lastArgs[0] != "scripts/task_runner.py" {
+		t.Errorf("dispatch(limited) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
 	}
 	s.dispatch(context.Background(), taskCat)
 	if f.runN != 2 || f.lastArgs[0] != "scripts/task_runner.py" {
 		t.Errorf("dispatch(cat) 未执行: runN=%d last=%v", f.runN, f.lastArgs)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "WARN") || !strings.Contains(out, "scripts/school_open_day_2026.py") {
-		t.Errorf("school 失败未按 WARN 记录:\n%s", out)
+	if !strings.Contains(out, "WARN") || !strings.Contains(out, "scripts/task_runner.py") {
+		t.Errorf("limited 失败未按 WARN 记录:\n%s", out)
 	}
 	if !strings.Contains(out, "scripts/task_runner.py") {
 		t.Errorf("cat 失败未按 WARN 记录:\n%s", out)

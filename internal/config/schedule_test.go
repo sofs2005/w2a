@@ -21,14 +21,14 @@ func TestDefaultScheduleActivityCount(t *testing.T) {
 	if len(s.ActivityHours) != 1 || s.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", s.ActivityHours)
 	}
-	if len(s.SchoolHours) != 1 || s.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want [12]", s.SchoolHours)
+	if len(s.LimitedHours) != 1 || s.LimitedHours[0] != 12 {
+		t.Errorf("limited_hours=%v want [12]", s.LimitedHours)
 	}
 	if len(s.CatHours) != 1 || s.CatHours[0] != 1 {
 		t.Errorf("cat_hours=%v want [1]", s.CatHours)
 	}
-	if !s.SchoolEnabled || !s.CatEnabled {
-		t.Errorf("school/cat switches must default true: %+v", s)
+	if !s.LimitedEnabled || !s.CatEnabled {
+		t.Errorf("limited/cat switches must default true: %+v", s)
 	}
 }
 
@@ -78,8 +78,8 @@ func TestNormalizeScheduleEmptyHoursFallback(t *testing.T) {
 	if len(s.ActivityHours) != 1 || s.ActivityHours[0] != 10 {
 		t.Errorf("activity_hours=%v want [10]", s.ActivityHours)
 	}
-	if len(s.SchoolHours) != 1 || s.SchoolHours[0] != 12 {
-		t.Errorf("school_hours=%v want [12]", s.SchoolHours)
+	if len(s.LimitedHours) != 1 || s.LimitedHours[0] != 12 {
+		t.Errorf("limited_hours=%v want [12]", s.LimitedHours)
 	}
 	if len(s.CatHours) != 1 || s.CatHours[0] != 1 {
 		t.Errorf("cat_hours=%v want [1]", s.CatHours)
@@ -97,8 +97,8 @@ func TestNormalizeScheduleInvalidHour(t *testing.T) {
 		{Schedule{KeepaliveHours: []int{24}}, "keepalive_enabled"},
 		{Schedule{TravelHours: []int{-1}}, "travel_enabled"},
 		{Schedule{ActivityHours: []int{24}}, "activity_enabled"},
-		{Schedule{SchoolHours: []int{25}}, "school_enabled"},
-		{Schedule{SchoolHours: []int{-1}}, "school_enabled"},
+		{Schedule{LimitedHours: []int{25}}, "limited_enabled"},
+		{Schedule{LimitedHours: []int{-1}}, "limited_enabled"},
 		{Schedule{CatHours: []int{24}}, "cat_enabled"},
 		{Schedule{CatHours: []int{-1}}, "cat_enabled"},
 	}

@@ -286,18 +286,18 @@ func main() {
 		TravelHours:            cfg.Schedule.TravelHours,
 		ActivityHours:          cfg.Schedule.ActivityHours,
 		KeepaliveHours:         cfg.Schedule.KeepaliveHours,
-		SchoolHours:            cfg.Schedule.SchoolHours,
 		CatHours:               cfg.Schedule.CatHours,
 		GrowthHours:            cfg.Schedule.GrowthHours,
+		LimitedHours:           cfg.Schedule.LimitedHours,
 		ActivityReportCount:    cfg.Schedule.ActivityReportCount,
 		ExpiringSoonWindow:     cfg.ExpiringSoonDur, // 快过期积分优先消耗（issue:积分过期）
 		CheckinDisabled:        !cfg.Schedule.CheckinEnabled,
 		TravelDisabled:         !cfg.Schedule.TravelEnabled,
 		ActivityDisabled:       !cfg.Schedule.ActivityEnabled,
 		KeepaliveDisabled:      !cfg.Schedule.KeepaliveEnabled,
-		SchoolDisabled:         !cfg.Schedule.SchoolEnabled,
 		CatDisabled:            !cfg.Schedule.CatEnabled,
 		GrowthDisabled:         !cfg.Schedule.GrowthEnabled,
+		LimitedDisabled:        !cfg.Schedule.LimitedEnabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -322,11 +322,6 @@ func main() {
 	} else {
 		log.Printf("token 保活已启用：%v 点", cfg.Schedule.KeepaliveHours)
 	}
-	if !cfg.Schedule.SchoolEnabled {
-		log.Printf("开学季任务已禁用（schedule.school_enabled=false）")
-	} else {
-		log.Printf("开学季任务已启用：%v 点（school_open_day_2026.py ALL --run --yes）", cfg.Schedule.SchoolHours)
-	}
 	if !cfg.Schedule.CatEnabled {
 		log.Printf("夜猫子任务已禁用（schedule.cat_enabled=false）")
 	} else {
@@ -336,6 +331,11 @@ func main() {
 		log.Printf("成长任务补跑已禁用（schedule.growth_enabled=false）")
 	} else {
 		log.Printf("成长任务补跑已启用：%v 点（task_runner.py ALL --yes，幂等：已领/已达标逐项跳过）", cfg.Schedule.GrowthHours)
+	}
+	if !cfg.Schedule.LimitedEnabled {
+		log.Printf("限时活动任务已禁用（schedule.limited_enabled=false）")
+	} else {
+		log.Printf("限时活动任务已启用：%v 点（task_runner.py ALL --yes --limited，活动过期后脚本侧自动跳过）", cfg.Schedule.LimitedHours)
 	}
 	// 两类扰动的启动回执：只报"开了多大"，不报 seed。
 	if cfg.Schedule.RandomDelayMinutes > 0 {

@@ -37,7 +37,6 @@ type Config struct {
 	TravelHours     []int // 默认 [9,21]：一趟派出 + 一趟领奖闭环
 	ActivityHours   []int // 默认 [10]
 	KeepaliveHours  []int // 默认 [22]
-	SchoolHours     []int // 默认 [12]：开学季任务（迁移自系统 crontab）
 	CatHours        []int // 默认 [1]：夜猫子任务（迁移自系统 crontab）
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
@@ -57,8 +56,6 @@ type Config struct {
 	ActivityDisabled bool
 	// KeepaliveDisabled 显式关闭 token 保活排程（schedule.keepalive_enabled=false）。
 	KeepaliveDisabled bool
-	// SchoolDisabled 显式关闭开学季任务排程（schedule.school_enabled=false）。
-	SchoolDisabled bool
 	// CatDisabled 显式关闭夜猫子任务排程（schedule.cat_enabled=false）。
 	CatDisabled bool
 	// GrowthHours 成长任务补跑时点：默认 [8]。task_runner.py 是幂等脚本（已
@@ -68,6 +65,13 @@ type Config struct {
 	GrowthHours []int
 	// GrowthDisabled 显式关闭成长任务补跑（schedule.growth_enabled=false）。
 	GrowthDisabled bool
+	// LimitedHours 限时活动任务时点：默认 [12]。这类任务带 valid_end，脚本侧
+	// 过期即整体跳过，排程无需感知活动下线时刻。
+	// 取代了原来的开学季排程（school_open_day_2026.py）：开学季本身也是一次性
+	// 限时活动，活动结束后不该再占一个固定排程，改由本类统一承载。
+	LimitedHours []int
+	// LimitedDisabled 显式关闭限时活动任务排程（schedule.limited_enabled=false）。
+	LimitedDisabled bool
 }
 
 // Scheduler 调度器。
@@ -103,14 +107,14 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.KeepaliveHours) == 0 {
 		cfg.KeepaliveHours = []int{22}
 	}
-	if len(cfg.SchoolHours) == 0 {
-		cfg.SchoolHours = []int{12}
-	}
 	if len(cfg.CatHours) == 0 {
 		cfg.CatHours = []int{1}
 	}
 	if len(cfg.GrowthHours) == 0 {
 		cfg.GrowthHours = []int{8}
+	}
+	if len(cfg.LimitedHours) == 0 {
+		cfg.LimitedHours = []int{12}
 	}
 	// 0/缺省 = 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if cfg.ActivityReportCount <= 0 {
@@ -168,9 +172,9 @@ const (
 	taskTravel
 	taskActivity
 	taskKeepalive
-	taskSchool
 	taskCat
 	taskGrowth
+	taskLimited
 )
 
 // String 返回任务类型的短名，供批次日志行按名字展示（缺省 %v 打出来是数字，
@@ -185,12 +189,12 @@ func (k taskKind) String() string {
 		return "activity"
 	case taskKeepalive:
 		return "keepalive"
-	case taskSchool:
-		return "school"
 	case taskCat:
 		return "cat"
 	case taskGrowth:
 		return "growth"
+	case taskLimited:
+		return "limited"
 	}
 	return "unknown"
 }
@@ -216,14 +220,14 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	if !s.cfg.KeepaliveDisabled {
 		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.KeepaliveHours, taskKeepalive), taskKeepalive})
 	}
-	if !s.cfg.SchoolDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.SchoolHours, taskSchool), taskSchool})
-	}
 	if !s.cfg.CatDisabled {
 		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.CatHours, taskCat), taskCat})
 	}
 	if !s.cfg.GrowthDisabled {
 		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.GrowthHours, taskGrowth), taskGrowth})
+	}
+	if !s.cfg.LimitedDisabled {
+		slots = append(slots, slot{s.nextScheduledFire(now, s.cfg.LimitedHours, taskLimited), taskLimited})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -381,7 +385,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 	wg.Wait()
 }
 
-// dispatch 按任务类型分发到对应执行函数。脚本类（school/cat）失败只记 WARN、
+// dispatch 按任务类型分发到对应执行函数。脚本类（cat/growth/limited）失败只记 WARN、
 // 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
 // ctx 传导给带账号间限速的遍历（取消时立即放弃剩余账号），纯脚本类任务不感知。
 //
@@ -398,12 +402,12 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
 		s.runActivity(ctx)
 	case taskKeepalive:
 		s.runKeepaliveNow(ctx)
-	case taskSchool:
-		s.runSchoolNow(ctx)
 	case taskCat:
 		s.runCatNow(ctx)
 	case taskGrowth:
 		s.runGrowthTasksNow(ctx)
+	case taskLimited:
+		s.runLimitedTasksNow(ctx)
 	}
 }
 
