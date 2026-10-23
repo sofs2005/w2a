@@ -541,7 +541,9 @@ proxy_set_header X-Forwarded-Proto $scheme;
 校验按**主机名**比较（忽略协议与端口），故 `https` 入口 + `http` 后端、代理丢端口
 都不影响。若代理完全不透传任何主机头，可用 `WBGUI_ALLOWED_ORIGINS` 显式列出域名兜底
 （对应面板配置项 `allowed_origins`）。完整示例见
-[`panel/deploy/nginx.conf.example`](panel/deploy/nginx.conf.example)。
+[`panel/deploy/nginx.conf.example`](panel/deploy/nginx.conf.example) —— 注意它是**上游双服务
+形态**的示例（网关与面板各一个 upstream，面板那段转发到 `:8787`）；本项目面板与网关
+同端口，只需保留网关那一段，把面板段删掉或直接与网关 upstream 合并。
 
 **已知差异**
 
@@ -778,7 +780,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 | 引入方式 | `git subtree`，落在本仓库 `panel/` 目录（保留作者提交历史） |
 | 引入版本 | 面板提交 `9413e70`（2026-09-19 同步；初始引入为 `209d111`） |
 | 开源协议 | MIT（`panel/LICENSE`），与本项目一致 |
-| 面板文档 | [`panel/README.md`](panel/README.md)（作者原文，未改动） |
+| 面板文档 | [`panel/README.md`](panel/README.md)（作者原文；仅在开头加了一段本 fork 的部署方式说明） |
 
 面板的作者与版权归原作者所有。本项目对其做了「改造成同进程同端口」的适配性修改，
 **未改变其功能语义**；原项目的单独部署方式（独立容器 + 独立端口）在其原仓库中依然可用。

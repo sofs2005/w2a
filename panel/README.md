@@ -3,6 +3,12 @@
   <sub>给 <a href="https://github.com/287775856/workbuddy2api">workbuddy2api</a> 网关配的可视化控制台</sub>
 </p>
 
+> **本 fork 的部署方式与下文「快速开始」不同（2026-10-23 注）**：面板在本仓库是
+> **与网关同进程、同端口**运行的，不单独起容器。`Dockerfile` 与 `docker-compose.yml`
+> 已被删除，下文「方式一：Docker Compose」以及 `:8787` 端口相关描述**仅适用于上游
+> 原仓库的独立部署形态**。本仓库的部署请见根目录
+> [`README.md`](../README.md)；面板改动清单见 [`HOST-PATCHES.md`](HOST-PATCHES.md)。
+
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white&style=flat-square">

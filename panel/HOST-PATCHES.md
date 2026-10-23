@@ -585,6 +585,33 @@ handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与�
 **恢复方式**：若将来面板重新独立部署并挂上 docker.sock，按 git 历史找回该页与
 `host/host.go` 的旧注释即可；后端能力一直在，页面上重新接线即可。
 
+## 17. 删除独立部署的 `Dockerfile` 与 `docker-compose.yml`（**删除类改动**）
+
+**动机**：本 fork 只做**同进程、同端口**的合并部署，面板由根 `Dockerfile` 的第二阶段
+（`golang:1.26-alpine`）一起编译，前端产物在根 `Dockerfile` 的第一阶段（`node:20-alpine`）
+构建后覆盖进 `panel/internal/webui/dist`。面板自带的这两个文件是上游「独立容器 + 8787
+端口」形态的产物，本仓库**没有任何地方引用**（根 compose、三个 workflow、文档均不指向它们）。
+
+更关键的是它们已经**不能用**：`panel/Dockerfile` 是 `golang:1.23-alpine`，而
+`panel/go.mod` 声明 `go 1.26`——go1.23 工具链读到这个指令会直接报
+`requires go >= 1.26`，构建必然失败。留着只会误导：有人照 `panel/README.md`
+「方式一：Docker Compose（推荐）」操作，得到的是一个必定报错的构建。
+
+**改动**：删除 `panel/Dockerfile`、`panel/docker-compose.yml`。
+
+**为什么不会影响 `git subtree pull`**：这两个文件自引入（`498582a2`）后本仓库从未修改过，
+删除行为登记在拉取的上游历史里，下次 `subtree pull` 时 git 会按上游内容正常处理，
+不产生额外冲突。若上游继续更新它们，pull 后按需再删一次即可（本条即是检查项）。
+
+**刻意保留**：
+
+- `panel/deploy/nginx.conf.example` —— 根 README 的反向代理章节仍引用它，但那份示例是
+  **双服务形态**（`wb2a_gateway` + `wb2a_panel` 两个 upstream，第二段代理到 `127.0.0.1:8787`），
+  与本 fork 的单端口形态不符，按「合并部署只有一个后端」改写后才能直接用。
+- `panel/config.example.json` —— 面板代码的报错信息会引用它（`internal/config`），
+  且它是 `WBGUI_*` 之外唯一的配置项说明书。
+- `panel/README.md` —— 上游原文，保持原样以便随时对照（见根 README「出处与许可」）。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
