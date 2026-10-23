@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go W2A 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -421,7 +421,7 @@ func main() {
 	} else {
 		log.Printf("global realm 已禁用（config global.enabled=false，纯 CN）")
 	}
-	log.Printf("workbuddy2api listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
+	log.Printf("w2a listening on %s (api_key=%v)", cfg.Listen, cfg.APIKey != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("http: %v", err)
 	}

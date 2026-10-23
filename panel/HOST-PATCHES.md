@@ -1,4 +1,4 @@
-# 合并进 workbuddy2api 时对面板源码的改动
+# 合并进 W2A 时对面板源码的改动
 
 本目录（`panel/`）由 `git subtree` 引入自
 [`287775856/workbuddy2api-gui`](https://github.com/287775856/workbuddy2api-gui)。

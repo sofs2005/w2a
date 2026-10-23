@@ -41,9 +41,9 @@ export default function Login({
         <ThemeSwitch />
       </div>
       <div className="login-card">
-        <div className="login-logo">WB</div>
-        <h1>WorkBuddy 控制台</h1>
-        <div className="sub">workbuddy2api 网关管理面板</div>
+        <div className="login-logo">W2A</div>
+        <h1>W2A 控制台</h1>
+        <div className="sub">W2A 网关管理面板</div>
 
         {banner && <Alert kind="warn" onClose={onCloseBanner}>{banner}</Alert>}
         {error && <Alert kind="error">{error}</Alert>}
@@ -83,7 +83,7 @@ export default function Login({
 
         {info?.using_default_password && (
           <Alert kind="info">
-            当前使用默认口令 <span className="mono">admin / workbuddy</span>。首次登录后请修改：在服务端配置文件中设置
+            当前使用默认口令 <span className="mono">admin / w2a</span>。首次登录后请修改：在服务端配置文件中设置
             <span className="mono"> ui.username / ui.password</span>，或设置环境变量
             <span className="mono"> WBGUI_PASSWORD</span>。
           </Alert>

@@ -80,7 +80,7 @@ const wafCooldownBase = 60 * time.Second
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
-const ServiceName = "workbuddy2api"
+const ServiceName = "w2a"
 
 // dumpReqMinBytes WB2A_DUMP_REQ 调试落盘的"大请求"固定阈值（4MB）。原判断是
 // 「超过 max_body_mb 上限一半」，max_body_mb 移除后改为固定值，语义不变：
@@ -447,7 +447,7 @@ func (h *Handler) modelList() []map[string]any {
 			"id":       id,
 			"object":   "model",
 			"created":  1753600000,
-			"owned_by": "workbuddy",
+			"owned_by": "w2a",
 		}
 		// context_length / max_output_tokens 四级查找（upstream.context_catalog +
 		// model_catalog）：上游动态值（maxInputTokens/maxOutputTokens）权威 → 静态
@@ -495,7 +495,7 @@ func (h *Handler) modelList() []map[string]any {
 				"id":       id,
 				"object":   "model",
 				"created":  1753600000,
-				"owned_by": "workbuddy",
+				"owned_by": "w2a",
 			}
 			// context_length / max_output_tokens 四级查找（upstream.model_catalog，
 			// 与 CN 动态分支同口径）：探测富条目真实值权威 → 静态种子表 →
@@ -545,7 +545,7 @@ func (h *Handler) modelList() []map[string]any {
 				"id":             e.Name,
 				"object":         "model",
 				"created":        1753600000,
-				"owned_by":       "workbuddy",
+				"owned_by":       "w2a",
 				"aliased":        true,
 				"context_length": upstream.ContextWindowListingV4(e.Name, 0, h.config().Upstream.ModelsDevHTTP()),
 			})

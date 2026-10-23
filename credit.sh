@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# credit.sh — WorkBuddy 积分日报（默认美化输出）
+# credit.sh — W2A 积分日报（默认美化输出）
 #
 # 用法:
 #   ./credit.sh            # 人类可读日报

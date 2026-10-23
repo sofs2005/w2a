@@ -2,12 +2,12 @@ services:
   wb2api:
     # 已发布镜像（master 推送后由 .github/workflows/docker.yml 自动构建推送）
     # 镜像名必须是 ghcr.io/<owner>/<repo>：CI 用 ghcr.io/${{ github.repository }} 推导，
-    # 仓库改名为 w2a 后推送目标随之变为 .../w2a。此处若留着旧名 workbuddy2api，
+    # 仓库改名为 w2a 后推送目标随之变为 .../w2a。此处若留着旧名，
     # 会静默拉回改名前的旧镜像（旧包仍在 GHCR 上，pull 不会报错）。
     image: ghcr.io/sofs2005/w2a:latest
     # 保留 build 段：想从源码本地构建时用 docker compose up -d --build
     build: .
-    container_name: workbuddy2api
+    container_name: w2a
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
@@ -15,7 +15,7 @@ services:
       # 面板与网关同进程、同端口，浏览器访问 http://<地址>:7863 即可打开。
       #
       # ⚠️ 面板持有全部账号凭据（accessToken / refreshToken），且与 API 同端口暴露。
-      #    不设置口令时面板以默认的 admin/workbuddy 启动 —— 等于把账号控制权公开。
+      #    不设置口令时面板以默认的 admin/w2a 启动 —— 等于把账号控制权公开。
       #    这里用 `${WBGUI_PASSWORD:?...}` 强制要求：未设置则 compose 直接报错退出，
       #    而不是带着弱口令静默起来。
       #

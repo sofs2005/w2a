@@ -1,4 +1,4 @@
-// main.go — WorkBuddy OAuth 登录 CLI（子命令分发 + 单命令交互式流程）。
+// main.go — W2A OAuth 登录 CLI（子命令分发 + 单命令交互式流程）。
 //
 // 子命令：
 //
@@ -61,7 +61,7 @@ const (
 )
 
 // usage 帮助文本（-h / --help / help）。
-const usage = `WorkBuddy OAuth 登录
+const usage = `W2A OAuth 登录
 
 用法:
   login [--realm=cn|global]          单命令完成登录（默认，容器内推荐）
@@ -263,7 +263,7 @@ func runOnce(base, origin, realm string, client *http.Client) {
 	}
 
 	fmt.Fprintln(out, "============================================================")
-	fmt.Fprintln(out, "  WorkBuddy OAuth 登录")
+	fmt.Fprintln(out, "  W2A OAuth 登录")
 	fmt.Fprintln(out, "============================================================")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "请在浏览器中打开以下链接完成登录：")

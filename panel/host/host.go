@@ -187,7 +187,7 @@ func New(opts Options) (http.Handler, error) {
 	log.Printf("  网关配置:   %s", pcfg.UpstreamConfigFile)
 	log.Printf("  数据目录:   %s（备份 %s、凭据 %s）", dataDir, pcfg.BackupDir, pcfg.CredentialsFile)
 	if pcfg.UsingDefaultPassword() {
-		log.Printf("  ⚠️  面板正在使用默认口令（admin/workbuddy），请立即在 WBGUI_PASSWORD 中修改")
+		log.Printf("  ⚠️  面板正在使用默认口令（admin/w2a），请立即在 WBGUI_PASSWORD 中修改")
 	}
 	if pcfg.ReadOnly {
 		log.Printf("  面板为只读模式（WBGUI_READ_ONLY=true），一切写操作已关闭")

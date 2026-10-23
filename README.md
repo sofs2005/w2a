@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
+  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="W2A" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API</h1>
+<h1 align="center">W2A</h1>
 
 <p align="center">
   <b>把 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
@@ -21,7 +21,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
+W2A 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
 
 ### 交流群组
 - [@checkinHome](https://t.me/checkinHome)
@@ -63,7 +63,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容上游网关**，将 ```CodeB
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
-📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)。
+📖 完整文档见 [GitHub Wiki](https://github.com/sofs2005/w2a/wiki)。
 
 ## 核心能力
 
@@ -262,7 +262,7 @@ flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> ROOT
     Browser["浏览器\n管理控制台"] --> ROOT
 
-    subgraph GWI["WorkBuddy2API 网关 :7863（单进程单端口）"]
+    subgraph GWI["W2A 网关 :7863（单进程单端口）"]
         ROOT["根 mux\n/v1/* /status /healthz → 网关\n其余 → 面板"] --> H
         ROOT --> PANEL
         H["HTTP Handler\n鉴权 · 提示词改写 · 轮转"] --> P
@@ -417,9 +417,9 @@ go build -trimpath -ldflags="-s -w" -o credit.exe ./cmd/credit
 使用仓库自带脚本在后台启停并查看状态：
 
 ```powershell
-.\start-workbuddy2api.cmd
-.\status-workbuddy2api.cmd
-.\stop-workbuddy2api.cmd
+.\start-w2a.cmd
+.\status-w2a.cmd
+.\stop-w2a.cmd
 ```
 
 PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.out.log`、
@@ -434,7 +434,7 @@ PID 写入 `wb2api.pid`，标准输出与错误日志分别写入 `data/server.o
 ```bash
 # 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
 curl -s http://localhost:7863/healthz
-# {"healthy":2,"total":3,"service":"workbuddy2api"}
+# {"healthy":2,"total":3,"service":"w2a"}
 
 # 面板已挂载（免登录可调，不含敏感信息）
 curl -s http://localhost:7863/api/session
@@ -465,7 +465,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 浏览器打开 `http://<服务器地址>:7863` 即可进入 Web 控制台（与 API 同端口，无需另开端口）。
 
-**首次登录**：用户名 `admin`，口令默认 `workbuddy`。
+**首次登录**：用户名 `admin`，口令默认 `w2a`。
 
 > ⚠️ **请立刻修改默认口令**。面板能读到账号的 `accessToken` / `refreshToken`，等同于账号完全控制权。
 > 在 `docker-compose.yml` 里设置 `WBGUI_PASSWORD`，或登录后在「系统」页网页改密码（改后吊销全部会话）。
@@ -515,7 +515,7 @@ curl -s -H "Authorization: Bearer $API_KEY" http://localhost:7863/status | grep 
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `WBGUI_PASSWORD` | `workbuddy` | 面板登录口令（**务必修改**） |
+| `WBGUI_PASSWORD` | `w2a` | 面板登录口令（**务必修改**） |
 | `WBGUI_USERNAME` | `admin` | 面板登录用户名 |
 | `WBGUI_SESSION_TTL` | `12h` | 会话有效期 |
 | `WBGUI_READ_ONLY` | `false` | `true` = 全局只读，关闭一切写操作（仅监控场景） |
@@ -574,13 +574,13 @@ docker compose pull && docker compose up -d
 > 先确认挂载现状：
 >
 > ```bash
-> docker inspect workbuddy2api --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+> docker inspect w2a --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
 > ```
 >
 > 出现 `-> /app/config.json`（旧路径）就按下述步骤迁移：
 >
 > ```bash
-> cd /vol1/1000/workbuddy2api          # 换成你的实际部署目录
+> cd /vol1/1000/w2a          # 换成你的实际部署目录
 > mkdir -p config
 > cp config.json config/config.json    # 把真配置搬到新路径
 > # 编辑 docker-compose.yml：把 `- ./config.json:/app/config.json` 改成 `- ./config:/app/config`
@@ -727,12 +727,12 @@ CLI 同版 2.161.0），**绝不能互相套用**。
 6. 部署后核对容器里跑的是新构建（同名旧镜像仍可拉、`pull` 不报错，是历史事故）：
 
    ```bash
-   docker exec workbuddy2api sh -c \
+   docker exec w2a sh -c \
      'for k in X-Machine-ID X-Agent-Intent 5.8.4; do echo "$k $(grep -ao "$k" /app/wb2api | wc -l)"; done'
    ```
 
    新构建：`X-Machine-ID` 为 0、`X-Agent-Intent` ≥1、`5.8.4` ≥1。更严格的做法是对比
-   `docker inspect -f '{{.Image}}' workbuddy2api` 与 `ghcr.io/sofs2005/w2a:latest`
+   `docker inspect -f '{{.Image}}' w2a` 与 `ghcr.io/sofs2005/w2a:latest`
    的 manifest digest。
 
 ### 源码构建

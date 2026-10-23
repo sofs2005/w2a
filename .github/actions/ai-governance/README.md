@@ -1,6 +1,6 @@
 # AI Issue Governance
 
-GitHub Action：把 NoMore Spam 改造成面向本仓库（workbuddy2api）的 **AI Issue 治理** action——
+GitHub Action：把 NoMore Spam 改造成面向本仓库（W2A）的 **AI Issue 治理** action——
 在保留上游「垃圾检测 / README 覆盖 / 内容分级」能力的基础上，新增**要点提炼 + canonical 归并 + 规范化重开**。
 
 > 上游：<https://github.com/JohnsonRan/nomore-spam>（MIT，本目录 `LICENSE` 保留其版权声明）。

@@ -16,10 +16,10 @@ import json, os, time, glob, random, urllib.request, urllib.error
 
 
 def _resolve_auths_dir() -> str:
-    """解析 auths 凭证目录：WB2A_AUTHS > 仓库根 auths/ > /root/workbuddy2api/auths 兜底。
+    """解析 auths 凭证目录：WB2A_AUTHS > 仓库根 auths/ > /root/w2a/auths 兜底。
 
     env 显式覆盖最优先；本地仓库 auths/ 按 __file__ 自定位（脚本位于 scripts/ 下，
-    仓库根为其上两级），非 Linux 部署（auth 不在 /root/workbuddy2api）自动回落
+    仓库根为其上两级），非 Linux 部署（auth 不在 /root/w2a）自动回落
     本地 auths/；兜底保持 Linux 服务器行为不变。
     """
     env = os.environ.get("WB2A_AUTHS")
@@ -28,7 +28,7 @@ def _resolve_auths_dir() -> str:
     local = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "auths")
     if os.path.isdir(local):
         return local
-    return "/root/workbuddy2api/auths"
+    return "/root/w2a/auths"
 
 
 AUTHS = _resolve_auths_dir()

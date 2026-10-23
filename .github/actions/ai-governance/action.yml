@@ -1,6 +1,6 @@
 name: 'AI Issue Governance'
 description: 'AI 驱动的 issue 治理：垃圾检测、要点提炼、canonical 归并、规范化重开（源自 NoMore Spam，MIT）'
-author: 'workbuddy2api contributors (基于 JohnsonRan/nomore-spam)'
+author: 'W2A contributors (基于 JohnsonRan/nomore-spam)'
 branding:
   icon: 'shield'
   color: 'blue'

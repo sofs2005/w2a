@@ -218,10 +218,10 @@ func (c *Client) Health(ctx context.Context) (*Health, error) {
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var h Health
 	if err := json.Unmarshal(raw, &h); err != nil {
-		return nil, fmt.Errorf("网关 /healthz 响应无法解析（可能不是 workbuddy2api）: %w", err)
+		return nil, fmt.Errorf("网关 /healthz 响应无法解析（可能不是 W2A）: %w", err)
 	}
-	if h.Service != "workbuddy2api" {
-		return nil, fmt.Errorf("端口上的服务不是 workbuddy2api（service=%q）", h.Service)
+	if h.Service != "w2a" {
+		return nil, fmt.Errorf("端口上的服务不是 W2A（service=%q）", h.Service)
 	}
 	return &h, nil
 }

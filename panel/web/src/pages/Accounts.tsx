@@ -861,7 +861,7 @@ function ImportDialog({
           onChange={(e) => setRaw(e.target.value)}
           placeholder={`支持两种格式：
 
-1) workbuddy2api / 插件的嵌套格式（推荐，直接 cat auths/workbuddy-*.json 的内容）：
+1) W2A / 插件的嵌套格式（推荐，直接 cat auths/workbuddy-*.json 的内容）：
 {
   "account": { "uid": "...", "enterpriseId": "", "nickname": "..." },
   "auth": { "accessToken": "...", "refreshToken": "...", "expiresAt": 1794289203, "domain": "copilot.tencent.com" }

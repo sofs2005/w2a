@@ -127,14 +127,14 @@ func Default() *Config {
 		UpstreamConfigFile:   base + "/config.json",
 		BackupDir:            "./data/backups",
 		CredentialsFile:      "",
-		DockerContainer:      "workbuddy2api",
+		DockerContainer:      "w2a",
 		DangerousOps:         false,
 		ReadOnly:             false,
 		RefreshConfigOnLogin: true,
 		TimeoutSeconds:       120,
 		UI: UIConfig{
 			Username:   "admin",
-			Password:   "workbuddy",
+			Password:   "w2a",
 			SessionTTL: "12h",
 		},
 	}
@@ -142,7 +142,7 @@ func Default() *Config {
 
 // detectDeployDir 探测 workbuddy2api 网关部署目录。
 func detectDeployDir() string {
-	for _, p := range []string{"/root/workbuddy2api", "./workbuddy2api", ".."} {
+	for _, p := range []string{"/root/w2a", "./w2a", ".."} {
 		if st, err := os.Stat(p); err == nil && st.IsDir() {
 			if _, err := os.Stat(p + "/config.json"); err == nil {
 				return p
@@ -197,7 +197,7 @@ func rejectGatewayConfig(path string, raw []byte) error {
 		return nil
 	}
 	return fmt.Errorf(
-		"%s 看起来是 workbuddy2api 网关的配置文件，而不是本面板的配置。\n"+
+		"%s 看起来是 W2A 网关的配置文件，而不是本面板的配置。\n"+
 			"面板与网关的配置是两份不同的文件：\n"+
 			"  · 面板配置（本文件）应包含 listen / gateway_url / ui 等字段\n"+
 			"  · 网关配置请通过配置里的 \"config_file\" 字段指向（供「网关配置」页在线编辑）\n"+
@@ -281,7 +281,7 @@ func (c *Config) normalize() error {
 		c.UI.Username = "admin"
 	}
 	if c.UI.Password == "" {
-		c.UI.Password = "workbuddy"
+		c.UI.Password = "w2a"
 	}
 	if c.UI.SessionTTL == "" {
 		c.UI.SessionTTL = "12h"
@@ -304,7 +304,7 @@ func (c *Config) Timeout() time.Duration {
 
 // UsingDefaultPassword 报告是否仍在用内置默认口令（用于前端安全横幅）。
 func (c *Config) UsingDefaultPassword() bool {
-	return c.UI.Username == "admin" && c.UI.Password == "workbuddy"
+	return c.UI.Username == "admin" && c.UI.Password == "w2a"
 }
 
 // ReadOnlyReason 返回只读原因文案；可写时返回空串。

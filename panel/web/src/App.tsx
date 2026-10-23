@@ -109,7 +109,7 @@ function Shell({
   const warnings = useMemo(() => {
     const list: string[] = []
     if (session.using_default_password) {
-      list.push('面板正在使用默认口令（admin / workbuddy），建议在服务端配置中修改 ui.password')
+      list.push('面板正在使用默认口令（admin / w2a），建议在服务端配置中修改 ui.password')
     }
     if (session.read_only) {
       list.push('服务端处于只读模式：登录、签到、改配置等写操作全部禁用')
@@ -121,10 +121,10 @@ function Shell({
     <div className="app">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-dot">WB</div>
+          <div className="brand-dot">W2A</div>
           <div className="brand-text">
-            <strong>WorkBuddy 控制台</strong>
-            <span>workbuddy2api 网关</span>
+            <strong>W2A 控制台</strong>
+            <span>W2A 网关</span>
           </div>
         </div>
         {NAV.map((item) => (

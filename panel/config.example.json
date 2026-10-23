@@ -2,22 +2,22 @@
   "listen": ":8787",
   "gateway_url": "http://127.0.0.1:7863",
   "gateway_api_key": "",
-  "auth_dir": "/root/workbuddy2api/auths",
+  "auth_dir": "/root/w2a/auths",
   "auth_owner_uid": -1,
   "auth_owner_gid": -1,
-  "config_file": "/root/workbuddy2api/config.json",
+  "config_file": "/root/w2a/config.json",
   "alias_file": "",
   "backup_dir": "./data/backups",
   "credentials_file": "./data/credentials.json",
   "allowed_origins": [],
-  "docker_container": "workbuddy2api",
+  "docker_container": "w2a",
   "dangerous_ops": false,
   "read_only": false,
   "refresh_config_on_login": true,
   "timeout_seconds": 120,
   "ui": {
     "username": "admin",
-    "password": "workbuddy",
+    "password": "w2a",
     "session_ttl": "12h"
   }
 }

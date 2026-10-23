@@ -10,8 +10,8 @@
 #
 # 推荐 crontab（已查本机：`cat /etc/timezone`→Asia/Shanghai，`date`→CST，系统时钟即 CST，crontab 直接用本地时间）：
 #
-#   0 12 * * *  root /root/workbuddy2api/scripts/school_open_day_cron.sh school
-#   0  1 * * *  root /root/workbuddy2api/scripts/school_open_day_cron.sh cat
+#   0 12 * * *  root /root/w2a/scripts/school_open_day_cron.sh school
+#   0  1 * * *  root /root/w2a/scripts/school_open_day_cron.sh cat
 #
 # 若部署到 UTC 主机，两行整体 -8 小时：12:00 CST = 04:00 UTC，01:00 CST = 17:00 UTC（前一日）。
 #

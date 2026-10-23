@@ -71,7 +71,7 @@ export default function Dashboard() {
           <strong>无法连接网关（{ov.gateway_url}）</strong>
           <div style={{ marginTop: 4 }}>{ov.gateway_error}</div>
           <div style={{ marginTop: 6, fontSize: 12.5 }} className="text-dim">
-            请确认 workbuddy2api 容器正在运行（<span className="mono">docker ps</span>），且本面板的
+            请确认 W2A 容器正在运行（<span className="mono">docker ps</span>），且本面板的
             <span className="mono"> gateway_url </span>配置正确。
           </div>
         </Alert>
@@ -249,8 +249,8 @@ export default function Dashboard() {
               <dd className="mono">{ov.gateway_url}</dd>
               <dt>身份标识</dt>
               <dd>
-                {ov.health?.service === 'workbuddy2api' ? (
-                  <Badge cls="badge-ok">workbuddy2api 已确认</Badge>
+                {ov.health?.service === 'w2a' ? (
+                  <Badge cls="badge-ok">W2A 已确认</Badge>
                 ) : (
                   <Badge cls="badge-warn">未确认</Badge>
                 )}

@@ -283,7 +283,7 @@ jobs:
             # 的内容随最新构建变化，release notes 必须写明是哪次提交，否则无法追溯。
             title="最新构建 (master)"
             {
-              echo "## WorkBuddy2API 滚动构建"
+              echo "## W2A 滚动构建"
               echo
               echo "每次推送到 \`master\` 自动重建并覆盖本 Release。"
               echo "需要可追溯的固定版本请用 [版本 Release](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases)。"
@@ -306,7 +306,7 @@ jobs:
             TAG="$VERSION"
             title="$TAG"
             {
-              echo "## WorkBuddy2API ${VERSION}"
+              echo "## W2A ${VERSION}"
               echo
               echo "- commit: \`${COMMIT}\`"
               echo "- 构建时间: \`${BUILT_AT}\`"

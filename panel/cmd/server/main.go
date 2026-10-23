@@ -97,7 +97,7 @@ func main() {
 	log.Printf("  网关配置:   %s", cfg.UpstreamConfigFile)
 	log.Printf("  容器名:     %s（高危操作=%v，只读=%v）", orNone(cfg.DockerContainer), cfg.DangerousOps, cfg.ReadOnly)
 	if cfg.UsingDefaultPassword() {
-		log.Printf("  ⚠️  正在使用默认口令（admin/workbuddy），请尽快在配置文件或 WBGUI_PASSWORD 中修改")
+		log.Printf("  ⚠️  正在使用默认口令（admin/w2a），请尽快在配置文件或 WBGUI_PASSWORD 中修改")
 	}
 	if hc, err := gw.Health(ctx); err == nil {
 		log.Printf("  网关健康:   OK（账号 %d/%d 可用）", hc.Healthy, hc.Total)

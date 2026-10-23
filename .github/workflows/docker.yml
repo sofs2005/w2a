@@ -62,8 +62,8 @@ jobs:
             type=raw,value=latest,enable=true
             type=sha,enable=true,format=short,prefix=sha-
           labels: |
-            org.opencontainers.image.title=workbuddy2api
-            org.opencontainers.image.description=OpenAI-compatible reverse proxy for WorkBuddy CN
+            org.opencontainers.image.title=w2a
+            org.opencontainers.image.description=OpenAI-compatible reverse proxy gateway
             org.opencontainers.image.licenses=MIT
 
       # 先本地加载并冒烟：latest 一旦推上去就会被引流，不能在推之后才发现起不来

@@ -247,7 +247,7 @@ type Config struct {
 		//
 		// ⚠️ 本周期即「进程被强杀（SIGKILL / Windows taskkill /F / 容器 OOM）时的
 		// 状态丢失窗口」。Docker 下 docker stop 走 SIGTERM 优雅停机，不受影响；
-		// Windows 原生部署的 stop-workbuddy2api.cmd 用 taskkill /F，不触发信号处理。
+		// Windows 原生部署的 stop-w2a.cmd 用 taskkill /F，不触发信号处理。
 		StateFlush string `json:"state_flush"`
 	} `json:"pool"`
 

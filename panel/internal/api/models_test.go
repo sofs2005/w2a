@@ -21,9 +21,9 @@ import (
 func TestModelRealmsPassthrough(t *testing.T) {
 	// 与网关 modelList 输出同形：裸名 + realms 标注可用域。
 	raw := []byte(`{"data":[
-		{"id":"glm-5.2","object":"model","created":1,"owned_by":"workbuddy",
+		{"id":"glm-5.2","object":"model","created":1,"owned_by":"w2a",
 		 "context_length":1000000,"realms":["cn","global"]},
-		{"id":"hunyuan-only-cn","object":"model","created":1,"owned_by":"workbuddy",
+		{"id":"hunyuan-only-cn","object":"model","created":1,"owned_by":"w2a",
 		 "context_length":128000,"realms":["cn"]}
 	]}`)
 

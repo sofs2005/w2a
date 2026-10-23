@@ -1,6 +1,6 @@
 <p align="center">
-  <b>WorkBuddy2API Web GUI</b><br>
-  <sub>给 <a href="https://github.com/287775856/workbuddy2api">workbuddy2api</a> 网关配的可视化控制台</sub>
+  <b>W2A Web GUI</b><br>
+  <sub>给 W2A 网关配的可视化控制台</sub>
 </p>
 
 > **本 fork 的部署方式与下文「快速开始」不同（2026-10-23 注）**：面板在本仓库是
@@ -47,7 +47,7 @@
 | ➕ **添加账号** | 网页版 OAuth 设备授权，**支持国内版 / 国际版**：选择区域 → 生成授权链接 → 自动轮询 → 自动落盘 → 按配置自动重启网关加载 |
 | 💬 **聊天测试** | 模型下拉（动态拉取网关模型表）、流式/非流式、System Prompt、temperature/max_tokens、推理过程（reasoning_content）折叠展示、token 用量与 TTFB、会话 ID 开关（验证会话粘性） |
 | ⚙️ **网关配置** | 基础设置/定时任务/账号池冷却/上游超时/粘性开关/Redis 的分组表单，或直接编辑 JSON 源码；保存前自动备份原始文件，可一键恢复 |
-| 🔧 **系统** | 网关身份校验（`service=workbuddy2api`）、容器状态与健康检查、面板运行信息、**网页修改登录口令**、任务历史、客户端接入示例 |
+| 🔧 **系统** | 网关身份校验（`service=w2a`）、容器状态与健康检查、面板运行信息、**网页修改登录口令**、任务历史、客户端接入示例 |
 
 ### 国内版 / 国际版
 
@@ -87,10 +87,10 @@ vi docker-compose.yml
 docker compose up -d --build
 ```
 
-访问 `http://<服务器IP>:8787`，默认账号 `admin` / `workbuddy`（**请立即修改**）。
+访问 `http://<服务器IP>:8787`，默认账号 `admin` / `w2a`（**请立即修改**）。
 
 > 部署前确认 `docker-compose.yml` 里的挂载路径与你的网关部署位置一致。
-> 官方 README 的默认部署路径是 `/root/workbuddy2api`。
+> 官方 README 的默认部署路径是 `/root/w2a`。
 
 ### 方式二：本地直接运行
 
@@ -116,22 +116,22 @@ vi config.json            # 改 auth_dir / config_file / ui.password
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `listen` | `:8787` | 面板监听地址 |
-| `gateway_url` | `http://127.0.0.1:7863` | workbuddy2api 网关地址 |
+| `gateway_url` | `http://127.0.0.1:7863` | W2A 网关地址 |
 | `gateway_api_key` | 空 | 网关 `api_key`；**留空会自动从下面的 `config.json` 读取**，单机部署无需填写 |
 | `auth_dir` | 自动探测 | 网关账号凭证目录（`auths/`），面板直接读写 |
 | `auth_owner_uid` / `auth_owner_gid` | `-1` / `-1` | 落盘凭证后把属主改成该 uid/gid（`-1` = 不改）。**容器部署必设**为网关容器的运行用户，见下方 FAQ |
 | `config_file` | 自动探测 | 网关配置文件（`config.json`），供配置页读写 |
 | `backup_dir` | `./data/backups` | 配置备份目录；单文件挂载下备份会写到这里（见下方 FAQ） |
 | `credentials_file` | 空 | 面板登录凭据持久化文件，**网页改密码必需**（`config.json` 常为只读挂载）。留空则系统页的「修改密码」按钮禁用 |
-| `docker_container` | `workbuddy2api` | 网关容器名，供系统页查询/重启；留空则关闭重启能力 |
+| `docker_container` | `w2a` | 网关容器名，供系统页查询/重启；留空则关闭重启能力 |
 | `dangerous_ops` | `false` | 解锁删除账号 / 重启容器 / 恢复配置备份 |
 | `read_only` | `false` | 全局只读：关闭一切写操作 |
 | `refresh_config_on_login` | `true` | 网页登录成功后自动重启网关加载新账号（还需 `dangerous_ops`） |
 | `timeout_seconds` | `120` | 调用网关与上游的超时 |
-| `ui.username` / `ui.password` | `admin` / `workbuddy` | 面板登录凭据的**初始值**；网页改密码后会写入 `credentials_file` 并优先生效 |
+| `ui.username` / `ui.password` | `admin` / `w2a` | 面板登录凭据的**初始值**；网页改密码后会写入 `credentials_file` 并优先生效 |
 | `ui.session_ttl` | `12h` | 会话有效期 |
 
-`auth_dir` / `config_file` 留空或路径不存在时，启动时会自动在 `/root/workbuddy2api`、`./workbuddy2api`、`..` 中探测。
+`auth_dir` / `config_file` 留空或路径不存在时，启动时会自动在 `/root/w2a`、`./w2a`、`..` 中探测。
 
 ### 环境变量覆盖
 
@@ -149,7 +149,7 @@ vi config.json            # 改 auth_dir / config_file / ui.password
 
 **安全提示**：挂载 docker.sock 等价于把宿主机 Docker 控制权交给该容器（可通过它启动特权容器逃逸）。
 如果不需要一键重启能力，注释掉该挂载行即可 —— 面板会自动降级（系统页显示"Docker 不可用"），
-其余功能完全不受影响，重启网关改用命令行 `docker restart workbuddy2api`。
+其余功能完全不受影响，重启网关改用命令行 `docker restart w2a`。
 
 ## 🔌 API 接口
 
@@ -207,14 +207,14 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/tasks/checki
 │  wbgui（Go）:8787                                            │
 │  ├── api/        鉴权中间件 · REST 路由 · SSE 转发            │
 │  ├── ops/        账号聚合 · 批量任务 · OAuth 流程 · 配置读写   │
-│  ├── gateway/    HTTP 客户端 → workbuddy2api 的 /status 等    │
+│  ├── gateway/    HTTP 客户端 → W2A 的 /status 等    │
 │  ├── upstream/   直连腾讯 CodeBuddy（登录/签到/积分/旅行）     │
 │  └── authstore/  读写 auths/workbuddy-<uid>.json             │
 └──────┬──────────────────────┬───────────────────┬───────────┘
        │ HTTP API             │ 直读/写入         │ docker
        ▼                      ▼                   ▼
 ┌──────────────┐   ┌────────────────────┐   ┌──────────────┐
-│ workbuddy2api│   │ auths/*.json       │   │ 容器重启      │
+│ w2a          │   │ auths/*.json       │   │ 容器重启      │
 │   :7863      │   │ config.json        │   │ docker restart│
 └──────┬───────┘   └────────────────────┘   └──────────────┘
        │
@@ -237,7 +237,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/tasks/checki
 │   ├── api/                HTTP 接口层（鉴权 / 路由 / SSE 转发）
 │   ├── authstore/          凭证文件读写（原子写、uid 校验防穿越）
 │   ├── config/             面板自身配置
-│   ├── gateway/            workbuddy2api 网关客户端
+│   ├── gateway/            W2A 网关客户端
 │   ├── ops/                业务操作层（账号聚合、批量任务、OAuth、配置编辑、Docker）
 │   ├── upstream/           腾讯 CodeBuddy 直连客户端
 │   └── webui/              前端产物 embed + SPA 回落
@@ -323,7 +323,7 @@ cd web && npx tsc -b
    面板落盘后会自动 chown 成网关用户。**注意**：`10001` 是官方网关镜像的运行用户，
    若你改了镜像或 `user:`，请填实际值（`docker inspect <网关容器> --format '{{.Config.User}}'`）。
 2. **网关还没重新扫描目录**。网关只在启动时读 `auths/`，到「系统」页点「重启网关」，
-   或命令行 `docker restart workbuddy2api`。
+   或命令行 `docker restart w2a`。
 
 **Q：点了「重启网关」，账号还是没加载？**
 先看第 1 条。权限不对时，重启只是把同样的文件再跳过一遍 —— 这正是"重启无效"的原因。
@@ -337,7 +337,7 @@ cd web && npx tsc -b
 原地写入。功能不受影响，只是这一步不是原子的。若希望完全原子，可改为挂载整个目录：
 
 ```yaml
-- /root/workbuddy2api:/gateway   # 挂目录而非单文件
+- /root/w2a:/gateway   # 挂目录而非单文件
 ```
 
 **Q：备份文件在哪里？为什么不在 config.json 旁边？**
@@ -354,7 +354,7 @@ cd web && npx tsc -b
 
 ## ⚠️ 合规提示
 
-本项目是 workbuddy2api 的**管理界面**，不改变其性质：请仅用于**本人授权账号**的
+本项目是 W2A 的**管理界面**，不改变其性质：请仅用于**本人授权账号**的
 本机/私有环境测试。面板会读写账号凭证，请务必：
 
 - 修改默认口令，不要暴露到公网（如需公网访问，请置于 HTTPS 反代 + 强口令之后）；
@@ -363,4 +363,4 @@ cd web && npx tsc -b
 
 ## 📄 License
 
-与上游 workbuddy2api 保持一致（见 [LICENSE](LICENSE)）。
+与上游 W2A 保持一致（见 [LICENSE](LICENSE)）。

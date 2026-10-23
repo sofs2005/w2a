@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# login.sh — WorkBuddy OAuth 登录 → 落盘 auth 文件
+# login.sh — W2A OAuth 登录 → 落盘 auth 文件
 #
 # 用法:
 #   ./login.sh                 # 交互式选域（默认 1/国内版 cn）
@@ -13,12 +13,12 @@
 #   2. POST /v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
 #   3. 你在浏览器打开 URL 完成登录
 #   4. 回到这里按 y → poll 拿 token+uid+nickname → （仅 CN）签到 → 落盘 auths/workbuddy-<uid>.json
-#   5. 重启 workbuddy2api 容器加载新账号
+#   5. 重启 w2a 容器加载新账号
 set -euo pipefail
 
 cd "$(dirname "$0")"
 AUTH_DIR="./auths"
-CONTAINER="workbuddy2api"
+CONTAINER="${CONTAINER:-w2a}"
 
 mkdir -p "$AUTH_DIR" 2>/dev/null || true
 # ─── auths/ 可写性预检（issue #160）：chown -R 10001 后 host 侧 uid 无写权限，
@@ -60,7 +60,7 @@ fi
 # global 时跳过 CN 签到、auth 文件写 realm=global（见下方签到分支）
 
 echo "============================================================"
-echo "  WorkBuddy OAuth 登录"
+echo "  W2A OAuth 登录"
 echo "============================================================"
 echo ""
 

@@ -3,8 +3,8 @@
 // 用法（部署后手动触发）：
 //
 //	# 容器内：先 cp 进去再 exec
-//	docker cp activity-run workbuddy2api:/tmp/activity-run
-//	docker exec -w /app workbuddy2api /tmp/activity-run
+//	docker cp activity-run w2a:/tmp/activity-run
+//	docker exec -w /app w2a /tmp/activity-run
 //
 //	# 本地：在项目根目录（需 config.json + auths/ + data/）直接 run
 //	go run ./cmd/activity

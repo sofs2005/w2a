@@ -97,7 +97,7 @@ func TestRejectGatewayConfig(t *testing.T) {
 		t.Fatal("把网关配置当面板配置加载时应报错，但成功加载了")
 	}
 	// 错误信息要给出可操作的指引，而不只是"解析失败"。
-	for _, want := range []string{"workbuddy2api", "config_file"} {
+	for _, want := range []string{"W2A", "config_file"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("错误信息缺少指引 %q: %v", want, err)
 		}

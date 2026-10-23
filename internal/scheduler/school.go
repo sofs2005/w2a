@@ -22,7 +22,7 @@ import (
 	"sync"
 )
 
-// repoRoot 定位仓库根（容器内 /app、宿主 /root/workbuddy2api）。
+// repoRoot 定位仓库根（容器内 /app、宿主 /root/w2a）。
 // 策略：从当前工作目录逐级向上找 scripts/school_open_day_2026.py，
 // 找不到回落 os.Getwd()（此时 Run 会因脚本缺失打 WARN，不 panic）。
 // 注意：Go scheduler 在 cmd/server 内以工作目录启动（容器 WORKDIR /app），

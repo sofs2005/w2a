@@ -310,7 +310,7 @@ export default function LoginWizard({
         {manualUID && (
           <div className="muted-box" style={{ marginTop: 11 }}>
             {`# 在网关目录执行
-cd /root/workbuddy2api && ./login.sh
+cd /root/w2a && ./login.sh
 
 # 然后把凭证内容复制出来
 cat auths/workbuddy-<uid>.json`}

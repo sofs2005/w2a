@@ -18,7 +18,7 @@ if exist "%WB2API_PID_FILE%" (
   set /p WB2API_PID=<"%WB2API_PID_FILE%"
   powershell -NoProfile -Command "try { $p=Get-Process -Id ([int]$env:WB2API_PID) -ErrorAction Stop; if ([IO.Path]::GetFullPath($p.Path) -eq [IO.Path]::GetFullPath($env:WB2API_EXE)) { exit 0 } } catch {}; exit 1"
   if not errorlevel 1 (
-    echo WorkBuddy2API is already running. PID=!WB2API_PID!
+    echo W2A is already running. PID=!WB2API_PID!
     exit /b 0
   )
   del /q "%WB2API_PID_FILE%" >nul 2>&1
@@ -29,5 +29,5 @@ powershell -NoProfile -Command "$p=Start-Process -FilePath $env:WB2API_EXE -Argu
 if errorlevel 1 exit /b 1
 
 set /p WB2API_PID=<"%WB2API_PID_FILE%"
-echo WorkBuddy2API started. PID=%WB2API_PID%
+echo W2A started. PID=%WB2API_PID%
 endlocal

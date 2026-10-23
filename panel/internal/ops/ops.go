@@ -581,7 +581,7 @@ func (s *Service) loadAccount(uid string) (*authstore.Account, error) {
 // describeAccountLoadError 把读凭证的底层错误转成面向用户的文案。
 //
 // 为什么不直接把 err 抛出去：os.ReadFile 的错误里带着服务器上的绝对路径
-// （如 /root/workbuddy2api/auths/...），对使用者是噪音，也会泄露部署细节。
+// （如 /root/w2a/auths/...），对使用者是噪音，也会泄露部署细节。
 func describeAccountLoadError(uid string, err error) error {
 	switch {
 	case errors.Is(err, os.ErrNotExist):

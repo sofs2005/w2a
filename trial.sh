@@ -27,7 +27,7 @@ fi
 # 3) 源码更新则重编（需 go 工具链，本地/CI 用）。容器内（/app 有预置产物的环境）零构建直接跑。
 TRIAL_BIN="$(cd "$(dirname "$0")" && pwd)/trial_bin"
 if [[ ! -x "$TRIAL_BIN" ]]; then
-    CACHE_DIR="${TMPDIR:-/tmp}/workbuddy2api-bin"
+    CACHE_DIR="${TMPDIR:-/tmp}/w2a-bin"
     mkdir -p "$CACHE_DIR"
     TRIAL_BIN="$CACHE_DIR/trial_bin"
     if [[ ! -x "$TRIAL_BIN" ]] || find . -name '*.go' -newer "$TRIAL_BIN" -print -quit | grep -q .; then

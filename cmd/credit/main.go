@@ -1,4 +1,4 @@
-// credit.go — WorkBuddy 积分查询（全部账号 + 总计），JSON 输出到 stdout。
+// credit.go — W2A 积分查询（全部账号 + 总计），JSON 输出到 stdout。
 //
 // 用法:
 //
@@ -6,7 +6,7 @@
 //
 // 输出结构:
 //
-//	{"service":"workbuddy","ts":N,
+//	{"service":"w2a","ts":N,
 //	 "total":{"remain":N,"used":N,"size":N,"accounts":N,"ok":N,"failed":N},
 //	 "accounts":[{"uid","nickname","remain","used","size","packages","ok","error?"}]}
 //
@@ -111,7 +111,7 @@ func printAccounts(accounts []accountResult, pretty bool) {
 		return
 	}
 	out := map[string]any{
-		"service": "workbuddy",
+		"service": "w2a",
 		"ts":      time.Now().Unix(),
 		"total": map[string]any{
 			"remain":   totalRemain,
@@ -147,7 +147,7 @@ func printPretty(accounts []accountResult, totalRemain, totalUsed, totalSize int
 	if totalSize > 0 {
 		pct = totalRemain * 100 / totalSize
 	}
-	fmt.Printf("📊 WorkBuddy 积分日报\n")
+	fmt.Printf("📊 W2A 积分日报\n")
 	fmt.Printf("账号: %d/%d\n", withBalance, len(accounts))
 	fmt.Printf("总计: %d/%d\n", totalRemain, totalSize)
 	fmt.Printf("剩余: %d%%\n", pct)

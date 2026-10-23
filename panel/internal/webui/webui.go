@@ -64,7 +64,7 @@ func notBuilt(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>WorkBuddy GUI · 前端未构建</title>
+<title>W2A GUI · 前端未构建</title>
 <style>
 body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#0f1117;color:#e6e8ee;
 display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}
