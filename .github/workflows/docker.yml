@@ -29,6 +29,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          # 与 release.yml 同口径：不开 check-latest 会停在 runner 预装的补丁版，
+          # 只用于这里的 build/vet/test 门禁。镜像本身由 Dockerfile 的
+          # golang:1.26-alpine 决定（当前 1.26.10），不受此影响。
+          check-latest: true
 
       # 面板是独立 module（panel/go.mod），根 module 的 ./... 会在 module 边界停下，
       # 因此必须显式带上 workbuddy2api-gui/... —— 否则面板的 9 个测试文件永远不会跑，

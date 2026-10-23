@@ -50,6 +50,13 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          # 必须开着：go.mod 写的是 `go 1.26`（浮动 minor），不开 check-latest 时
+          # setup-go 会先命中 runner 预装的工具链缓存就不再看版本清单，于是永远停在
+          # 镜像里那个补丁版——实测 2026-10-22 的构建仍用 go1.26.9，而 1.26.10 已发布
+          # （GO-2026-6809 的修复版）。开启后按版本清单取 1.26.x 里的最新补丁。
+          # 注意 go.mod 的 go 指令不要被 `go mod tidy` 改写成 `go 1.26.0`：那样
+          # setup-go 会精确匹配 1.26.0，反而把 CI 钉死回更旧的版本。
+          check-latest: true
 
       # 必须与 Dockerfile 的第一个阶段保持同一 Node 主版本，避免「CI 用 22、镜像用 20」
       # 这样前端产物只在其中一条路径上能构建出来。
