@@ -228,6 +228,58 @@ type CheckinOutcome struct {
 // ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
 var ErrBusy = errors.New("checkin already running")
 
+// checkinAccountDelay 相邻账号之间的最小间隔（issue #256）。
+//
+// 12 个账号一轮里，3 个国内版的签到请求落在 3 秒窗口内，上游直接回
+// `http 500 {"code":10001,"msg":"签到失败，请稍后重试"}`；同一批账号当天稍后
+// 手动单独点击全部成功，因此不是账号问题而是短时并发被限流。串行 + 固定间隔
+// 把一轮 12 个号摊到 30 秒以上，远低于上游限流窗口。
+// 配置了 account_delay_min/max 的定时遍历会在此基础上再叠加随机抖动（accountGap）。
+// 测试可置 0。
+var checkinAccountDelay = 3 * time.Second
+
+// checkinRetryDelays 签到遇到上游瞬时拒绝时的退避序列（issue #256）。
+//
+// 只对 HTTP 5xx 与业务码 10001 生效；"今天已签到"（同样是 10001）在判定前已按
+// 幂等成功处理，不会走到这里。重试次数 = len(checkinRetryDelays)，全部失败才
+// 记 fail_checkin。测试可置空。
+var checkinRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second}
+
+// checkinRetryable 报告签到错误是否属于上游瞬时拒绝（值得退避重试）。
+// 单号手动签到都能成功而批量偶发失败，说明 10001 在这里表达的是"稍后重试"，
+// 而不是账号或参数问题——这类错误直接记 fail 只能等下一轮定时，白白错过当天。
+//
+// 注意 upstream.DailyCheckin 内部已对 5xx 做 2s/4s 有界重试（retryBillingTransient），
+// 这里补的是「外层再等一轮」：批量限流窗口往往长于 4 秒，且 10001 业务码不被
+// 那层重试识别（它只认 ErrServer）。
+func checkinRetryable(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	if ue.Status >= 500 && ue.Status <= 599 {
+		return true
+	}
+	return upstream.CodeOf(ue.Msg) == "10001"
+}
+
+// dailyCheckinWithRetry 执行签到，遇到上游瞬时失败（HTTP 5xx / code 10001）
+// 按 checkinRetryDelays 退避重试；ctx 取消立即返回最后一次错误。
+func (s *Scheduler) dailyCheckinWithRetry(ctx context.Context, a *auth.Auth, label string) error {
+	err := s.snapshot().Upstream.DailyCheckin(a)
+	for i, delay := range checkinRetryDelays {
+		if err == nil || upstream.IsAlreadyCheckin(err) || !checkinRetryable(err) {
+			return err
+		}
+		log.Printf("checkin %s: %v — %s 后重试(%d/%d)", label, err, delay, i+1, len(checkinRetryDelays))
+		if !sleepCtx(ctx, delay) {
+			return err
+		}
+		err = s.snapshot().Upstream.DailyCheckin(a)
+	}
+	return err
+}
+
 // nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
 func nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
@@ -538,11 +590,22 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	cfg := s.snapshot()
 	statuses := cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
-	var okN, alreadyN, failN, skipN int
+	var okN, alreadyN, failCheckinN, failResourceN, skipN int
 	// 跳过原因分项计数：汇总行同时给出构成，避免 skipped=N 时无法判断
 	// 「是禁用/无凭证」还是「global 门控」——后者是 D4 的正常语义，前者才要处理。
 	var skipDisabledN, skipNoCredN, skipGlobalN int
+	// pace 相邻账号之间的间隔：签到与只读余额查询都会打上游，global 账号也要限速。
+	// 放在所有 skip 判定之后 —— 跳过号不产生上游请求，不该占用间隔（否则一批全禁用的
+	// 号会白等 N×max 秒）。首号不睡；手动入口 accountGap 不叠加随机抖动。
+	// 返回 false 表示 ctx 已取消。
 	firstAccount := true
+	pace := func() bool {
+		if firstAccount {
+			firstAccount = false
+			return true
+		}
+		return sleepCtx(ctx, s.accountGap(ctx, checkinAccountDelay))
+	}
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
@@ -572,6 +635,21 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			// 逐账号打点：汇总行的 skipped=N 只报数量，无法区分「禁用/无凭证/global 门控」，
 			// 排查「签到是不是没跑」时只能靠账号数反推（travel.go 同口径补日志）。
 			log.Printf("checkin %s: skip (global realm)", logfmt.Label(st.UID, st.Nickname))
+			// 签到仍然跳过（global 没有签到体系），但**只读**余额必须刷新：
+			// 否则 pool 里的 credits 恒 0，weightOf 的「余额 / 快过期」两个因子对
+			// global 完全失效，选号退化成纯轮询（issue #228）。
+			// UserResourceExpiry 只调 billing/meter 只读接口，不碰签到，风控语义
+			// 与 D4 门控一致；顺带取逐包到期快照，让 72h 硬优先对 global 同样生效。
+			if !pace() {
+				return out, ctx.Err()
+			}
+			if remain, buckets, expiries, err := cfg.Upstream.UserResourceExpiry(a, cfg.ExpiringSoonWindow); err != nil {
+				log.Printf("user-resource(global) %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			} else {
+				cfg.Pool.ReenableIfCredits(st.UID, remain)
+				cfg.Pool.SetCreditsExpiring(st.UID, remain, buckets.Expiring, toCreditBatches(expiries))
+				oc.Credits = &remain
+			}
 			out = append(out, oc)
 			continue
 		}
@@ -586,15 +664,10 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
-		// 账号间随机间隔（仅定时派发且配置了 account_delay_*）：放在所有 skip
-		// 判定之后 —— 跳过号不产生上游请求，不该占用间隔（否则一批全禁用的号
-		// 会白等 N×max 秒）。首号不睡，手动入口 accountGap 直接返回 0。
-		if !firstAccount {
-			if !sleepCtx(ctx, s.accountGap(ctx, 0)) {
-				return out, ctx.Err()
-			}
+		// 账号间间隔由上方 pace() 承担（含 checkinAccountDelay 基数）。
+		if !pace() {
+			return out, ctx.Err()
 		}
-		firstAccount = false
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := cfg.Upstream.RefreshToken(a); err != nil {
@@ -609,7 +682,7 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 				// 会让本可成功的签到被白白跳过）；真正过期才判定失败。
 				if a.NeedsRefresh(0) {
 					oc.Status, oc.Detail = CheckinFail, "refresh: "+err.Error()
-					failN++
+					failCheckinN++
 					out = append(out, oc)
 					continue
 				}
@@ -622,7 +695,8 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			}
 		}
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
-		if err := cfg.Upstream.DailyCheckin(a); err != nil {
+		// 瞬时失败（HTTP 5xx / 10001）先在原地退避重试，避免错过当天签到。
+		if err := s.dailyCheckinWithRetry(ctx, a, logfmt.Label(st.UID, st.Nickname)); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
 				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
 				// 出现一整段 400 报文、被误读成签到失败。
@@ -648,7 +722,7 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			oc.Status = CheckinFail
 			oc.Detail = joinDetail(oc.Detail, "resource: "+err.Error())
-			failN++
+			failResourceN++
 			out = append(out, oc)
 			continue
 		}
@@ -661,14 +735,16 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		case CheckinAlready:
 			alreadyN++
 		default:
-			failN++
+			failCheckinN++
 		}
 		out = append(out, oc)
 	}
 	// 汇总行保持原有前缀逐字不变（既有 grep / 日志检索习惯不受影响），
 	// 仅在其后追加跳过原因构成：skipped=2 时能立刻看出是 global 门控还是别的。
-	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d",
-		len(statuses), okN, alreadyN, failN, skipN)
+	// fail 保留原有语义（签到 + 余额查询失败合计）供既有解析器/面板统计口径不变；
+	// 末尾追加拆分字段，排障时能直接区分「上游限流」与「账号/余额异常」。
+	log.Printf("checkin done: total=%d ok=%d already=%d fail=%d skipped=%d fail_checkin=%d fail_resource=%d",
+		len(statuses), okN, alreadyN, failCheckinN+failResourceN, skipN, failCheckinN, failResourceN)
 	if skipN > 0 {
 		log.Printf("checkin skipped breakdown: disabled=%d no_credentials=%d global=%d",
 			skipDisabledN, skipNoCredN, skipGlobalN)

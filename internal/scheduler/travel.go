@@ -205,6 +205,12 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) travelAct {
 // 对话量补满——此时是「门槛刚达成」的新状态，不算对上游重试轰炸，放行重试。
 // 有猫账号 BuddyInfo 非空时直接跳过（不重复领养）。
 func (s *Scheduler) travelAdoptForce(a *auth.Auth) {
+	if a.IsGlobal() {
+		return // D4 门控：国际版任务中心没有 first_buddy / chat_5，不发起领养调用
+	}
+	if a.IsEnterprise() {
+		return // 企业版无个人成长体系（growth system is only available for personal users）
+	}
 	buddy, err := s.snapshot().Upstream.BuddyInfo(a)
 	if err != nil {
 		log.Printf("activity %s: buddy-info: %v", logfmt.Label(a.UID, a.Nickname), err)
