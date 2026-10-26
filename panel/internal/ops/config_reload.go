@@ -12,26 +12,48 @@
 package ops
 
 // ConfigReloader 网关侧的配置热重载能力（宿主进程内注入）。
+//
+// 返回两个字段清单而不是一个 bool：面板要用它区分「这次保存全部生效」与「其中某几项
+// 只能重启后才生效」。只返回 error 的话，宿主「只改了冷字段、什么都没应用」与「全部
+// 热生效」在面板眼里完全一样，于是提示语必然说谎。
 type ConfigReloader interface {
 	// ReloadConfig 立即按磁盘上的 config.json 重新加载并应用可热生效的部分。
+	//
+	// hot 是本次已立即生效的顶层字段，cold 是本次改动里只能重启进程才生效的顶层字段。
 	// 返回错误表示本次没有应用（文件非法 / 读写失败），调用方应据此提示用户；
-	// 只改动了需重启字段的情况不算错误（宿主会打日志说明）。
-	ReloadConfig() error
+	// 只改动了需重启字段的情况不算错误（此时 hot 为空、cold 非空）。
+	ReloadConfig() (hot, cold []string, err error)
+}
+
+// ReloadReport 一次保存后的生效结论。
+//
+// 刻意用面板自己的类型承载：宿主 module 不能 import 本包（Go internal 规则），
+// 跨边界只传 []string / error 这类内置类型，两侧各自组装。
+type ReloadReport struct {
+	// Reloaded 是否真的通知到了网关并成功执行重载。false 有两种原因：独立面板
+	// 模式未注入回调，或重载报错（此时 Err 非空）。
+	Reloaded bool
+	// Hot 本次已立即生效的顶层字段（可能为空：只改冷字段、或内容没变化）。
+	Hot []string
+	// Cold 本次改动里只能重启进程才生效的顶层字段。
+	Cold []string
 }
 
 // SetConfigReloader 注入配置热重载能力（宿主同进程部署时调用）。
 func (s *Service) SetConfigReloader(r ConfigReloader) { s.reloader = r }
 
-// NotifyConfigSaved 尽力通知网关「配置已保存」。未注入（独立面板）时返回 (false, nil)。
+// NotifyConfigSaved 尽力通知网关「配置已保存」。
 //
-// 失败不阻断保存流程：文件已经写好了，重载失败只意味着「这次没立刻生效」，把保存判为
-// 失败反而会误导用户去重试写入。调用方据此给提示文案。
-func (s *Service) NotifyConfigSaved() (reloaded bool, err error) {
+// 未注入（独立面板）时返回零值 ReloadReport 与 nil error —— Reloaded=false 让调用方
+// 判定「改动需重启网关进程才生效」。失败不阻断保存流程：文件已经写好了，重载失败只
+// 意味着「这次没立刻生效」，把保存判为失败反而会误导用户去重试写入。
+func (s *Service) NotifyConfigSaved() (ReloadReport, error) {
 	if s.reloader == nil {
-		return false, nil
+		return ReloadReport{}, nil
 	}
-	if err := s.reloader.ReloadConfig(); err != nil {
-		return false, err
+	hot, cold, err := s.reloader.ReloadConfig()
+	if err != nil {
+		return ReloadReport{Cold: cold}, err
 	}
-	return true, nil
+	return ReloadReport{Reloaded: true, Hot: hot, Cold: cold}, nil
 }

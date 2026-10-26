@@ -4,7 +4,7 @@
 // （cmd/server/reload.go 的 startAliasWatcher），面板保存后数秒内新映射就进调度，
 // 不需要重启容器、不需要 docker.sock。因此本文件的写路径必须比 config.json 更稳：
 // 写坏的瞬间线上正在跑的映射会被"保持旧表"逻辑挡住（网关侧不认非法 JSON），
-// 但面板仍应尽最大努力不写出半截文件——沿用 fsutil.WriteFileAtomic + 首次备份。
+// 但面板仍应尽最大努力不写出半截文件——沿用 fsutil.WriteFileAtomic + 滚动备份。
 package ops
 
 import (
@@ -45,6 +45,8 @@ type AliasMeta struct {
 	ParseError string    `json:"parse_error,omitempty"`
 	// RestartNote 与 config.json 的提示语刻意不同：本文件不需要重启。
 	RestartNote string `json:"restart_note"`
+	// Backups 现存可恢复的备份（最新在前，最多 backupKeep 份）。
+	Backups []BackupEntry `json:"backups,omitempty"`
 }
 
 // aliasFileName 别名文件名（网关侧 aliasFilePath 推导出的固定名，必须一致）。
@@ -106,6 +108,7 @@ func (s *Service) ReadAliases() ([]AliasEntry, *AliasMeta, error) {
 		meta.BackupPath = bp
 		meta.BackupAt = bt
 	}
+	meta.Backups = s.listBackups(path)
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -124,7 +127,7 @@ func (s *Service) ReadAliases() ([]AliasEntry, *AliasMeta, error) {
 	return f.Aliases, meta, nil
 }
 
-// WriteAliases 写入别名文件（原子替换 + 首次备份），并在写入前做与网关同口径的校验。
+// WriteAliases 写入别名文件（原子替换 + 滚动备份），并在写入前做与网关同口径的校验。
 //
 // 为什么要在此校验：网关解析失败时是**静默保持旧表 + WARN**，用户从面板上看不出
 // 自己刚保存的东西没生效。在面板这侧提前拦下来，错误信息能直接指到第几行。
@@ -146,37 +149,43 @@ func (s *Service) WriteAliases(entries []AliasEntry) (fallback bool, err error) 
 	}
 	raw = append(raw, '\n')
 
-	if err := s.ensureBackup(path); err != nil {
+	if err := s.rotateBackup(path); err != nil {
 		return false, err
 	}
 	return fsutil.WriteFileAtomic(path, raw, 0o600)
 }
 
 // ResetAliases 从备份恢复别名文件（高危：需 dangerous_ops）。
-func (s *Service) ResetAliases() error {
+//
+// backupIndex <= 0 表示最新一份（= 上一次保存前的内容）；也可指定更早的一份。
+func (s *Service) ResetAliases(backupIndex int) (BackupEntry, error) {
 	if err := s.ensureDangerous(); err != nil {
-		return err
+		return BackupEntry{}, err
 	}
 	path := s.AliasFilePath()
 	if path == "" {
-		return fmt.Errorf("无法推导别名文件路径：网关 config.json 未配置 state_file")
+		return BackupEntry{}, fmt.Errorf("无法推导别名文件路径：网关 config.json 未配置 state_file")
 	}
-	backup, _ := s.backupInfo(path)
-	if backup == "" {
-		return fmt.Errorf("没有可用的备份文件（保存过一次别名后才会生成）")
-	}
-	raw, err := os.ReadFile(backup)
+	entry, err := s.pickBackup(path, backupIndex)
 	if err != nil {
-		return err
+		return BackupEntry{}, err
+	}
+	raw, err := os.ReadFile(entry.Path)
+	if err != nil {
+		return BackupEntry{}, err
 	}
 	var probe AliasFile
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return fmt.Errorf("备份文件不是合法 JSON，拒绝恢复: %w", err)
+		return BackupEntry{}, fmt.Errorf("备份文件不是合法 JSON，拒绝恢复: %w", err)
+	}
+	// 恢复前先备份当前内容，让误恢复可以撤销（同 config.json）。
+	if err := s.rotateBackup(path); err != nil {
+		return BackupEntry{}, err
 	}
 	if _, err := fsutil.WriteFileAtomic(path, raw, 0o600); err != nil {
-		return err
+		return BackupEntry{}, err
 	}
-	return nil
+	return entry, nil
 }
 
 // normalizeAliases 校验并规范化条目（去空白、拒重复、拒两域同空）。

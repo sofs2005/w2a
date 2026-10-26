@@ -51,7 +51,8 @@ type Options struct {
 	// 「当前部署形态不支持」而不是静默失败。
 	Admin panelops.AccountAdmin
 	// ConfigReloader 网关侧配置热重载能力。宿主同进程部署时传入，面板保存
-	// config.json 后立刻触发重载；留 nil 时保存仍有效，但改动需重启网关进程。
+	// config.json 后立刻触发重载，并据其回报的 hot/cold 字段决定提示「已生效」
+	// 还是「需重启」；留 nil 时保存仍有效，但改动需重启网关进程。
 	ConfigReloader panelops.ConfigReloader
 	// Version 面板版本，仅用于展示。
 	Version string
@@ -115,8 +116,8 @@ func New(opts Options) (http.Handler, error) {
 	//
 	// 账号加载不需要重启：网关另有目录监听热加载（cmd/server/reload.go，5s）。
 	// 配置变更在面板保存时立即热生效（cmd/server/configreload.go），
-	// 只有 listen / auth_dir / state_file / upstash 这类绑定进程级资源的字段仍需
-	// 宿主机 `docker compose restart`。
+	// 只有 listen / auth_dir / state_file / server（read_timeout）/ upstash 这类绑定
+	// 进程级资源的字段仍需宿主机 `docker compose restart`。
 	pcfg.RefreshConfigOnLogin = false
 
 	dataDir := opts.DataDir

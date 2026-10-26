@@ -55,8 +55,15 @@ func TestReloadConfigAppliesHotFields(t *testing.T) {
 	writeConfig(t, path, `{"api_key":"new","cooldown":{"soft_rate":"90s"},
 		"schedule":{"checkin_hours":[7],"travel_hours":[9],"activity_hours":[10],
 		"keepalive_hours":[22],"cat_hours":[1],"growth_hours":[8],"limited_hours":[12]}}`)
-	if err := a.ReloadConfig(); err != nil {
+	hot, cold, err := a.ReloadConfig()
+	if err != nil {
 		t.Fatalf("ReloadConfig: %v", err)
+	}
+	if len(cold) != 0 {
+		t.Errorf("纯热改动不应报需重启字段: %v", cold)
+	}
+	if len(hot) != 3 || hot[0] != "api_key" || hot[1] != "cooldown" || hot[2] != "schedule" {
+		t.Errorf("hot=%v want [api_key cooldown schedule]", hot)
 	}
 
 	if got := tgt.handler.Config().APIKey; got != "new" {
@@ -74,8 +81,12 @@ func TestReloadConfigAppliesHotFields(t *testing.T) {
 
 	// diff 基准已前进：同样的内容再保存一次不做任何事（上游客户端不会被再重建一次）。
 	before := tgt.up.Load()
-	if err := a.ReloadConfig(); err != nil {
+	hot, cold, err = a.ReloadConfig()
+	if err != nil {
 		t.Fatalf("重复保存应成功: %v", err)
+	}
+	if len(hot) != 0 || len(cold) != 0 {
+		t.Errorf("内容未变应返回空清单: hot=%v cold=%v", hot, cold)
 	}
 	if tgt.up.Load() != before {
 		t.Error("内容未变却重建了上游客户端（diff 基准没前进）")
@@ -93,7 +104,7 @@ func TestReloadConfigKeepsCurrentOnBrokenJSON(t *testing.T) {
 	}
 
 	writeConfig(t, path, `{"api_key":`)
-	if err := a.ReloadConfig(); err == nil {
+	if _, _, err := a.ReloadConfig(); err == nil {
 		t.Error("坏文件必须返回错误（面板据此提示用户）")
 	}
 	if got := tgt.handler.Config().APIKey; got != before {
@@ -102,7 +113,7 @@ func TestReloadConfigKeepsCurrentOnBrokenJSON(t *testing.T) {
 
 	// 修好后再次保存：正常生效。
 	writeConfig(t, path, `{"api_key":"fixed"}`)
-	if err := a.ReloadConfig(); err != nil {
+	if _, _, err := a.ReloadConfig(); err != nil {
 		t.Fatalf("修复后 ReloadConfig: %v", err)
 	}
 	if got := tgt.handler.Config().APIKey; got != "fixed" {
@@ -118,11 +129,61 @@ func TestReloadConfigStructuralFieldNeedsRestart(t *testing.T) {
 	a := newConfigReloaderAdapter(path, tgt)
 
 	writeConfig(t, path, `{"listen":":9000","api_key":"a"}`)
-	if err := a.ReloadConfig(); err != nil {
+	hot, cold, err := a.ReloadConfig()
+	if err != nil {
 		t.Fatalf("只改结构性字段不算失败: %v", err)
+	}
+	if len(hot) != 0 {
+		t.Errorf("只改结构性字段时不应有任何热生效项: %v", hot)
+	}
+	if len(cold) != 1 || cold[0] != "listen" {
+		t.Errorf("cold=%v want [listen]（面板据此提示需重启）", cold)
 	}
 	if got := tgt.loaded.Listen; got != ":7863" {
 		t.Errorf("结构性改动被应用了: listen=%q want :7863", got)
+	}
+}
+
+// TestReloadConfigMixedReportsBoth hot 与 cold 同时存在时两组都要如实返回：
+// 面板要能说「其余改动已生效，这几项需重启」，而不是二选一。
+func TestReloadConfigMixedReportsBoth(t *testing.T) {
+	path, tgt := newReloadFixture(t, `{"listen":":7863","api_key":"a"}`)
+	a := newConfigReloaderAdapter(path, tgt)
+
+	writeConfig(t, path, `{"listen":":9000","api_key":"b"}`)
+	hot, cold, err := a.ReloadConfig()
+	if err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+	if len(hot) != 1 || hot[0] != "api_key" {
+		t.Errorf("hot=%v want [api_key]", hot)
+	}
+	if len(cold) != 1 || cold[0] != "listen" {
+		t.Errorf("cold=%v want [listen]", cold)
+	}
+	// 热字段仍要真的应用：混合改动不该因为夹了个冷字段就整体不生效。
+	if got := tgt.handler.Config().APIKey; got != "b" {
+		t.Errorf("混合改动中的热字段未生效: api_key=%q want b", got)
+	}
+}
+
+// TestReloadConfigServerSectionNeedsRestart server 段（read_timeout）只赋给启动时
+// 构造的 http.Server，热重载没有任何手段更新它 —— 必须归 cold，否则面板会提示
+// 「已生效」而请求仍在用旧的读超时。
+func TestReloadConfigServerSectionNeedsRestart(t *testing.T) {
+	path, tgt := newReloadFixture(t, `{"api_key":"a"}`)
+	a := newConfigReloaderAdapter(path, tgt)
+
+	writeConfig(t, path, `{"api_key":"a","server":{"read_timeout":"600s"}}`)
+	hot, cold, err := a.ReloadConfig()
+	if err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+	if len(hot) != 0 {
+		t.Errorf("只改 server 段不应有热生效项: %v", hot)
+	}
+	if len(cold) != 1 || cold[0] != "server" {
+		t.Errorf("cold=%v want [server]", cold)
 	}
 }
 
@@ -159,10 +220,10 @@ func TestConfigDiffReportsTopLevelFields(t *testing.T) {
 // TestSplitHotAndCold 结构性字段必须被分到 cold 组（其余一律 hot）。
 func TestSplitHotAndCold(t *testing.T) {
 	hot, cold := splitHotAndCold([]string{
-		"api_key", "listen", "upstream", "auth_dir", "state_file", "upstash", "global",
+		"api_key", "listen", "upstream", "auth_dir", "state_file", "upstash", "global", "server",
 	})
-	if len(cold) != 4 {
-		t.Errorf("cold=%v want 4 项（listen/auth_dir/state_file/upstash）", cold)
+	if len(cold) != 5 {
+		t.Errorf("cold=%v want 5 项（listen/auth_dir/state_file/server/upstash）", cold)
 	}
 	if len(hot) != 3 {
 		t.Errorf("hot=%v want 3 项", hot)

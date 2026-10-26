@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"workbuddy2api-gui/internal/fsutil"
@@ -25,6 +24,8 @@ type UpstreamConfigMeta struct {
 	ParseError  string    `json:"parse_error,omitempty"`
 	IsValidJSON bool      `json:"is_valid_json"`
 	RestartNote string    `json:"restart_note"`
+	// Backups 现存可恢复的备份（最新在前，最多 backupKeep 份）。
+	Backups []BackupEntry `json:"backups,omitempty"`
 }
 
 // ReadUpstreamConfig 读取网关 config.json，返回解析后的对象与元信息。
@@ -36,7 +37,7 @@ func (s *Service) ReadUpstreamConfig() (map[string]any, *UpstreamConfigMeta, err
 	}
 	meta := &UpstreamConfigMeta{
 		Path:        path,
-		RestartNote: "保存后立即热生效（面板直调网关重载）；只有 listen / auth_dir / state_file / upstash 改动仍需重启进程。手工改文件不触发热重载",
+		RestartNote: "保存后立即热生效（面板直调网关重载）；只有 listen / auth_dir / state_file / server / upstash 改动仍需重启进程。手工改文件不触发热重载",
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -54,6 +55,7 @@ func (s *Service) ReadUpstreamConfig() (map[string]any, *UpstreamConfigMeta, err
 		meta.BackupPath = bp
 		meta.BackupAt = bt
 	}
+	meta.Backups = s.listBackups(path)
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -70,8 +72,9 @@ func (s *Service) ReadUpstreamConfig() (map[string]any, *UpstreamConfigMeta, err
 
 // WriteUpstreamConfig 写入网关 config.json。
 //
-// 流程：JSON 序列化 → 首次写入时备份原文件 → 原子替换（单文件 bind mount 下自动回退原地写）。
-// 任何一步失败都不会让原文件处于半截状态（见 fsutil.WriteFileAtomic 的说明）。
+// 流程：JSON 序列化 → 把当前内容存成最新一份滚动备份 → 原子替换（单文件 bind mount
+// 下自动回退原地写）。任何一步失败都不会让原文件处于半截状态（见 fsutil.WriteFileAtomic
+// 的说明）；备份轮转见 backup.go（保留最近 backupKeep 份，可任选一份恢复）。
 func (s *Service) WriteUpstreamConfig(doc map[string]any) error {
 	_, err := s.WriteUpstreamConfigDetailed(doc)
 	return err
@@ -94,127 +97,45 @@ func (s *Service) WriteUpstreamConfigDetailed(doc map[string]any) (fallback bool
 	}
 	raw = append(raw, '\n')
 
-	// 首次写入前备份原始文件（不覆盖已有备份，保留「最初的样子」）。
-	if err := s.ensureBackup(path); err != nil {
+	// 写入前把当前内容存成最新备份（保留最近 backupKeep 份，见 backup.go）。
+	if err := s.rotateBackup(path); err != nil {
 		return false, err
 	}
 
 	return fsutil.WriteFileAtomic(path, raw, 0o600)
 }
 
-// backupSuffix 备份文件后缀。
+// backupSuffix 备份文件后缀。备份文件的命名与轮转见 backup.go。
 const backupSuffix = ".gui.bak"
 
-// ensureBackup 确保存在一份「首次保存前」的原始配置备份；已存在则不覆盖。
-//
-// 为什么备份位置要特别处理：Docker 部署时 config.json 常以**单文件**方式挂载，
-// 此时容器内 /gateway 目录是容器自己的可写层，而不是宿主机目录 —— 备份写在那里
-// 会随容器重建而消失（用户以为有回退点，实际没有）。因此：
-//   - 若配置文件所在目录本身是挂载进来的（目录可写且与文件同设备），直接写旁边；
-//   - 否则回退到面板自己的数据目录（配置里的 backup_dir / 默认 ./data），
-//     并在元信息里把真实路径告诉前端。
-func (s *Service) ensureBackup(path string) error {
-	// 优先：与目标文件同目录（同设备说明目录真被挂载进来了）。
-	if dest := path + backupSuffix; sameDevice(path, filepath.Dir(path)) {
-		if _, err := os.Stat(dest); err == nil {
-			return nil // 已有备份，保留最初版本
-		}
-		if orig, err := os.ReadFile(path); err == nil {
-			if werr := os.WriteFile(dest, orig, 0o600); werr != nil {
-				return fmt.Errorf("写入备份失败（已中止，未改动原文件）: %w", werr)
-			}
-			return nil
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("读取原文件失败（已中止，未改动原文件）: %w", err)
-		}
-		return nil
-	}
-
-	// 回退：写到面板数据目录，保证备份能跨容器重建存活。
-	dest := s.backupPathFor(path)
-	if _, err := os.Stat(dest); err == nil {
-		return nil
-	}
-	orig, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // 目标还不存在（首次创建），无需备份
-		}
-		return fmt.Errorf("读取原文件失败（已中止，未改动原文件）: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return fmt.Errorf("创建备份目录失败: %w", err)
-	}
-	if err := os.WriteFile(dest, orig, 0o600); err != nil {
-		return fmt.Errorf("写入备份失败: %w", err)
-	}
-	return nil
-}
-
-// backupPathFor 返回回退备份的绝对路径（面板数据目录下的固定文件名）。
-func (s *Service) backupPathFor(path string) string {
-	dir := s.cfg.BackupDir
-	if dir == "" {
-		dir = "./data/backups"
-	}
-	if abs, err := filepath.Abs(dir); err == nil {
-		dir = abs
-	}
-	// 用目标文件名做区分，避免将来支持多路径时互相覆盖。
-	return filepath.Join(dir, filepath.Base(path)+backupSuffix)
-}
-
-// backupInfo 返回实际生效的备份路径与其修改时间（供元信息展示）。
-func (s *Service) backupInfo(path string) (string, time.Time) {
-	candidates := []string{path + backupSuffix, s.backupPathFor(path)}
-	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil {
-			return c, st.ModTime()
-		}
-	}
-	return "", time.Time{}
-}
-
-// sameDevice 报告 path 与其所在目录是否在同一文件系统上。
-// 不同设备号 = 单文件 bind mount（或跨设备挂载），此时目录不反映宿主机目录。
-func sameDevice(path, dir string) bool {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	di, err := os.Stat(dir)
-	if err != nil {
-		return false
-	}
-	fsDev, ok1 := fsutil.DeviceID(fi)
-	dsDev, ok2 := fsutil.DeviceID(di)
-	if !ok1 || !ok2 {
-		// 非 Unix：无法判断设备，按"同目录可写"处理。
-		return true
-	}
-	return fsDev == dsDev
-}
-
 // ResetUpstreamConfig 从备份恢复网关 config.json（高危：需 dangerous_ops）。
-func (s *Service) ResetUpstreamConfig() error {
+//
+// backupIndex <= 0 表示最新一份（= 上一次保存前的内容）；也可指定更早的一份。
+// 恢复前会先把当前内容存为新备份，所以恢复本身也能被撤销。
+func (s *Service) ResetUpstreamConfig(backupIndex int) (BackupEntry, error) {
 	if err := s.ensureDangerous(); err != nil {
-		return err
+		return BackupEntry{}, err
 	}
 	path := s.cfg.UpstreamConfigFile
-	backup, _ := s.backupInfo(path)
-	if backup == "" {
-		return fmt.Errorf("没有可用的备份文件（保存过一次配置后才会生成）")
-	}
-	raw, err := os.ReadFile(backup)
+	entry, err := s.pickBackup(path, backupIndex)
 	if err != nil {
-		return err
+		return BackupEntry{}, err
+	}
+	raw, err := os.ReadFile(entry.Path)
+	if err != nil {
+		return BackupEntry{}, err
 	}
 	var probe map[string]any
 	if err := json.Unmarshal(raw, &probe); err != nil {
-		return fmt.Errorf("备份文件不是合法 JSON，拒绝恢复: %w", err)
+		return BackupEntry{}, fmt.Errorf("备份文件不是合法 JSON，拒绝恢复: %w", err)
+	}
+	// 先给当前内容留一份备份再覆盖：恢复是最容易点错的操作，误恢复必须能撤销。
+	// 顺序不能反——先写再备份，存下来的就是刚恢复的那份，等于没有回退点。
+	if err := s.rotateBackup(path); err != nil {
+		return BackupEntry{}, err
 	}
 	if _, err := fsutil.WriteFileAtomic(path, raw, 0o600); err != nil {
-		return err
+		return BackupEntry{}, err
 	}
-	return nil
+	return entry, nil
 }

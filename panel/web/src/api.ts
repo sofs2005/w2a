@@ -5,9 +5,11 @@ import type {
   AdminState,
   AliasEntry,
   AliasesResponse,
+  BackupEntry,
   ChatDelta,
   ChatMessage,
   ConfigResponse,
+  ConfigSaveResponse,
   Credits,
   ModelsResponse,
   OpResult,
@@ -158,14 +160,15 @@ export const api = {
 
   // 配置
   config: () => get<ConfigResponse>('/api/config'),
-  saveConfig: (doc: Record<string, unknown>) => put<{ ok: boolean; message: string }>('/api/config', doc),
-  resetConfig: () => post<{ ok: boolean; message: string }>('/api/config/reset'),
+  saveConfig: (doc: Record<string, unknown>) => put<ConfigSaveResponse>('/api/config', doc),
+  resetConfig: (backup?: number) => post<ConfigSaveResponse>('/api/config/reset', backup ? { backup } : {}),
 
   // 模型别名映射（独立文件，网关数秒内热加载，无需重启）
   aliases: () => get<AliasesResponse>('/api/model-aliases'),
   saveAliases: (aliases: AliasEntry[]) =>
     put<{ ok: boolean; message: string }>('/api/model-aliases', { aliases }),
-  resetAliases: () => post<{ ok: boolean; message: string }>('/api/model-aliases/reset'),
+  resetAliases: (backup?: number) =>
+    post<{ ok: boolean; message: string; backup?: BackupEntry }>('/api/model-aliases/reset', backup ? { backup } : {}),
 
   // 系统
   system: () => get<SystemInfo>('/api/system'),

@@ -826,6 +826,82 @@ tbody tr.stat-group-end:last-child td {
   height: 20px;
 }
 
+/* ── 浮层提示（Toast）───────────────────────────────── */
+/* 居中显示：这是一次性反馈，居中更醒目也不会被侧栏或底部保存条挡住。
+   z-index 低于 .modal-backdrop（100），确认弹窗打开时提示不该压在上面。
+   容器本身不接收点击，只有提示条自己接收（关闭按钮需要可点）。 */
+.toast-wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  pointer-events: none;
+}
+.toast {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  width: min(460px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  pointer-events: auto;
+  animation: toast-in 160ms ease-out;
+}
+/* 背景/边框沿用 .alert-<kind>（与行内提示同一套配色），这里只补浮层需要的东西。 */
+.toast.toast-leaving {
+  animation: toast-out 200ms ease-in forwards;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+/* 减少动态效果偏好：只保留淡入淡出，去掉位移。 */
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .toast.toast-leaving {
+    animation-duration: 1ms;
+  }
+  @keyframes toast-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes toast-out {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+}
+
 /* ── 登录页 ─────────────────────────────────────────── */
 
 .login-wrap {
@@ -1086,6 +1162,45 @@ tbody tr.stat-group-end:last-child td {
 .tab.active {
   color: var(--accent-on-bg);
   border-bottom-color: var(--accent);
+}
+
+/* 配置页的 tab 较多（6 项）：窄屏下换行会把 tab 条撑成两三行、挤掉首屏内容，
+   故改为横向滚动。其余页面 tab 少，仍走 .tabs 的默认换行。 */
+.tabs-scroll {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.tabs-scroll .tab {
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+/* 配置表单的常驻操作条：sticky 钉在视口底部，滚到内容末尾自然归位。
+   背景必须不透明——否则底下的输入框会从按钮之间透出来。 */
+.form-actions-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+  padding: 12px 0;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+/* 上沿加一层渐变，避免内容在按钮上方被硬切。 */
+.form-actions-bar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -14px;
+  height: 14px;
+  background: linear-gradient(to top, var(--bg), transparent);
+  pointer-events: none;
 }
 
 /* 折叠说明块：口径解释这类「查阅型」长文默认收起，不占首屏。 */

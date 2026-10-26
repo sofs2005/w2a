@@ -18,8 +18,9 @@
 //     会话粘性 TTL、全局开关。做法是**重建一个 upstream.Client 再整体替换快照**
 //     （upstream.Client 的参数散落在 Transport 与十几个字段上，逐字段热改既漏得掉
 //     又是并发雷区），池与调度器则走各自的 Set*/Reload。
-//   - 必须重启（少数）：listen、auth_dir、state_file、upstash —— 它们绑定的是
-//     监听 socket、文件路径与 Redis 连接，运行期换掉等于重启进程本身。
+//   - 必须重启（少数）：listen、auth_dir、state_file、server、upstash —— 它们绑定的是
+//     监听 socket、文件路径、已构造的 http.Server 与 Redis 连接，运行期换掉等于重启
+//     进程本身。
 //
 // 失败语义：解析失败、校验不过、或只改动了「必须重启」的字段时**保持现状**并如实
 // 返回/打日志，绝不把网关切到半截配置上。
@@ -53,13 +54,24 @@ var restartOnlyFields = []string{
 	"listen",     // 监听地址：socket 已绑定
 	"auth_dir",   // 凭证目录：池与监听器都已按旧路径接线
 	"state_file", // 池状态文件：池已按旧路径加载/落盘
-	"upstash",    // Redis 连接：store 已建立，换连接等于重连
+	// server 段目前只有 read_timeout，它只赋给启动时创建的 http.Server.ReadTimeout
+	// （main.go 的 srv 构造），applyConfig 没有、也不该有更新它的手段 —— 改超时值
+	// 必须重建 Server 才能生效。漏标它的后果很具体：面板会提示「已生效」，
+	// 而实际请求仍在用旧的读超时。
+	"server",
+	"upstash", // Redis 连接：store 已建立，换连接等于重连
 }
 
 // configDiff 描述两次配置之间「有变化」的顶层字段。
 //
 // 用反射比较顶层字段而不是手写逐字段比对：新增配置项时不必记得来这里补一行
 // （漏补的后果正是「改了不生效却没人知道」）。只比顶层键，报错信息足够定位。
+//
+// 跳过两类字段：
+//   - 非导出字段（f.PkgPath != ""）；
+//   - `json:"-"` 的派生字段（SoftRateDur / ServerReadTimeoutDur 这类解析后的
+//     Duration）。它们由 JSON 键派生而来，源字段变了它们必然跟着变，重复计入
+//     只会让清单出现两遍；更糟的是这些名字会原样进入面板的「需重启」提示。
 func configDiff(old, new *Config) []string {
 	if old == nil || new == nil {
 		return nil
@@ -70,10 +82,14 @@ func configDiff(old, new *Config) []string {
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if f.PkgPath != "" {
-			continue // 非导出字段（解析后的 Duration 等）不参与比较
+			continue // 非导出字段
 		}
-		name := strings.Split(f.Tag.Get("json"), ",")[0]
-		if name == "" || name == "-" {
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue // 派生字段：不对外暴露，也不该出现在变更清单里
+		}
+		name := strings.Split(tag, ",")[0]
+		if name == "" {
 			name = f.Name
 		}
 		if !reflect.DeepEqual(ov.Field(i).Interface(), nv.Field(i).Interface()) {
@@ -154,11 +170,12 @@ func newConfigReloaderAdapter(path string, t configTargets) *configReloaderAdapt
 	return &configReloaderAdapter{path: path, target: t}
 }
 
-// ReloadConfig 按磁盘上的 config.json 立即重载一次。
+// ReloadConfig 按磁盘上的 config.json 立即重载一次，并如实回报本次生效范围。
 //
 // 返回 error 仅当配置**读不出来或解析不过**——那是真的没生效，值得告知用户；
-// 「只改了需重启字段」与「内容没有变化」都不算失败。
-func (a *configReloaderAdapter) ReloadConfig() error {
+// 「只改了需重启字段」与「内容没有变化」都不算失败，但它们的 hot / cold 不同：
+// 前者 hot 空、cold 非空，后者两者皆空。面板靠这两个清单决定提示语。
+func (a *configReloaderAdapter) ReloadConfig() (hot, cold []string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -166,20 +183,20 @@ func (a *configReloaderAdapter) ReloadConfig() error {
 	if err != nil {
 		// 保持现状：面板刚写的文件可能不合法（表单校验漏网、手改残留），
 		// 此时绝不能让网关切到半截配置上。
-		return fmt.Errorf("重新解析 %s 失败: %w", a.path, err)
+		return nil, nil, fmt.Errorf("重新解析 %s 失败: %w", a.path, err)
 	}
 
 	changed := configDiff(a.target.loaded, cfg)
 	if len(changed) == 0 {
-		return nil // 解析结果一致（仅格式/空白变化）：无事可做
+		return nil, nil, nil // 解析结果一致（仅格式/空白变化）：无事可做
 	}
-	hot, cold := splitHotAndCold(changed)
+	hot, cold = splitHotAndCold(changed)
 
 	if len(hot) == 0 {
 		// 只改了结构性字段：不切换（切换一半等于让网关处于两种配置之间的怪状态），
 		// 但要明确告诉运维「已读到、只是需要重启」，否则会以为热重载坏了。
 		log.Printf("[config] 检测到配置改动 %v —— 这些字段只能靠重启生效（docker compose restart），本次未应用", cold)
-		return nil
+		return hot, cold, nil
 	}
 
 	applyConfig(cfg, a.target)
@@ -189,7 +206,7 @@ func (a *configReloaderAdapter) ReloadConfig() error {
 	} else {
 		log.Printf("[config] 配置已热重载：%v 立即生效（无需重启）", hot)
 	}
-	return nil
+	return hot, cold, nil
 }
 
 // setCurrent 记录本次生效的配置（下一次 diff 的基准）。

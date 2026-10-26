@@ -53,6 +53,8 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [confirmReset, setConfirmReset] = useState(false)
+  // 要恢复的备份序号：1 = 上一次保存前的内容（默认），2/3 = 更早。
+  const [resetIndex, setResetIndex] = useState(1)
   const [resetting, setResetting] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [catalog, setCatalog] = useState<{ all: string[]; byRealm: Record<Realm, string[]>; realmsKnown: boolean }>({
@@ -134,7 +136,7 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
   const doReset = async () => {
     setResetting(true)
     try {
-      const res = await api.resetAliases()
+      const res = await api.resetAliases(resetIndex)
       setConfirmReset(false)
       setNotice(res.message)
       await load()
@@ -219,9 +221,12 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           {meta?.backup_path && (
             <button
               className="btn btn-danger"
-              onClick={() => setConfirmReset(true)}
+              onClick={() => {
+                setResetIndex(meta.backups?.[0]?.index ?? 1)
+                setConfirmReset(true)
+              }}
               disabled={writeDisabled || !session.dangerous_ops}
-              title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '从首次备份恢复'}
+              title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '回滚到最近几次保存前的版本'}
             >
               <Undo2 size={14} /> 恢复备份
             </button>
@@ -411,9 +416,34 @@ export default function ModelAliases({ session }: { session: SessionInfo }) {
           onConfirm={() => void doReset()}
           message={
             <>
-              将用首次保存前的备份覆盖当前 <span className="mono">{meta?.path}</span>。
-              <br />
-              备份路径：<span className="mono">{meta?.backup_path}</span>
+              将用备份覆盖当前 <span className="mono">{meta?.path}</span>。恢复前会先把当前内容
+              存成新备份，误恢复后还能再恢复回来。
+              <div style={{ marginTop: 10 }}>
+                {meta?.backups?.length ? (
+                  meta.backups.map((b) => (
+                    <label
+                      key={b.index}
+                      className="checkbox"
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}
+                    >
+                      <input
+                        type="radio"
+                        name="alias-backup"
+                        checked={resetIndex === b.index}
+                        onChange={() => setResetIndex(b.index)}
+                      />
+                      <span>
+                        {b.index === 1 ? '上一次保存前' : `${b.index} 次保存前`}
+                        <span className="text-dim" style={{ marginLeft: 6 }}>
+                          {fmtISO(b.at)}
+                        </span>
+                      </span>
+                    </label>
+                  ))
+                ) : (
+                  <span className="text-dim">暂无可用的备份。</span>
+                )}
+              </div>
             </>
           }
         />

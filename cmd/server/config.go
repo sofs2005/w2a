@@ -55,7 +55,8 @@ type Config struct {
 		// 反代链转发时上传可能超过旧固定值 60s，被掐后客户端拿到
 		// 400 "read body: ... i/o timeout"——而请求本身完全合法。
 		// 缺省 "300s"；"0" = 不限制（慢速 body 可无限占用连接，自担风险）；
-		// 改动需重启进程。
+		// 改动需重启进程（只赋给启动时构造的 http.Server，见 cmd/server/configreload.go
+		// 的 restartOnlyFields —— 整段 server 都归在「需重启」一侧）。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
 	} `json:"server"`
 

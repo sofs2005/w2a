@@ -368,6 +368,14 @@ export interface SessionInfo {
   password_changeable?: boolean
 }
 
+/** 一份可恢复的备份。index 1 = 最近一次保存前的内容，依此类推。 */
+export interface BackupEntry {
+  path: string
+  at: string
+  size: number
+  index: number
+}
+
 export interface ConfigMeta {
   path: string
   exists: boolean
@@ -378,11 +386,28 @@ export interface ConfigMeta {
   parse_error?: string
   is_valid_json: boolean
   restart_note: string
+  /** 现存可恢复的备份，最新在前（最多 3 份）。 */
+  backups?: BackupEntry[]
 }
 
 export interface ConfigResponse {
   config: Record<string, unknown>
   meta: ConfigMeta
+}
+
+/** 保存/恢复配置后的生效结论（由网关热重载如实回报，前端不自行推断）。
+ *
+ *  - reloaded：是否通知到同进程网关并成功执行重载。独立面板模式为 false。
+ *  - restart_required：本次改动里是否**有**需要重启进程才生效的部分。
+ *  - restart_fields：需要重启的顶层配置键（如 listen / upstash），供提示点名。 */
+export interface ConfigSaveResponse {
+  ok: boolean
+  message: string
+  reloaded: boolean
+  restart_required: boolean
+  restart_fields?: string[]
+  /** 仅恢复备份时返回：实际恢复了哪一份。 */
+  backup?: BackupEntry
 }
 
 /** 单条模型别名：对外名 → 各域真实上游模型名（某一域可为空 = 该域无此模型）。 */
@@ -402,6 +427,8 @@ export interface AliasMeta {
   parse_error?: string
   /** 提示语：与 config.json 不同，本文件热生效（无需重启）。 */
   restart_note: string
+  /** 现存可恢复的备份，最新在前（最多 3 份）。 */
+  backups?: BackupEntry[]
 }
 
 export interface AliasesResponse {

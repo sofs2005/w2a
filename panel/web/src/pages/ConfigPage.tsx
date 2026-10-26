@@ -2,13 +2,26 @@
 //
 // 关键设计：表单读写的是**完整原始文档对象**（只改动已知字段），
 // 因此配置文件里 GUi 不认识的自定义字段会被原样保留，不会因为一次保存被抹掉。
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { ConfigMeta, SessionInfo } from '../types'
-import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import type { ConfigMeta, ConfigSaveResponse, SessionInfo } from '../types'
+import { Alert, ConfirmDialog, fmtISO, Spinner, Toast } from '../ui'
+import type { ToastMessage } from '../ui'
 import { RefreshCw, Save, Undo2 } from '../icons'
 
 type Doc = Record<string, unknown>
+
+/** 页内分组。前五项共用同一份表单与同一个底部保存条，json 是源码视图。 */
+type TabKey = 'basic' | 'schedule' | 'pool' | 'upstream' | 'session' | 'json'
+
+const TABS: { key: TabKey; label: string }[] = [
+  { key: 'basic', label: '基础与存储' },
+  { key: 'schedule', label: '定时任务' },
+  { key: 'pool', label: '账号池与冷却' },
+  { key: 'upstream', label: '上游与代理' },
+  { key: 'session', label: '会话与扩展' },
+  { key: 'json', label: 'JSON 源码' },
+]
 
 /** 按路径读写嵌套字段。 */
 function getPath(doc: Doc, path: string): unknown {
@@ -93,13 +106,36 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
-  const [tab, setTab] = useState<'form' | 'json'>('form')
+  const [toast, setToast] = useState<ToastMessage | null>(null)
+  const [tab, setTab] = useState<TabKey>('basic')
   const [jsonText, setJsonText] = useState('')
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
+  // 要恢复的备份序号：1 = 上一次保存前的内容（默认），2/3 = 更早。
+  const [resetIndex, setResetIndex] = useState(1)
   const [resetting, setResetting] = useState(false)
+  // 每次提示分配一个新 id：同样的文案再提示一次也要重新计时（见 Toast 的 effect 依赖）。
+  const toastSeq = useRef(0)
+
+  /** 普通成功 2.5s 后淡出；需重启/未生效停留更久，够看清字段名。 */
+  const notify = useCallback((text: string, needsAttention: boolean) => {
+    toastSeq.current += 1
+    setToast({
+      id: toastSeq.current,
+      kind: needsAttention ? 'warn' : 'ok',
+      text,
+      duration: needsAttention ? 8000 : 2500,
+    })
+  }, [])
+
+  /** 保存/恢复的统一反馈：文案与是否需要关注都由后端结论决定。 */
+  const notifySaveResult = useCallback(
+    (res: ConfigSaveResponse) => {
+      notify(res.message, res.restart_required || !res.reloaded)
+    },
+    [notify],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -135,14 +171,12 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
     const invalid = validateSchedule(doc)
     if (invalid) {
       setError(invalid)
-      setNotice(null)
       return
     }
     setSaving(true)
-    setNotice(null)
     try {
       const res = await api.saveConfig(doc)
-      setNotice(res.message)
+      notifySaveResult(res)
       setError(null)
       // 保存后重新读取：首次保存会生成备份文件，meta 里的 backup_path 随之出现
       //（「恢复备份」按钮依赖它）；顺带同步文件修改时间。
@@ -186,10 +220,9 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
       return
     }
     setSaving(true)
-    setNotice(null)
     try {
       const res = await api.saveConfig(parsed)
-      setNotice(res.message)
+      notifySaveResult(res)
       setError(null)
       await reloadMeta()
     } catch (err) {
@@ -202,9 +235,9 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
   const doReset = async () => {
     setResetting(true)
     try {
-      const res = await api.resetConfig()
+      const res = await api.resetConfig(resetIndex)
       setConfirmReset(false)
-      setNotice(res.message)
+      notifySaveResult(res)
       await load()
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '恢复失败')
@@ -252,9 +285,13 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
           {meta?.backup_path && (
             <button
               className="btn btn-danger"
-              onClick={() => setConfirmReset(true)}
+              onClick={() => {
+                // 默认选最新一份（= 上一次保存前的内容），这才是「回滚一步」的常见诉求。
+                setResetIndex(meta.backups?.[0]?.index ?? 1)
+                setConfirmReset(true)
+              }}
               disabled={writeDisabled || !session.dangerous_ops}
-              title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '从首次备份恢复'}
+              title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '回滚到最近几次保存前的版本'}
             >
               <Undo2 size={14} /> 恢复备份
             </button>
@@ -263,11 +300,6 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
       </div>
 
       {writeDisabled && <Alert kind="warn">服务端已开启只读模式，配置无法保存。</Alert>}
-      {notice && (
-        <Alert kind="ok" onClose={() => setNotice(null)}>
-          {notice}
-        </Alert>
-      )}
       {error && (
         <Alert kind="error" onClose={() => setError(null)}>
           {error}
@@ -279,520 +311,539 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
         </Alert>
       )}
 
-      <Alert kind="info">
-        <strong>保存后立即生效，无需重启。</strong> 面板与网关同进程，保存完直接通知网关重载：
-        排程、冷却、池参数、超时、代理、指纹、提示词、api_key、会话粘性都会当场应用。
-        <div style={{ marginTop: 5, fontSize: 12.5 }}>
-          以下改动仍需重启进程：<span className="mono">listen</span>、
-          <span className="mono"> auth_dir</span>、<span className="mono"> state_file</span>、
-          <span className="mono"> upstash</span>（它们绑定监听端口、目录与 Redis 连接）。请在宿主机执行：
-        </div>
-        <div className="muted-box" style={{ marginTop: 7 }}>docker compose restart</div>
-        {meta?.backup_path ? (
-          <div style={{ marginTop: 5, fontSize: 12.5 }}>
-            首次保存前已自动备份原始文件到 <span className="mono">{meta.backup_path}</span>
-            {meta.backup_at ? `（${fmtISO(meta.backup_at)}）` : ''}。随时可用右上角「恢复备份」回滚。
-          </div>
-        ) : (
-          <div style={{ marginTop: 5, fontSize: 12.5 }}>
-            尚未生成备份：首次保存时会自动把当前的 config.json 备份一份，之后可随时回滚。
-          </div>
-        )}
-      </Alert>
+      {/* 保存结果的反馈走右下浮层（Toast），不再占用页面顶部：本页常有多个分组，
+          顶部提示会把首屏内容整体下推，且成功提示本身没有长期阅读价值。 */}
+      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
-      <div className="tabs">
-        <button className={`tab ${tab === 'form' ? 'active' : ''}`} onClick={() => setTab('form')}>
-          表单编辑
-        </button>
-        <button className={`tab ${tab === 'json' ? 'active' : ''}`} onClick={() => setTab('json')}>
-          JSON 源码
-        </button>
+      <div className="tabs tabs-scroll" role="tablist" aria-label="配置分组">
+        {TABS.map((t, i) => (
+          <button
+            key={t.key}
+            id={`config-tab-${t.key}`}
+            className={`tab ${tab === t.key ? 'active' : ''}`}
+            role="tab"
+            aria-selected={tab === t.key}
+            aria-controls={`config-panel-${t.key}`}
+            // 漫游 tabindex：整个 tab 条只占一个 Tab 焦点位，条内用左右方向键切换。
+            tabIndex={tab === t.key ? 0 : -1}
+            onClick={() => setTab(t.key)}
+            onKeyDown={(e) => {
+              const last = TABS.length - 1
+              let next: number | null = null
+              if (e.key === 'ArrowRight') next = i === last ? 0 : i + 1
+              else if (e.key === 'ArrowLeft') next = i === 0 ? last : i - 1
+              else if (e.key === 'Home') next = 0
+              else if (e.key === 'End') next = last
+              if (next === null) return
+              e.preventDefault()
+              setTab(TABS[next].key)
+              // 焦点跟着走，否则键盘用户按一次方向键后焦点还在旧 tab 上。
+              document.getElementById(`config-tab-${TABS[next].key}`)?.focus()
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {tab === 'form' && doc && (
-        <>
-          <div className="card">
-            <div className="card-head">
-              <h2>基础设置</h2>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>监听地址 listen</label>
-                <input type="text" value={str('listen')} onChange={(e) => update('listen', e.target.value)} placeholder=":7863" />
-                <div className="desc">网关 HTTP 监听地址，冒号开头表示所有网卡。</div>
+      {tab !== 'json' && doc && (
+        <div role="tabpanel" id={`config-panel-${tab}`} aria-labelledby={`config-tab-${tab}`}>
+          {tab === 'basic' && (
+            <div className="card">
+              <div className="card-head">
+                <h2>基础与存储</h2>
               </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>API 密钥 api_key</label>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <input
-                    type={showApiKey ? 'text' : 'password'}
-                    value={str('api_key')}
-                    onChange={(e) => update('api_key', e.target.value)}
-                    placeholder="留空 = 不鉴权（公网务必设置）"
-                  />
-                  <button className="btn shrink" onClick={() => setShowApiKey((v) => !v)} type="button">
-                    {showApiKey ? '隐藏' : '显示'}
-                  </button>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>监听地址 listen</label>
+                  <input type="text" value={str('listen')} onChange={(e) => update('listen', e.target.value)} placeholder=":7863" />
+                  <div className="desc">网关 HTTP 监听地址，冒号开头表示所有网卡。</div>
                 </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>API 密钥 api_key</label>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={str('api_key')}
+                      onChange={(e) => update('api_key', e.target.value)}
+                      placeholder="留空 = 不鉴权（公网务必设置）"
+                    />
+                    <button className="btn shrink" onClick={() => setShowApiKey((v) => !v)} type="button">
+                      {showApiKey ? '隐藏' : '显示'}
+                    </button>
+                  </div>
+                  <div className="desc">
+                    客户端调用 <span className="mono">/v1/chat/completions</span> 时需带
+                    <span className="mono"> Authorization: Bearer &lt;api_key&gt;</span>。留空则任何人可用。
+                  </div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>凭证目录 auth_dir</label>
+                  <input type="text" value={str('auth_dir')} onChange={(e) => update('auth_dir', e.target.value)} placeholder="./auths" />
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>状态文件 state_file</label>
+                  <input type="text" value={str('state_file')} onChange={(e) => update('state_file', e.target.value)} placeholder="./data/state.json" />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'schedule' && (
+            <div className="card">
+              <div className="card-head">
+                <h2>定时任务</h2>
+                <span className="hint">时间按容器时区（compose 默认 Asia/Shanghai）</span>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>签到小时 checkin_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.checkin_hours'))}
+                    onChange={(e) => update('schedule.checkin_hours', textToHours(e.target.value))}
+                    placeholder="9, 21"
+                  />
+                  <div className="desc">逗号分隔的整点（0-23）。签到同时会查余额，余额恢复的冷却账号自动解冻。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>猫猫旅行 travel_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.travel_hours'))}
+                    onChange={(e) => update('schedule.travel_hours', textToHours(e.target.value))}
+                    placeholder="9, 21"
+                  />
+                  <div className="desc">独立排程：领养 / 派出 / 领奖一趟闭环，已不再搭签到的便车。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>活跃上报 activity_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.activity_hours'))}
+                    onChange={(e) => update('schedule.activity_hours', textToHours(e.target.value))}
+                    placeholder="10"
+                  />
+                  <div className="desc">每号上报 activity_report_count 条（默认 5）点亮连登，随后领连登奖励与抽奖。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>保活小时 keepalive_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.keepalive_hours'))}
+                    onChange={(e) => update('schedule.keepalive_hours', textToHours(e.target.value))}
+                    placeholder="22"
+                  />
+                  <div className="desc">在该整点刷新全部账号的 token。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>限时活动 limited_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.limited_hours'))}
+                    onChange={(e) => update('schedule.limited_hours', textToHours(e.target.value))}
+                    placeholder="12"
+                  />
+                  <div className="desc">调 task_runner.py ALL --yes --limited，只跑带有效期的活动任务；过期后脚本自行跳过。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>夜猫子 cat_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.cat_hours'))}
+                    onChange={(e) => update('schedule.cat_hours', textToHours(e.target.value))}
+                    placeholder="1"
+                  />
+                  <div className="desc">只跑 task_runner.py 的 black_cat；夜猫窗口 23:00–08:00，窗口外自动跳过。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>成长任务 growth_hours</label>
+                  <input
+                    type="text"
+                    value={hoursToText(getPath(doc, 'schedule.growth_hours'))}
+                    onChange={(e) => update('schedule.growth_hours', textToHours(e.target.value))}
+                    placeholder="8"
+                  />
+                  <div className="desc">每晚跑一遍 task_runner.py ALL --yes 补跑成长任务。脚本幂等：已领/已达标逐项跳过，新账号当天自动补齐。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>时点随机偏移 random_delay_minutes</label>
+                  <input
+                    type="text"
+                    value={numText(getPath(doc, 'schedule.random_delay_minutes'))}
+                    onChange={(e) => update('schedule.random_delay_minutes', numOrUndefined(e.target.value))}
+                    placeholder="0"
+                  />
+                  <div className="desc">0 = 整点。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>账号间隔下限 account_delay_min_seconds</label>
+                  <input
+                    type="text"
+                    value={numText(getPath(doc, 'schedule.account_delay_min_seconds'))}
+                    onChange={(e) => update('schedule.account_delay_min_seconds', numOrUndefined(e.target.value))}
+                    placeholder="0"
+                  />
+                  <div className="desc">0 = 不启用。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>账号间隔上限 account_delay_max_seconds</label>
+                  <input
+                    type="text"
+                    value={numText(getPath(doc, 'schedule.account_delay_max_seconds'))}
+                    onChange={(e) => update('schedule.account_delay_max_seconds', numOrUndefined(e.target.value))}
+                    placeholder="0"
+                  />
+                  <div className="desc">0 = 不启用。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.checkin_enabled')}
+                      onChange={(e) => update('schedule.checkin_enabled', e.target.checked)}
+                    />
+                    启用签到
+                  </label>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.travel_enabled')}
+                      onChange={(e) => update('schedule.travel_enabled', e.target.checked)}
+                    />
+                    启用猫猫旅行
+                  </label>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.activity_enabled')}
+                      onChange={(e) => update('schedule.activity_enabled', e.target.checked)}
+                    />
+                    启用活跃上报
+                  </label>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.keepalive_enabled')}
+                      onChange={(e) => update('schedule.keepalive_enabled', e.target.checked)}
+                    />
+                    启用 Token 保活
+                  </label>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.limited_enabled')}
+                      onChange={(e) => update('schedule.limited_enabled', e.target.checked)}
+                    />
+                    启用限时活动
+                  </label>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.cat_enabled')}
+                      onChange={(e) => update('schedule.cat_enabled', e.target.checked)}
+                    />
+                    启用夜猫子
+                  </label>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={defaultOn('schedule.growth_enabled')}
+                      onChange={(e) => update('schedule.growth_enabled', e.target.checked)}
+                    />
+                    启用成长任务补跑
+                  </label>
+                  <div className="desc">七类排程互不影响：关掉一个不会停掉其余（小时配置保留，可随时重开）。</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {tab === 'pool' && (
+            <div className="card">
+              <div className="card-head">
+                <h2>账号池与冷却</h2>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>软限流冷却基数 cooldown.soft_rate</label>
+                  <input type="text" value={str('cooldown.soft_rate')} onChange={(e) => update('cooldown.soft_rate', e.target.value)} placeholder="600s" />
+                  <div className="desc">429/限流文案触发的冷却时长，连续触发按 2 倍指数退避。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>软冷却退避封顶 cooldown.soft_rate_max</label>
+                  <input type="text" value={str('cooldown.soft_rate_max')} onChange={(e) => update('cooldown.soft_rate_max', e.target.value)} placeholder="2h" />
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>单账号最大在途 pool.max_in_flight</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.max_in_flight')}
+                    onChange={(e) => update('pool.max_in_flight', numOrUndefined(e.target.value))}
+                    placeholder="3"
+                  />
+                  <div className="desc">0 = 不限制并发。</div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>熔断阈值 pool.breaker_threshold</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.breaker_threshold')}
+                    onChange={(e) => update('pool.breaker_threshold', numOrUndefined(e.target.value))}
+                    placeholder="3"
+                  />
+                  <div className="desc">连续失败达到该次数即熔断。</div>
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>熔断基础时长 pool.breaker_cooldown</label>
+                  <input type="text" value={str('pool.breaker_cooldown')} onChange={(e) => update('pool.breaker_cooldown', e.target.value)} placeholder="30m" />
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>熔断退避封顶 pool.breaker_cooldown_max</label>
+                  <input type="text" value={str('pool.breaker_cooldown_max')} onChange={(e) => update('pool.breaker_cooldown_max', e.target.value)} placeholder="6h" />
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>闲置补偿速率 pool.idle_weight_per_hour</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.idle_weight_per_hour')}
+                    onChange={(e) => update('pool.idle_weight_per_hour', numOrUndefined(e.target.value))}
+                    placeholder="0.5"
+                  />
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>闲置补偿封顶 pool.idle_weight_max</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.idle_weight_max')}
+                    onChange={(e) => update('pool.idle_weight_max', numOrUndefined(e.target.value))}
+                    placeholder="5.0"
+                  />
+                </div>
+              </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label>国内积分保底 pool.credit_floor_cn</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.credit_floor_cn')}
+                    onChange={(e) => update('pool.credit_floor_cn', numOrUndefined(e.target.value))}
+                    placeholder="100"
+                  />
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>国外积分保底 pool.credit_floor_global</label>
+                  <input
+                    type="text"
+                    value={numStr('pool.credit_floor_global')}
+                    onChange={(e) => update('pool.credit_floor_global', numOrUndefined(e.target.value))}
+                    placeholder="30"
+                  />
+                </div>
+              </div>
+              {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
+                  .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
+              <div className="field">
                 <div className="desc">
-                  客户端调用 <span className="mono">/v1/chat/completions</span> 时需带
-                  <span className="mono"> Authorization: Bearer &lt;api_key&gt;</span>。留空则任何人可用。
+                  余额低于<strong>所属域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
+                  防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
+                  两域各自独立取值，留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
+                  紧急时可改小或改 0 放行，保存即生效。
                 </div>
               </div>
             </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>凭证目录 auth_dir</label>
-                <input type="text" value={str('auth_dir')} onChange={(e) => update('auth_dir', e.target.value)} placeholder="./auths" />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>状态文件 state_file</label>
-                <input type="text" value={str('state_file')} onChange={(e) => update('state_file', e.target.value)} placeholder="./data/state.json" />
-              </div>
-            </div>
-          </div>
+          )}
 
-          <div className="card">
-            <div className="card-head">
-              <h2>定时任务</h2>
-              <span className="hint">时间按容器时区（compose 默认 Asia/Shanghai）</span>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>签到小时 checkin_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.checkin_hours'))}
-                  onChange={(e) => update('schedule.checkin_hours', textToHours(e.target.value))}
-                  placeholder="9, 21"
-                />
-                <div className="desc">逗号分隔的整点（0-23）。签到同时会查余额，余额恢复的冷却账号自动解冻。</div>
+          {tab === 'upstream' && (
+            <>
+              <div className="card">
+                <div className="card-head">
+                  <h2>上游超时</h2>
+                </div>
+                <div className="row">
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>短 RPC 总超时（秒）</label>
+                    <input
+                      type="text"
+                      value={numStr('upstream.timeout_seconds')}
+                      onChange={(e) => update('upstream.timeout_seconds', numOrUndefined(e.target.value))}
+                      placeholder="120"
+                    />
+                    <div className="desc">刷新 token / 签到 / 余额 / 模型列表的硬上限。</div>
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>聊天首字节超时（秒）</label>
+                    <input
+                      type="text"
+                      value={numStr('upstream.header_timeout_seconds')}
+                      onChange={(e) => update('upstream.header_timeout_seconds', numOrUndefined(e.target.value))}
+                      placeholder="120"
+                    />
+                    <div className="desc">超时即换号重发；留空回落 timeout_seconds。</div>
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>聊天流空闲超时（秒）</label>
+                    <input
+                      type="text"
+                      value={numStr('upstream.idle_timeout_seconds')}
+                      onChange={(e) => update('upstream.idle_timeout_seconds', numOrUndefined(e.target.value))}
+                      placeholder="300"
+                    />
+                    <div className="desc">持续吐数据不受影响，静默超时才断流。</div>
+                  </div>
+                </div>
               </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>猫猫旅行 travel_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.travel_hours'))}
-                  onChange={(e) => update('schedule.travel_hours', textToHours(e.target.value))}
-                  placeholder="9, 21"
-                />
-                <div className="desc">独立排程：领养 / 派出 / 领奖一趟闭环，已不再搭签到的便车。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>活跃上报 activity_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.activity_hours'))}
-                  onChange={(e) => update('schedule.activity_hours', textToHours(e.target.value))}
-                  placeholder="10"
-                />
-                <div className="desc">每号上报 activity_report_count 条（默认 5）点亮连登，随后领连登奖励与抽奖。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>保活小时 keepalive_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.keepalive_hours'))}
-                  onChange={(e) => update('schedule.keepalive_hours', textToHours(e.target.value))}
-                  placeholder="22"
-                />
-                <div className="desc">在该整点刷新全部账号的 token。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>限时活动 limited_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.limited_hours'))}
-                  onChange={(e) => update('schedule.limited_hours', textToHours(e.target.value))}
-                  placeholder="12"
-                />
-                <div className="desc">调 task_runner.py ALL --yes --limited，只跑带有效期的活动任务；过期后脚本自行跳过。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>夜猫子 cat_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.cat_hours'))}
-                  onChange={(e) => update('schedule.cat_hours', textToHours(e.target.value))}
-                  placeholder="1"
-                />
-                <div className="desc">只跑 task_runner.py 的 black_cat；夜猫窗口 23:00–08:00，窗口外自动跳过。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>成长任务 growth_hours</label>
-                <input
-                  type="text"
-                  value={hoursToText(getPath(doc, 'schedule.growth_hours'))}
-                  onChange={(e) => update('schedule.growth_hours', textToHours(e.target.value))}
-                  placeholder="8"
-                />
-                <div className="desc">每晚跑一遍 task_runner.py ALL --yes 补跑成长任务。脚本幂等：已领/已达标逐项跳过，新账号当天自动补齐。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>时点随机偏移 random_delay_minutes</label>
-                <input
-                  type="text"
-                  value={numText(getPath(doc, 'schedule.random_delay_minutes'))}
-                  onChange={(e) => update('schedule.random_delay_minutes', numOrUndefined(e.target.value))}
-                  placeholder="0"
-                />
-                <div className="desc">0 = 整点。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>账号间隔下限 account_delay_min_seconds</label>
-                <input
-                  type="text"
-                  value={numText(getPath(doc, 'schedule.account_delay_min_seconds'))}
-                  onChange={(e) => update('schedule.account_delay_min_seconds', numOrUndefined(e.target.value))}
-                  placeholder="0"
-                />
-                <div className="desc">0 = 不启用。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>账号间隔上限 account_delay_max_seconds</label>
-                <input
-                  type="text"
-                  value={numText(getPath(doc, 'schedule.account_delay_max_seconds'))}
-                  onChange={(e) => update('schedule.account_delay_max_seconds', numOrUndefined(e.target.value))}
-                  placeholder="0"
-                />
-                <div className="desc">0 = 不启用。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.checkin_enabled')}
-                    onChange={(e) => update('schedule.checkin_enabled', e.target.checked)}
-                  />
-                  启用签到
-                </label>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.travel_enabled')}
-                    onChange={(e) => update('schedule.travel_enabled', e.target.checked)}
-                  />
-                  启用猫猫旅行
-                </label>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.activity_enabled')}
-                    onChange={(e) => update('schedule.activity_enabled', e.target.checked)}
-                  />
-                  启用活跃上报
-                </label>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.keepalive_enabled')}
-                    onChange={(e) => update('schedule.keepalive_enabled', e.target.checked)}
-                  />
-                  启用 Token 保活
-                </label>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.limited_enabled')}
-                    onChange={(e) => update('schedule.limited_enabled', e.target.checked)}
-                  />
-                  启用限时活动
-                </label>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.cat_enabled')}
-                    onChange={(e) => update('schedule.cat_enabled', e.target.checked)}
-                  />
-                  启用夜猫子
-                </label>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={defaultOn('schedule.growth_enabled')}
-                    onChange={(e) => update('schedule.growth_enabled', e.target.checked)}
-                  />
-                  启用成长任务补跑
-                </label>
-                <div className="desc">七类排程互不影响：关掉一个不会停掉其余（小时配置保留，可随时重开）。</div>
-              </div>
-            </div>
-          </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h2>账号池与冷却</h2>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>软限流冷却基数 cooldown.soft_rate</label>
-                <input type="text" value={str('cooldown.soft_rate')} onChange={(e) => update('cooldown.soft_rate', e.target.value)} placeholder="600s" />
-                <div className="desc">429/限流文案触发的冷却时长，连续触发按 2 倍指数退避。</div>
+              <div className="card">
+                <div className="card-head">
+                  <h2>出站代理（按域分）</h2>
+                </div>
+                <div className="row">
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>国内域代理</label>
+                    <input
+                      type="text"
+                      value={str('proxy.cn')}
+                      onChange={(e) => update('proxy.cn', e.target.value)}
+                      placeholder="留空 = 直连 / 走环境变量"
+                    />
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>国外域代理</label>
+                    <input
+                      type="text"
+                      value={str('proxy.global')}
+                      onChange={(e) => update('proxy.global', e.target.value)}
+                      placeholder="如 socks5://127.0.0.1:7890"
+                    />
+                  </div>
+                </div>
+                {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
+                    .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
+                <div className="field">
+                  <div className="desc">
+                    格式 <span className="mono">scheme://[用户名:密码@]主机:端口</span>，支持
+                    <span className="mono"> http</span> / <span className="mono">https</span> /
+                    <span className="mono"> socks5</span> / <span className="mono">socks5h</span>。
+                    国内域指 copilot.tencent.com / codebuddy.cn，国外域指 www.workbuddy.ai
+                    （含 models.dev）。<strong>两域独立</strong>：只配国外域时国内域仍直连。
+                    留空 = 回落 <span className="mono">HTTP_PROXY</span> /
+                    <span className="mono"> HTTPS_PROXY</span> 环境变量，再空则直连；
+                    填了就<strong>只走该代理</strong>（不叠加 NO_PROXY）。
+                    国外域填本机 clash/v2ray 端口（如 <span className="mono">socks5://127.0.0.1:7890</span>）
+                    即可让国内服务器上的国际版账号跑通。保存即生效。
+                  </div>
+                </div>
               </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>软冷却退避封顶 cooldown.soft_rate_max</label>
-                <input type="text" value={str('cooldown.soft_rate_max')} onChange={(e) => update('cooldown.soft_rate_max', e.target.value)} placeholder="2h" />
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>单账号最大在途 pool.max_in_flight</label>
-                <input
-                  type="text"
-                  value={numStr('pool.max_in_flight')}
-                  onChange={(e) => update('pool.max_in_flight', numOrUndefined(e.target.value))}
-                  placeholder="3"
-                />
-                <div className="desc">0 = 不限制并发。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>熔断阈值 pool.breaker_threshold</label>
-                <input
-                  type="text"
-                  value={numStr('pool.breaker_threshold')}
-                  onChange={(e) => update('pool.breaker_threshold', numOrUndefined(e.target.value))}
-                  placeholder="3"
-                />
-                <div className="desc">连续失败达到该次数即熔断。</div>
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>熔断基础时长 pool.breaker_cooldown</label>
-                <input type="text" value={str('pool.breaker_cooldown')} onChange={(e) => update('pool.breaker_cooldown', e.target.value)} placeholder="30m" />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>熔断退避封顶 pool.breaker_cooldown_max</label>
-                <input type="text" value={str('pool.breaker_cooldown_max')} onChange={(e) => update('pool.breaker_cooldown_max', e.target.value)} placeholder="6h" />
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>闲置补偿速率 pool.idle_weight_per_hour</label>
-                <input
-                  type="text"
-                  value={numStr('pool.idle_weight_per_hour')}
-                  onChange={(e) => update('pool.idle_weight_per_hour', numOrUndefined(e.target.value))}
-                  placeholder="0.5"
-                />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>闲置补偿封顶 pool.idle_weight_max</label>
-                <input
-                  type="text"
-                  value={numStr('pool.idle_weight_max')}
-                  onChange={(e) => update('pool.idle_weight_max', numOrUndefined(e.target.value))}
-                  placeholder="5.0"
-                />
-              </div>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>国内积分保底 pool.credit_floor_cn</label>
-                <input
-                  type="text"
-                  value={numStr('pool.credit_floor_cn')}
-                  onChange={(e) => update('pool.credit_floor_cn', numOrUndefined(e.target.value))}
-                  placeholder="100"
-                />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>国外积分保底 pool.credit_floor_global</label>
-                <input
-                  type="text"
-                  value={numStr('pool.credit_floor_global')}
-                  onChange={(e) => update('pool.credit_floor_global', numOrUndefined(e.target.value))}
-                  placeholder="30"
-                />
-              </div>
-            </div>
-            {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
-                .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
-            <div className="field">
-              <div className="desc">
-                余额低于<strong>所属域</strong>保底值的账号不再接<strong>收费</strong>模型（免费模型照常可用），
-                防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
-                两域各自独立取值，留空 = 取默认（国内 100 / 国外 30）；<strong>显式填 0 = 关闭该域</strong>。
-                紧急时可改小或改 0 放行，保存即生效。
-              </div>
-            </div>
-          </div>
+            </>
+          )}
 
-          <div className="card">
-            <div className="card-head">
-              <h2>上游超时</h2>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>短 RPC 总超时（秒）</label>
-                <input
-                  type="text"
-                  value={numStr('upstream.timeout_seconds')}
-                  onChange={(e) => update('upstream.timeout_seconds', numOrUndefined(e.target.value))}
-                  placeholder="120"
-                />
-                <div className="desc">刷新 token / 签到 / 余额 / 模型列表的硬上限。</div>
+          {tab === 'session' && (
+            <>
+              <div className="card">
+                <div className="card-head">
+                  <h2>会话粘性与功能开关</h2>
+                </div>
+                <div className="row">
+                  <div className="field" style={{ flex: 1 }}>
+                    <label className="checkbox">
+                      <input
+                        type="checkbox"
+                        checked={bool('session_sticky.enabled')}
+                        onChange={(e) => update('session_sticky.enabled', e.target.checked)}
+                      />
+                      启用会话粘性
+                    </label>
+                    <div className="desc">同一会话固定到同一账号，多轮对话不跳号。</div>
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>粘性 TTL</label>
+                    <input type="text" value={str('session_sticky.ttl')} onChange={(e) => update('session_sticky.ttl', e.target.value)} placeholder="30m" />
+                  </div>
+                  <div className="field" style={{ flex: 1 }}>
+                    <label>粘性 GC 周期</label>
+                    <input
+                      type="text"
+                      value={str('session_sticky.gc_interval')}
+                      onChange={(e) => update('session_sticky.gc_interval', e.target.value)}
+                      placeholder="5m"
+                    />
+                  </div>
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={bool('features.sanitize_blacklist_fingerprints')}
+                      onChange={(e) => update('features.sanitize_blacklist_fingerprints', e.target.checked)}
+                    />
+                    出站请求体指纹脱敏
+                  </label>
+                  <div className="desc">清洗请求体中的黑名单指纹字段，降低被上游识别为自动化工具的风险。</div>
+                </div>
               </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>聊天首字节超时（秒）</label>
-                <input
-                  type="text"
-                  value={numStr('upstream.header_timeout_seconds')}
-                  onChange={(e) => update('upstream.header_timeout_seconds', numOrUndefined(e.target.value))}
-                  placeholder="120"
-                />
-                <div className="desc">超时即换号重发；留空回落 timeout_seconds。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>聊天流空闲超时（秒）</label>
-                <input
-                  type="text"
-                  value={numStr('upstream.idle_timeout_seconds')}
-                  onChange={(e) => update('upstream.idle_timeout_seconds', numOrUndefined(e.target.value))}
-                  placeholder="300"
-                />
-                <div className="desc">持续吐数据不受影响，静默超时才断流。</div>
-              </div>
-            </div>
-          </div>
 
-          <div className="card">
-            <div className="card-head">
-              <h2>出站代理（按域分）</h2>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label>国内域代理</label>
-                <input
-                  type="text"
-                  value={str('proxy.cn')}
-                  onChange={(e) => update('proxy.cn', e.target.value)}
-                  placeholder="留空 = 直连 / 走环境变量"
-                />
+              <div className="card">
+                <div className="card-head">
+                  <h2>Redis 镜像（可选）</h2>
+                  <span className="hint">留空 = 纯内存模式，功能照常</span>
+                </div>
+                <div className="row">
+                  <div className="field" style={{ flex: 2 }}>
+                    <label>Upstash URL</label>
+                    <input type="text" value={str('upstash.url')} onChange={(e) => update('upstash.url', e.target.value)} placeholder="rediss://… 或 https://xxx.upstash.io" />
+                  </div>
+                  <div className="field" style={{ flex: 2 }}>
+                    <label>Upstash Token</label>
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={str('upstash.token')}
+                      onChange={(e) => update('upstash.token', e.target.value)}
+                      placeholder="REST token"
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>国外域代理</label>
-                <input
-                  type="text"
-                  value={str('proxy.global')}
-                  onChange={(e) => update('proxy.global', e.target.value)}
-                  placeholder="如 socks5://127.0.0.1:7890"
-                />
-              </div>
-            </div>
-            {/* 说明为两格共用，故置于 row 之外整行显示：若挂在其中一格内，
-                .row 的 align-items:flex-end 会以该格底部对齐，把两格的输入框顶成错位。 */}
-            <div className="field">
-              <div className="desc">
-                格式 <span className="mono">scheme://[用户名:密码@]主机:端口</span>，支持
-                <span className="mono"> http</span> / <span className="mono">https</span> /
-                <span className="mono"> socks5</span> / <span className="mono">socks5h</span>。
-                国内域指 copilot.tencent.com / codebuddy.cn，国外域指 www.workbuddy.ai
-                （含 models.dev）。<strong>两域独立</strong>：只配国外域时国内域仍直连。
-                留空 = 回落 <span className="mono">HTTP_PROXY</span> /
-                <span className="mono"> HTTPS_PROXY</span> 环境变量，再空则直连；
-                填了就<strong>只走该代理</strong>（不叠加 NO_PROXY）。
-                国外域填本机 clash/v2ray 端口（如 <span className="mono">socks5://127.0.0.1:7890</span>）
-                即可让国内服务器上的国际版账号跑通。保存即生效。
-              </div>
-            </div>
-          </div>
+            </>
+          )}
 
-          <div className="card">
-            <div className="card-head">
-              <h2>会话粘性与功能开关</h2>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 1 }}>
-                <label className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={bool('session_sticky.enabled')}
-                    onChange={(e) => update('session_sticky.enabled', e.target.checked)}
-                  />
-                  启用会话粘性
-                </label>
-                <div className="desc">同一会话固定到同一账号，多轮对话不跳号。</div>
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>粘性 TTL</label>
-                <input type="text" value={str('session_sticky.ttl')} onChange={(e) => update('session_sticky.ttl', e.target.value)} placeholder="30m" />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label>粘性 GC 周期</label>
-                <input
-                  type="text"
-                  value={str('session_sticky.gc_interval')}
-                  onChange={(e) => update('session_sticky.gc_interval', e.target.value)}
-                  placeholder="5m"
-                />
-              </div>
-            </div>
-            <div className="field" style={{ marginBottom: 0 }}>
-              <label className="checkbox">
-                <input
-                  type="checkbox"
-                  checked={bool('features.sanitize_blacklist_fingerprints')}
-                  onChange={(e) => update('features.sanitize_blacklist_fingerprints', e.target.checked)}
-                />
-                出站请求体指纹脱敏
-              </label>
-              <div className="desc">清洗请求体中的黑名单指纹字段，降低被上游识别为自动化工具的风险。</div>
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="card-head">
-              <h2>Redis 镜像（可选）</h2>
-              <span className="hint">留空 = 纯内存模式，功能照常</span>
-            </div>
-            <div className="row">
-              <div className="field" style={{ flex: 2 }}>
-                <label>Upstash URL</label>
-                <input type="text" value={str('upstash.url')} onChange={(e) => update('upstash.url', e.target.value)} placeholder="rediss://… 或 https://xxx.upstash.io" />
-              </div>
-              <div className="field" style={{ flex: 2 }}>
-                <label>Upstash Token</label>
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={str('upstash.token')}
-                  onChange={(e) => update('upstash.token', e.target.value)}
-                  placeholder="REST token"
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="page-actions">
+          <div className="form-actions-bar">
             <button className="btn btn-primary" onClick={() => void saveForm()} disabled={saving || writeDisabled}>
               {saving ? <Spinner /> : <Save size={14} />} 保存配置
             </button>
@@ -800,33 +851,35 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
               放弃修改
             </button>
           </div>
-        </>
+        </div>
       )}
 
       {tab === 'json' && (
-        <div className="card">
-          <div className="card-head">
-            <h2>JSON 源码</h2>
-            <span className="hint">适合编辑表单未覆盖的自定义字段</span>
-          </div>
-          {jsonError && <Alert kind="error">JSON 语法错误：{jsonError}</Alert>}
-          <textarea
-            rows={26}
-            value={jsonText}
-            onChange={(e) => {
-              setJsonText(e.target.value)
-              setJsonError(null)
-            }}
-            spellCheck={false}
-            style={{ minHeight: 460 }}
-          />
-          <div className="page-actions" style={{ marginTop: 13 }}>
-            <button className="btn btn-primary" onClick={() => void saveJSON()} disabled={saving || writeDisabled}>
-              {saving ? <Spinner /> : <Save size={14} />} 保存配置
-            </button>
-            <button className="btn" onClick={() => setJsonText(JSON.stringify(doc ?? {}, null, 2))}>
-              还原为已加载内容
-            </button>
+        <div role="tabpanel" id="config-panel-json" aria-labelledby="config-tab-json">
+          <div className="card">
+            <div className="card-head">
+              <h2>JSON 源码</h2>
+              <span className="hint">适合编辑表单未覆盖的自定义字段</span>
+            </div>
+            {jsonError && <Alert kind="error">JSON 语法错误：{jsonError}</Alert>}
+            <textarea
+              rows={26}
+              value={jsonText}
+              onChange={(e) => {
+                setJsonText(e.target.value)
+                setJsonError(null)
+              }}
+              spellCheck={false}
+              style={{ minHeight: 460 }}
+            />
+            <div className="page-actions" style={{ marginTop: 13 }}>
+              <button className="btn btn-primary" onClick={() => void saveJSON()} disabled={saving || writeDisabled}>
+                {saving ? <Spinner /> : <Save size={14} />} 保存配置
+              </button>
+              <button className="btn" onClick={() => setJsonText(JSON.stringify(doc ?? {}, null, 2))}>
+                还原为已加载内容
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -841,9 +894,34 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
           onConfirm={() => void doReset()}
           message={
             <>
-              将用首次保存前的备份文件覆盖当前 <span className="mono">{meta?.path}</span>。
-              <br />
-              备份路径：<span className="mono">{meta?.backup_path}</span>
+              将用备份覆盖当前 <span className="mono">{meta?.path}</span>。恢复前会先把当前内容
+              存成新备份，误恢复后还能再恢复回来。
+              <div style={{ marginTop: 10 }}>
+                {meta?.backups?.length ? (
+                  meta.backups.map((b) => (
+                    <label
+                      key={b.index}
+                      className="checkbox"
+                      style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}
+                    >
+                      <input
+                        type="radio"
+                        name="config-backup"
+                        checked={resetIndex === b.index}
+                        onChange={() => setResetIndex(b.index)}
+                      />
+                      <span>
+                        {b.index === 1 ? '上一次保存前' : `${b.index} 次保存前`}
+                        <span className="text-dim" style={{ marginLeft: 6 }}>
+                          {fmtISO(b.at)}
+                        </span>
+                      </span>
+                    </label>
+                  ))
+                ) : (
+                  <span className="text-dim">暂无可用的备份。</span>
+                )}
+              </div>
             </>
           }
         />

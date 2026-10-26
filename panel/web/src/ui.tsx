@@ -1,6 +1,6 @@
 // ui.tsx 通用展示组件与格式化工具。
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Inbox, Info, Monitor, Moon, Sun, X, XCircle } from './icons'
 
 /** 把 Unix 秒格式化为本地时间字符串。 */
@@ -230,6 +230,59 @@ export function Empty({
     <div className="empty">
       {glyph && <span className="empty-icon">{glyph}</span>}
       <div>{children}</div>
+    </div>
+  )
+}
+
+/** Toast 浮层提示：单条、自动淡出，用于「操作已完成」这类不需要占位的反馈。
+ *
+ *  与 Alert 的分工：Alert 是**行内常驻**信息（只读模式、加载失败、字段说明），
+ *  该留在页面上；Toast 是**一次性**反馈（保存成功、需重启），飘一下就过去。
+ *
+ *  props 刻意做成「key 变化即重置」：调用方每次提示换一个新对象（含 id），
+ *  定时器随之重来，连点保存不会出现「上一条的计时器把新一条提前关掉」。
+ *  */
+export interface ToastMessage {
+  /** 唯一标识：同一内容再次提示也要重新计时。 */
+  id: number
+  kind: 'error' | 'warn' | 'ok' | 'info'
+  text: React.ReactNode
+  /** 停留时长（毫秒）；0 = 不自动消失，只能手动关闭。 */
+  duration: number
+}
+
+export function Toast({ message, onClose }: { message: ToastMessage; onClose: () => void }) {
+  // leaving 期间先播淡出动画再真正卸载：直接消失会显得很突兀。
+  const [leaving, setLeaving] = useState(false)
+  // onClose 通常是行内箭头函数，每次渲染都是新引用。若直接放进 effect 依赖，
+  // 父组件任何一次重渲染都会重置计时器 —— 提示会一直挂着不消失。用 ref 固定。
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+
+  useEffect(() => {
+    setLeaving(false)
+    if (message.duration <= 0) return
+    const hide = window.setTimeout(() => setLeaving(true), message.duration)
+    // 淡出动画（200ms，见 styles.css 的 .toast-leaving）走完再交给父组件卸载。
+    const remove = window.setTimeout(() => closeRef.current(), message.duration + 200)
+    return () => {
+      window.clearTimeout(hide)
+      window.clearTimeout(remove)
+    }
+  }, [message.id, message.duration])
+
+  const Icon = { error: XCircle, warn: AlertTriangle, ok: CheckCircle2, info: Info }[message.kind]
+  return (
+    <div className="toast-wrap" role="status" aria-live="polite">
+      <div className={`toast alert-${message.kind} ${leaving ? 'toast-leaving' : ''}`}>
+        <span className="alert-icon">
+          <Icon size={15} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>{message.text}</div>
+        <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭">
+          <X size={14} />
+        </button>
+      </div>
     </div>
   )
 }

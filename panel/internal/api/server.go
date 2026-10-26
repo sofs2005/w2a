@@ -725,35 +725,75 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	// 保存成功后立刻通知网关热重载（同进程部署）：把「保存」与「生效」压成同一步。
-	// 独立面板模式未注入回调，此时只能靠重启进程生效。
+	writeJSON(w, http.StatusOK, s.configSavedResult("配置已保存", fallback))
+}
+
+func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
+	// backup 参数：1 = 上一次保存前的内容，2/3 = 更早；缺省 = 最新一份。
+	var req struct {
+		Backup int `json:"backup"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &req) {
+		return
+	}
+	entry, err := s.svc.ResetUpstreamConfig(req.Backup)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// 恢复备份同样是「文件变了」，必须走与保存相同的热重载 + 提示链路：只写文件
+	// 不重载会让运行期继续用旧配置，而面板却显示「已恢复」，比不恢复更误导。
+	res := s.configSavedResult("已恢复备份", false)
+	res["backup"] = entry
+	writeJSON(w, http.StatusOK, res)
+}
+
+// configSavedResult 构造「config.json 已写盘」之后的响应。
+//
+// 保存与恢复备份共用：两条路径都是「文件已变、需要通知网关重载」，提示语口径必须
+// 一致，否则同一份配置从两个入口进去会得到两种结论。
+//
+// 关键在于**不让前端猜**：reloaded=true 只说明重载回调执行成功，若本次改的全是
+// 需重启的字段，网关其实一个都没应用。故这里把 hot/cold 换算成 restart_required
+// 与 restart_fields 一并下发，前端只负责挑样式与停留时长。
+func (s *Server) configSavedResult(prefix string, fallback bool) map[string]any {
+	report, rerr := s.svc.NotifyConfigSaved()
+
 	var msg string
-	reloaded, rerr := s.svc.NotifyConfigSaved()
+	restartRequired := false
 	switch {
 	case rerr != nil:
-		msg = "配置已写入，但立即重载失败：" + rerr.Error() +
-			"。现有配置仍在生效；修正文件内容后重新保存即可，或重启进程"
-	case reloaded:
-		msg = "配置已保存并立即生效。listen / auth_dir / state_file / upstash 这四项仍需重启进程"
+		msg = prefix + "，但未生效：" + rerr.Error() + "。现有配置仍在生效；修正后重新保存即可，或重启进程"
+		restartRequired = true
+	case !report.Reloaded:
+		// 独立面板模式：没有同进程网关可通知，改动一律要重启网关进程。
+		msg = prefix + "。当前面板未与网关同进程运行，需重启网关进程后生效"
+		restartRequired = true
+	case len(report.Cold) > 0:
+		restartRequired = true
+		if len(report.Hot) > 0 {
+			msg = prefix + "：其余改动已生效；" + strings.Join(report.Cold, "、") + " 需重启进程后生效"
+		} else {
+			msg = prefix + "，以下改动需重启进程后生效：" + strings.Join(report.Cold, "、") +
+				"（宿主机执行 docker compose restart）"
+		}
 	default:
-		msg = "配置已保存。当前面板未与网关同进程运行，改动需重启网关进程才生效（listen / auth_dir / state_file / upstash 同样如此）"
+		msg = prefix + "，已生效"
 	}
 	if fallback {
 		msg += "。注意：当前 config.json 以 Docker 单文件方式挂载，无法原子替换，本次为原地写入"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"message":  msg,
-		"reloaded": reloaded,
-	})
-}
 
-func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.ResetUpstreamConfig(); err != nil {
-		writeError(w, err)
-		return
+	res := map[string]any{
+		"ok":               true,
+		"message":          msg,
+		"reloaded":         report.Reloaded,
+		"restart_required": restartRequired,
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已从备份恢复初始配置"})
+	if len(report.Cold) > 0 {
+		res["restart_fields"] = report.Cold
+	}
+	return res
 }
 
 // ---------------------------------------------------------------------------
@@ -795,11 +835,18 @@ func (s *Server) handleAliasesPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAliasesReset(w http.ResponseWriter, r *http.Request) {
-	if err := s.svc.ResetAliases(); err != nil {
+	var req struct {
+		Backup int `json:"backup"`
+	}
+	if r.ContentLength != 0 && !decodeJSON(w, r, &req) {
+		return
+	}
+	entry, err := s.svc.ResetAliases(req.Backup)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已从备份恢复别名映射"})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "已从备份恢复别名映射", "backup": entry})
 }
 
 // ---------------------------------------------------------------------------

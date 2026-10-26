@@ -612,6 +612,86 @@ handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与�
   且它是 `WBGUI_*` 之外唯一的配置项说明书。
 - `panel/README.md` —— 上游原文，保持原样以便随时对照（见根 README「出处与许可」）。
 
+## 18. 配置页改为页内 Tab + 浮动保存提示 + 结构化生效结果
+
+**动机**（用户反馈）：
+
+1. 配置页 7 张卡片纵向平铺，页面过长；
+2. 顶部那块「保存后立即生效 / 以下改动需重启」的常驻说明占首屏且信息密度低；
+3. 保存结果的绿色 Alert 也在页面顶部，每次保存都把内容整体下推。
+
+改造后发现提示语本身不准确，一并修正：
+
+- `PUT /api/config` 原返回 `reloaded`，但 `reloaded=true` 只代表重载回调执行成功。
+  `configReloaderAdapter.ReloadConfig` 在**只改冷字段时什么都不应用却仍返回 nil**，
+  于是「只改了 listen」也会被提示成「立即生效」。
+- `restartOnlyFields` 漏了 `server` 段。该段目前只有 `server.read_timeout`，
+  注释明确「改动需重启进程」，且只赋给启动时构造的 `http.Server.ReadTimeout`。
+- `POST /api/config/reset` 恢复文件后**不触发**热重载，运行期仍是旧配置，
+  而页面显示「已恢复」——比不恢复更误导。
+
+**改动**：
+
+1. **重载接口返回生效范围**（跨 module 只用内置类型）：
+   `ops.ConfigReloader.ReloadConfig() (hot, cold []string, err error)`；
+   新增 `ops.ReloadReport{Reloaded, Hot, Cold}` 与 `NotifyConfigSaved() (ReloadReport, error)`。
+   宿主侧 `cmd/server/configreload.go` 沿用 `configDiff` / `splitHotAndCold` 如实返回两组，
+   只改冷字段时仍然不应用（取舍不变，见该文件 `ReloadConfig` 的注释）；
+   `cmd/server/panel.go` 的同名接口签名同步。
+2. **`configDiff` 跳过 `json:"-"` 字段**：`SoftRateDur` / `ServerReadTimeoutDur` 这类
+   派生 Duration 由 JSON 键派生，重复计入会让清单出现两遍，而且这些内部名会原样
+   进入面板的「需重启」提示。
+3. **`server` 加入 `restartOnlyFields`**，并同步 `config.go`、`configfile.go` 的
+   `RestartNote`、`host/host.go` 的注释（不再留着过时的「四项」口径）。
+4. **`configSavedResult` 统一构造响应**：保存与恢复共用，保留 `ok/message/reloaded`
+   兼容字段，新增 `restart_required` / `restart_fields`；普通成功只说「已生效」，
+   冷配置才点名并附 `docker compose restart`，重载失败明确「未生效」。
+   `POST /api/config/reset` 改为走同一条链路，并接受 `{"backup":N}`。
+5. **前端 6 个页内 Tab**（`web/src/pages/ConfigPage.tsx`）：基础与存储 / 定时任务 /
+   账号池与冷却 / 上游与代理 / 会话与扩展 / JSON 源码。只搬 JSX，不动
+   `getPath`/`setPath`/`update`/`defaultOn`/`bool`/数值与小时转换，也不动「保存完整 doc」
+   的机制——切 Tab 不会丢未保存修改，未知字段仍原样保留。带
+   `role=tablist/tab/tabpanel` + 左右方向键 + 漫游 `tabIndex`。
+6. **底部常驻保存条**：5 个表单 Tab 共用一组「保存配置 / 放弃修改」，
+   `position: sticky; bottom: 0`（`.form-actions-bar`）；JSON Tab 仍用卡片内按钮。
+7. **浮动提示 `Toast`**（`web/src/ui.tsx` + `styles.css`）：**页面居中**、淡入淡出
+   （160ms / 200ms）、`role=status`、`prefers-reduced-motion` 下去掉位移；普通成功
+   2.5s、需重启/未生效 8s 并带关闭按钮；连续保存换新 `id` 重置计时器，
+   `onClose` 用 ref 固定（否则父组件每次重渲染都会重置计时器）。
+   顶部常驻说明整块删除；只读模式、加载失败、文件不存在、JSON 语法错误等行内
+   Alert 保留。
+
+**上游冲突面**：`ConfigPage.tsx` 与第 7/13/15 条同文件，本次重排了整页结构，
+`git subtree pull` 后基本需按本文件重写该页；`ui.tsx` / `styles.css` 为新增组件与样式
+（纯追加，冲突面小）；`server.go` / `config_reload.go` / `configreload.go` / `panel.go`
+的接口签名改动是本 fork 独有链路。`panel/web/` 改动后须重跑 `npm run build`。
+
+**回归测试**：`cmd/server/configreload_test.go`（热/冷/混合/无差异/`server` 归冷）、
+`panel/internal/api/config_test.go`（五种生效结论 + reset 触发热重载）。
+
+## 19. 配置/别名备份改为滚动保留最近 3 份
+
+**动机**（用户反馈）：原 `ensureBackup` 只在**首次**保存前备份一次、之后永不更新，
+所以「恢复备份」永远回到最初那份。改过几十次之后那个回退点早就没有意义——
+用户真正想要的是「回滚一步」。
+
+**改动**：新增 `panel/internal/ops/backup.go`，config.json 与 model_aliases.json 共用：
+
+- 每次写入前调用 `rotateBackup`，把当前内容存成 `.gui.bak.1`，其余依次后移，
+  超出 `backupKeep`（3）的最旧一份丢弃；
+- 序号语义是**「第几次之前」而非「第几次保存」**：`.1` 永远是「上一次」；
+- `listBackups` 返回清单（最新在前），随 `ConfigMeta` / `AliasMeta` 的 `backups` 下发；
+- `ResetUpstreamConfig(backupIndex)` / `ResetAliases(backupIndex)` 可选具体一份，
+  `<=0` = 最新；**恢复前也先 `rotateBackup`**，让误恢复可以撤销；
+- 兼容老版本：无序号的那份 `.gui.bak` 作为最旧一份纳入轮转，升级不丢历史。
+
+前端两个恢复对话框改为单选列表（「上一次保存前 / 2 次保存前 / 3 次保存前」+ 时间），
+默认选最新。
+
+**回归测试**：`panel/internal/ops/backup_test.go`（轮转与保留份数、按序号恢复、
+恢复可撤销、缺号报错、老文件兼容、首次创建不备份）、
+`panel/internal/api/config_test.go`（恢复上一次、按清单恢复最旧、meta 带 backups）。
+
 ## 纯新增、不会冲突的文件
 
 | 文件 | 作用 |
@@ -620,7 +700,10 @@ handler，断言出站名落进 `/v1/stats`：赋值点（轮转循环内）与�
 | `internal/authstore/preserve.go` | 见上。 |
 | `internal/authstore/preserve_test.go` | 见上。 |
 | `internal/ops/aliasfile.go` | 见第 8 条。 |
+| `internal/ops/backup.go` | 见第 19 条（滚动备份，config 与别名共用）。 |
+| `internal/ops/backup_test.go` | 见第 19 条。 |
 | `internal/api/alias_test.go` | 见第 8 条。 |
+| `internal/api/config_test.go` | 见第 18/19 条。 |
 | `internal/api/models_test.go` | 见第 8 条（`realms` 透传回归）。 |
 | `internal/api/stats_test.go` | 见第 14 条（`out_models` 透传回归）。 |
 | `internal/api/account_ledger_test.go` | 见第 9 条（账号台账透传回归）。 |
