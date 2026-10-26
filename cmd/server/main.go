@@ -190,6 +190,10 @@ func main() {
 			AvailableForModel: realmAwareAvailableForModel(p, aliasStore),
 			// 紧急到期优先候选集：仅新建/失效重绑时生效（见 session.Config.UrgentForModel）。
 			UrgentForModel: realmAwareUrgentForModel(p, aliasStore),
+			// 首绑按三因子权重分配（issue #265）：粘性命中即定，若首绑仍按哈希取模，
+			// 「快过期积分优先消耗」这条池权重在默认配置下就永远轮不到——带会话标识的
+			// 请求首轮绑定后滚动续期，压根走不到 Pool.pick。
+			PickForModel: realmAwareWeightedPick(p, aliasStore),
 		})
 		r.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		r.StartGC()

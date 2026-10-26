@@ -51,6 +51,20 @@ type Config struct {
 	// 切号（用户要求保留粘性）；绑定号失效时本就在重分配，此时才轮到紧急集参与。
 	// nil 时回落 AvailableForModel（无该维度，行为与引入前一致）。
 	UrgentForModel func(model string) []string
+	// PickForModel 在给定候选集内按账号池真实权重选一个 uid（空串 = 该集合此刻无可用）。
+	// 供粘性**首绑**使用（issue #265）；nil 时回落 hashIndex 稳定散列（旧行为，
+	// 无 pool 依赖的调用方与既有测试保留该语义）。
+	//
+	// 为什么传候选集而不只是 model：双段策略（优先未绑定任何会话的空闲号）属于路由侧
+	// 职责，pool 只在"给定候选集内"回答谁更该先被消耗——两个包的边界因此不互相侵入。
+	//
+	// 为什么需要它：哈希取模只看 key 字节，不看积分余额、快过期积分、闲置时长，于是
+	// pool 里为「积分过期」设计的三因子权重在默认开启的粘性下几乎失效——带会话标识的
+	// 请求在首轮就被哈希分配并滚动续期，永远走不到 Pool.pick。
+	//
+	// 实现方注意：本回调在 Router 写锁内被调用，实现不得回调本 Router（会有死锁风险），
+	// 也不应长时间阻塞。
+	PickForModel func(model string, candidates []string) string
 }
 
 // Router 会话粘性路由器。
@@ -244,7 +258,28 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 	if len(pool2) == 0 {
 		pool2 = uids
 	}
-	uid := pool2[hashIndex(key, len(pool2))]
+	// 段内选谁（issue #265）：
+	//   注入 PickForModel → 按账号池三因子权重（credits / 快过期积分 / 闲置）选，
+	//     让「快过期积分优先消耗」在粘性首绑上同样成立；
+	//   未注入 / 回调给出空串或候选集外的 uid → 回落 hashIndex 稳定散列（旧语义）。
+	// 为什么要校验返回值落在 pool2 内：回调按池内实时状态过滤，可能刚好把候选全部滤掉
+	// （返回空串，属正常）；但若实现侧给了一个不在候选里的 uid，绑上去就是一个本不该
+	// 参与本模型/本段分配的号——那正是「粘性钉在不可用号上反复失败」的老问题，所以宁可
+	// 回落哈希也不采信越界值。
+	var uid string
+	if r.cfg.PickForModel != nil {
+		if picked := r.cfg.PickForModel(model, pool2); picked != "" {
+			for _, u := range pool2 {
+				if u == picked {
+					uid = picked
+					break
+				}
+			}
+		}
+	}
+	if uid == "" {
+		uid = pool2[hashIndex(key, len(pool2))]
+	}
 
 	prev, existed := r.entries[key]
 	r.entries[key] = entry{uid: uid, lastActive: now}
