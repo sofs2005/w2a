@@ -17,6 +17,11 @@ RUN cd panel/web && npm run build
 # 「CI 校验用旧版、镜像编译用新版」——新版 API 能过构建却挂 CI（或反之）。
 # 升级时两处一起改。
 FROM golang:1.26-alpine AS build
+# go mod download 默认走 proxy.golang.org，国内网络不可达时容器构建失败。
+# 默认改走 goproxy.cn（公共 CDN，海外同样可达，回源走 direct）。要换代理时用
+# 构建参数覆盖：docker compose build --build-arg GOPROXY=https://proxy.golang.org,direct
+ARG GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 COPY go.mod go.sum ./
 # replace 指向的本地 module 必须先存在，否则 go mod download 解析不到。
@@ -35,8 +40,12 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/serve
 
 # alpine:3.20 已于 2026-04-01 EOL，apk 源下线后构建会失败，保持使用仍在支持期的分支
 FROM alpine:3.22
+# Alpine 官方 CDN 在国内经常超时。构建参数可覆盖：
+#   docker compose build --build-arg APK_MIRROR=dl-cdn.alpinelinux.org
+ARG APK_MIRROR=mirrors.aliyun.com
 # python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
-RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
+RUN if [ -n "$APK_MIRROR" ]; then sed -i "s#dl-cdn.alpinelinux.org#$APK_MIRROR#g" /etc/apk/repositories; fi \
+ && apk add --no-cache wget ca-certificates tzdata python3 bash \
  && adduser -D -u 10001 app \
  && mkdir -p /app/auths /app/data \
  && chown -R app:app /app
