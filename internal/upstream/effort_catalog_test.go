@@ -43,18 +43,18 @@ func TestEffortListingStaticFallback(t *testing.T) {
 }
 
 // TestEffortListingRealmSplit issue #84 核心：同模型 deepseek-v4.1-flash 在两个 realm 档位刻意不同。
-// global 只有 ['high']（WorkBuddy 国际版实测），不能沿用 CN 三档。
+// global 为 ['high','max']（WorkBuddy 国际版 2026-10 官方客户端已可选 Max），不能沿用 CN 三档。
 func TestEffortListingRealmSplit(t *testing.T) {
 	cnEfforts, cnDef := EffortListing("cn", "deepseek-v4.1-flash", nil, "")
 	if !reflect.DeepEqual(cnEfforts, []string{"low", "high", "max"}) || cnDef != "high" {
 		t.Errorf("cn deepseek-v4.1-flash=%v/%q want [low high max]/high", cnEfforts, cnDef)
 	}
 	gEfforts, gDef := EffortListing("global", "deepseek-v4.1-flash", nil, "")
-	if !reflect.DeepEqual(gEfforts, []string{"high"}) {
-		t.Errorf("global deepseek-v4.1-flash=%v want [high]", gEfforts)
+	if !reflect.DeepEqual(gEfforts, []string{"high", "max"}) {
+		t.Errorf("global deepseek-v4.1-flash=%v want [high max]", gEfforts)
 	}
-	if gDef != "" {
-		t.Errorf("global deepseek-v4.1-flash defaultEffort=%q want empty (无 defaultReasoningEffort)", gDef)
+	if gDef != "high" {
+		t.Errorf("global deepseek-v4.1-flash defaultEffort=%q want high", gDef)
 	}
 }
 

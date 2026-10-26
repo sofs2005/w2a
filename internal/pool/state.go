@@ -32,6 +32,18 @@ func (p *Pool) Disable(uid, reason string) {
 // 即使账号已 disabled，计数仍累计并返回 false 前 N-1 次——但 keepalive 会跳过
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
 func (p *Pool) NoteSessionDead(uid string) bool {
+	return p.NoteAuthFailure(uid, sessionDeadReason)
+}
+
+// NoteAuthFailure 记录一次**账号级授权失败**——12153 session 失效（ErrSessionDead）
+// 与「无 12153 的纯 401」（ErrAuthRejected）共用同一套连续计数：
+// 计数 +1，达到 sessionDeadThreshold → Disable（reason 由调用方给出）并清计数。
+//
+// 为什么两类共用一套计数：两者表达的是同一件事（凭证被上游拒绝），只是上游的
+// 响应形态不同 —— 有业务码 12153 时能直接定性，没有时（APISIX 网关 401 页 / 空体）
+// 只能靠连续命中来区分「偶发抖动」与「真失效」。共用计数意味着同一账号先撞 2 次
+// 12153 再撞 1 次纯 401 也会被判死，这正是期望行为（凭证状态不会自己好转）。
+func (p *Pool) NoteAuthFailure(uid, reason string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
@@ -44,7 +56,7 @@ func (p *Pool) NoteSessionDead(uid string) bool {
 		return false
 	}
 	e.sessionDeadFails = 0
-	p.disableLocked(e, sessionDeadReason)
+	p.disableLocked(e, reason)
 	return true
 }
 

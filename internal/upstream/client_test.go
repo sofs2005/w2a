@@ -85,7 +85,13 @@ func TestClassify(t *testing.T) {
 		{401, `{"code":12153,"msg":"Offline user session not found, rate limit"}`, ErrSessionDead},
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
-		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},
+		// 401 但**没有** 12153 业务码：网关拦截页 / 空体 / 非信封 JSON。归
+		// auth_rejected 而不是 client —— ErrClient 只换号不罚号（10 分钟降权后
+		// 自动回池），坏号会被反复选中；auth_rejected 由 handler 走连续计数，
+		// 达阈值才禁用。空体与 HTML 是 APISIX 401 的真实形态，一并锁住。
+		{401, `{"code":9999,"msg":"bad token"}`, ErrAuthRejected},
+		{401, ``, ErrAuthRejected},
+		{401, `<html><body>401 Unauthorized</body></html>`, ErrAuthRejected},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},

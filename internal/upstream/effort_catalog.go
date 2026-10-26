@@ -8,7 +8,7 @@
 // 档位值照抄参考仓库 dsh-codearts：CN/CodeBuddy 面取 src/product.ts CODEBUDDY_FALLBACK_MODELS
 // ∪ src/buddy-adapter.ts:126-137 REASONING_EFFORTS；global/WorkBuddy 面取 src/product.ts
 // WORKBUDDY_FALLBACK_MODELS。两个 realm 对同一模型给出不同档位（如 deepseek-v4.1-flash：
-// CN 三档 ['low','high','max']、global 仅 ['high']），故**按 realm 分表**，绝不混用。
+// CN 三档 ['low','high','max']、global ['high','max']），故**按 realm 分表**，绝不混用。
 //
 // 只列**可枚举**档位的模型；仅有固定默认档（glm-5.1/kimi-* 的 medium）同样入表，
 // 但其档位是「可枚举单档」而非「无选择器」，照抄参考仓库如实暴露。
@@ -42,15 +42,15 @@ var cnEffortFallback = map[string]effortCap{
 }
 
 // globalEffortFallback global / WorkBuddy 国际版面静态兜底表。
-// 注意 deepseek-v4.1-flash 在国际版**只有 ['high']**（product.ts:190 实测 IDE 缓存），
-// 与 CN 面的三档刻意不同——往 WorkBuddy 上游发 low/max 是非法参数 400。
+// deepseek-v4.1-flash 在国际版为 ['high','max']（2026-10 官方客户端已可选 Max），
+// 与 CN 面的三档仍不同——low 不是国际版的合法档位。
 var globalEffortFallback = map[string]effortCap{
 	"fast-model":          {efforts: []string{"medium"}},
 	"balanced-model":      {efforts: []string{"medium"}},
 	"primary-model":       {efforts: []string{"high"}},
 	"hy4-preview-f":       {efforts: []string{"high"}, defaultEffort: "high"},
 	"hy3":                 {efforts: []string{"low", "high"}, defaultEffort: "high"},
-	"deepseek-v4.1-flash": {efforts: []string{"high"}},
+	"deepseek-v4.1-flash": {efforts: []string{"high", "max"}, defaultEffort: "high"},
 	"gpt-6-astra":         {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},
 	"gpt-5.6-sol":         {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},
 	"gpt-5.6-terra":       {efforts: []string{"low", "medium", "high", "xhigh", "max"}, defaultEffort: "high"},

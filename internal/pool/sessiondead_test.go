@@ -253,3 +253,35 @@ func TestStatusDisabledReasonClearedByRevive(t *testing.T) {
 		t.Errorf("revive 后 reason=%q want 空", st.Reason)
 	}
 }
+
+// TestNoteAuthFailureSharesCounter 纯 401（ErrAuthRejected）与 12153 共用同一连续
+// 计数：先撞 2 次 12153 再撞 1 次纯 401 也会被判死——两种形态表达的是同一件事
+// （凭证被上游拒绝），凭证状态不会自己好转。
+func TestNoteAuthFailureSharesCounter(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	if p.NoteSessionDead("u1") {
+		t.Fatal("第 1 次不该禁用")
+	}
+	if p.NoteSessionDead("u1") {
+		t.Fatal("第 2 次不该禁用")
+	}
+	if !p.NoteAuthFailure("u1", "401 auth rejected") {
+		t.Fatal("第 3 次（跨形态）应达阈值并禁用")
+	}
+	st, ok := p.Status("u1")
+	if !ok || !st.Disabled {
+		t.Fatalf("账号应已禁用: %+v", st)
+	}
+	if !strings.Contains(st.Reason, "401 auth rejected") {
+		t.Errorf("禁用原因应保留调用方给出的 reason，got %q", st.Reason)
+	}
+}
+
+// TestNoteAuthFailureUnknownUID 未知 uid 静默返回 false（与 NoteSessionDead 同口径）。
+func TestNoteAuthFailureUnknownUID(t *testing.T) {
+	p := New("")
+	if p.NoteAuthFailure("ghost", "401 auth rejected") {
+		t.Error("未知 uid 不该返回 true")
+	}
+}

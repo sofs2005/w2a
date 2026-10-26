@@ -61,10 +61,14 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:
 		return "account session expired at upstream; the account is disabled until re-login"
+	case ErrAuthRejected:
+		return "account credential rejected by upstream (401); the gateway disables this account after repeated hits"
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
+	case ErrFallbackModelMissing:
+		return "the fallback path does not serve this model; the gateway rotated to another account"
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。

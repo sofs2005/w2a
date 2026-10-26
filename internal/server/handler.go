@@ -1200,6 +1200,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
+			// 模型要求工具 schema 里 enum 必须带 type，缺了整单 400）。同一 body 换任何
+			// 账号都会得到同一个 400 —— 轮转只会把无效请求放大 MaxRotate 倍，而
+			// ErrClient 默认策略里的 NoteFailures 还会把健康账号的连败计数喂高、临时
+			// 踢出池（实测：一次连续探测把 healthy 从 19 打到 7）。
+			// 因此这里 fail-fast：400 + 上游原文，不轮转、不罚号（本分支不进
+			// applyErrorPolicy，ErrClient 的 NoteFailures 不会执行）。
+			if kind == upstream.ErrClient && upstream.CodeOf(string(respBody)) == "11133" {
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request parameters were rejected by the model provider"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "invalid_request", msg,
+					h.hintOf(kind, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				return
+			}
 			// 11101「Unmarshal chat params failed」：请求体解析失败，与
 			// 11115/11135/11148 同族——发生在上游**解析请求体**阶段，还没走到模型
 			// 路由，同一份 body 换任何账号都是同样的解析错误。轮转只会放大无效请求
@@ -1272,6 +1290,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 502 观测没有意义）。
 				st.status = http.StatusBadGateway
 				log.Printf("WARN: [server] stream acct=%s model=%s: empty upstream stream (200+0 frames)", logfmt.Label(acct.UID, acct.Nickname), bareModel)
+			case upstream.IsTruncatedStreamError(sErr):
+				// 上游 200 但流中途断掉（转发过内容帧、无 finish_reason、无 [DONE]）：
+				// StreamHint 已在 [DONE] 之前补一条 error 帧（客户端由此判失败而非
+				// 「完成」）。这里同样把日志/状态收敛到 502 —— 不这么做，日志里留下
+				// 的是一条 tok=... 的假成功，正是本问题此前查不出来的原因。
+				st.status = http.StatusBadGateway
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream truncated (no finish_reason/[DONE])", logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			case errFrame != "":
 				// 上游「200 + error 帧」：这是**失败**不是成功，HTTP 头已发无法改状态码，
 				// 但账号处置必须做——被限流/被拦的号若记成健康并绑上粘性，会话会被钉死
@@ -1634,6 +1659,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.config().Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.config().Pool.Disable(uid, "12153 session dead")
+	case upstream.ErrAuthRejected:
+		// 纯 401（无 12153、无业务信封）：凭证被上游拒绝，但单次可能是网关抖动
+		// 或 token 轮换竞态 —— 不直接 Disable（chat 路径误判一次就是永久杀号），
+		// 改走连续计数，达到 sessionDeadThreshold 才禁用。计数器与 12153 共用：
+		// 同一账号先后撞到两种形态，本来就说明凭证不会自己好转。
+		h.config().Pool.NoteAuthFailure(uid, "401 auth rejected")
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。
@@ -1723,6 +1754,11 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
 		h.config().Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason, alsoOut...)
+	case upstream.ErrFallbackModelMissing:
+		// 回退路径（/console）报的 11102（issue #245）：只说明「这条路径没有这个模型」，
+		// 不是「该账号缺这个模型」。零动作（不冷却/不熔断/不 NoteError），仍然轮转 ——
+		// 换个号可能压根不需要回退（渠道校验与账号灰度有关），而写成模型级冷却会让
+		// 十几个号轮一圈就把整池打满，对外变成 503 no_healthy_account。
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

@@ -48,6 +48,21 @@ const (
 	// 地址非法）→ **配置错误**，不是账号问题：不罚号、不轮转、不进熔断，直接 503。
 	// 换多少个号结果都一样（见 clientFor / TransportFor）。
 	ErrRouteUnavailable
+	// ErrAuthRejected 401 但**不带 12153**：上游网关的拦截页 / 空体 / 纯 HTML 401
+	// （APISIX 常见形态，body 里没有任何业务信封）。
+	//
+	// 为什么不能落 ErrClient：那条路只换号 + 连败降权（10 分钟后自动回池），坏号
+	// 会一直留在池里被反复选中，表现为「面板显示健康、每次命中都 503」。
+	// 为什么不能直接判 ErrSessionDead：chat 路径上的 ErrSessionDead 一次即
+	// Disable（applyErrorPolicy），而纯 401 可能是网关抖动或 token 轮换竞态，
+	// 一次误判就是永久杀号。故单列一类，由 handler 走「连续 N 次才禁用」的计数
+	// 路径（与 12153 的 NoteSessionDead 同口径、共用计数器）。
+	ErrAuthRejected
+	// ErrFallbackModelMissing 回退路径（/console）报的 11102（issue #245）→ 请求级
+	// 错误：它只说明「这条路径没有这个模型」，不构成「该账号缺这个模型」的证据。
+	// 不能落 ErrModelBlocked —— handler 会写 6 小时 (账号,模型) 负缓存，十几个号轮
+	// 一圈就是整池 503；也不该按 ErrClient 喂连败计数（失败的是路径不是账号）。
+	ErrFallbackModelMissing
 )
 
 func (k ErrKind) String() string {
@@ -82,6 +97,10 @@ func (k ErrKind) String() string {
 		return "empty_message"
 	case ErrRouteUnavailable:
 		return "route_unavailable"
+	case ErrAuthRejected:
+		return "auth_rejected"
+	case ErrFallbackModelMissing:
+		return "fallback_model_missing"
 	case ErrClient:
 		return "client"
 	default:
@@ -662,6 +681,13 @@ func Classify(status int, body string) ErrKind {
 	// （429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须 sessionDead）。
 	if sessionDeadRule.hit(body, lower) {
 		return ErrSessionDead
+	}
+	// 401 兜底（**无 12153** 的纯 401）：上游网关拦截页、空体、纯 HTML 都落到
+	// 这里。单列 ErrAuthRejected 而不是 ErrClient —— 见该 errkind 的注释：
+	// ErrClient 只换号不罚号，坏号会在池里反复被选中；而这一类的正确处置是
+	// 「连续 N 次后禁用」（handler.applyErrorPolicy 走 NoteAuthFailure）。
+	if status == http.StatusUnauthorized {
+		return ErrAuthRejected
 	}
 	// 渠道校验（同一业务码族上的**账号级**口径，2026-10-17）：归 ErrAccountFault，
 	// 让 handler 的 ErrAccountFault 分支接管（那里最先判它、只软冷却、绝不禁用）。
@@ -1588,6 +1614,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+			// 回退路径上的 11102 降级（issue #245）：能走到 /console 是因为 /v2 判了渠道
+			// 校验，而 /console 本来就可能不提供这个模型 —— 11102 只说明「这条路径没有」，
+			// 不是「该账号缺这个模型」。照 ErrModelBlocked 处理，handler 会写 (账号,模型)
+			// 6 小时负缓存，逐个账号轮过去就是整池 503 no_healthy_account，比不换路径更糟。
+			// 也不按 ErrClient 处理：连败计数是账号健康信号，这里失败的是路径不是账号。
+			if i > 0 && kind == ErrModelBlocked {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，按请求级处理（不写模型冷却）",
+					logfmt.Label(a.UID, a.Nickname), path, kind)
+				kind = ErrFallbackModelMissing
+			}
 			// 路径级拒绝 → 换下一个候选路径再试，**不**把它当账号问题。
 			// 触发条件**只有渠道校验**：404/405 不回落是 #119 的刻意取舍（/console
 			// 挂腾讯云 WAF 的 body 内容规则，不能因为路径写错就整批改道），契约由
