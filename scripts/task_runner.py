@@ -29,6 +29,7 @@
     automation_1         automated_task_create_suc          1  （rrule 虚拟对象）
     playbook_prompt      playbook_prompt_send               1  （案例 id: static registry.json）
     Expert_lighthouse    expert_actual_use                  1  （轻量云 ex_ id: 关键词过滤）
+    expert_use_*         expert_actual_use(CLOUD)           1  （任务绑定 expertId，四连，限时）
     Hp_Appearance        appearance_skin_apply              1  （theme resourceKey: appearance/resources）
     chat_5               chat_request_send                  5  （5 条独立 conversation）
     Model_chat_GLM5.2    chat_request_send(glm-5.2)         1
@@ -111,6 +112,17 @@ MAPPING = {
     # 且全量成长补跑用 --skip 排除本 code，避免两个排程重复点亮。
     "WorkBuddy_Valorant":     {"kind": "valorant",   "target": 1, "src": "agent_name=valorant-perler-expert",
                                "valid_end": "2026-11-15T23:59:00+08:00"},
+    # 限时活动任务（valid_end 2026-11-20）：四个「体验指定专家」任务，判据与 valorant
+    # 完全同族（召唤三连 + 真实对话 + 六连 + mode=CLOUD 的 actual_use），差别只在
+    # 专家由任务自身绑定（EXPERT_USE_TASKS，取自 jump_url 的 expertId），不再靠市场搜索。
+    "expert_use_maidehao":            {"kind": "expertuse", "target": 1, "src": "任务绑定 ex_GDl31WahyIH0",
+                                       "valid_end": "2026-11-20T23:59:00+08:00"},
+    "expert_use_douyinyin":           {"kind": "expertuse", "target": 1, "src": "任务绑定 ex_FbY5nlWTqDod",
+                                       "valid_end": "2026-11-20T23:59:00+08:00"},
+    "expert_use_shangjia_xuanchuan":  {"kind": "expertuse", "target": 1, "src": "任务绑定 ex_Weo3x2EZuSDm",
+                                       "valid_end": "2026-11-20T23:59:00+08:00"},
+    "expert_use_bowangwang":          {"kind": "expertuse", "target": 1, "src": "任务绑定 ex_WZY136wV5aMt",
+                                       "valid_end": "2026-11-20T23:59:00+08:00"},
     "Buddy_App":              {"kind": "buddy5",     "target": 1, "src": "buddy 应用 id"},
     "Buddy_App_QQ":           {"kind": "buddy5",     "target": 1, "src": "企鹅教师助手 id"},
     "Hp_Appearance":          {"kind": "skin",       "target": 1, "src": "主题 resourceKey"},
@@ -291,6 +303,25 @@ VALORANT_EXPERT_IDS = [("ex_xQHHD1u5Jkua", {
     "name": "无畏契约拼豆专家", "category": "03-GameSpatial",
     "expertType": "agent", "version": "1.2.3",
     "agent_name": VALORANT_AGENT_NAME})]
+
+# 限时任务「体验指定专家」四连（expert_use_*，valid_end 2026-11-20）。
+# 专家 id 取自各任务 jump_url 的 expertId（服务端绑定，权威）；元数据取自专家市场
+# 实测（display_name/分类/版本），name 用市场真名而非任务标题的推广名——事件里
+# 的 name 是客户端会发的专家展示名，标题里的「中国电商运营专家」在市场上叫「卖得好」。
+EXPERT_USE_TASKS = {
+    "expert_use_maidehao": ("ex_GDl31WahyIH0", {
+        "name": "卖得好", "category": "05-MarketingGrowth", "expertType": "agent",
+        "version": "1.0.1", "agent_name": "china-ecommerce-operations-expert"}),
+    "expert_use_douyinyin": ("ex_FbY5nlWTqDod", {
+        "name": "斗音音", "category": "06-ContentCreative", "expertType": "agent",
+        "version": "1.0.2", "agent_name": "douyin-strategist"}),
+    "expert_use_shangjia_xuanchuan": ("ex_Weo3x2EZuSDm", {
+        "name": "商家宣传设计师", "category": "01-ProductDesign", "expertType": "agent",
+        "version": "1.6.0", "agent_name": "promo-page-designer"}),
+    "expert_use_bowangwang": ("ex_WZY136wV5aMt", {
+        "name": "播旺旺", "category": "05-MarketingGrowth", "expertType": "agent",
+        "version": "1.0.2", "agent_name": "livestream-ecommerce-coach"}),
+}
 
 # 连登/能量读数（只读 oracle，M15 实测 /v2/activity/growth/energy -> data.balance）
 PATH_ENERGY = "/v2/activity/growth/energy"
@@ -508,7 +539,7 @@ SCHOOL_REPORT_KIND = {
 MP_PLATFORM_HEADER = {"X-Client-Platform": "miniprogram"}
 
 
-def ids_for(kind, auth, need, offset=0):
+def ids_for(kind, auth, need, offset=0, code=None):
     """返回需要上报的对象 id 列表 [(obj_id, meta)]（按源顺序，偏移 cur 避免复用）。"""
     if need <= 0:
         return []
@@ -530,6 +561,11 @@ def ids_for(kind, auth, need, offset=0):
     if kind == "valorant":
         # 精确 agent_name 过滤；市场不可用时回落内置 id（任务有 valid_end，不能静默不动作）
         return _dedup_slice(_fetch_valorant_expert(auth) or VALORANT_EXPERT_IDS, offset, need)
+    if kind == "expertuse":
+        # 专家由任务自身绑定（jump_url 的 expertId），无需市场搜索；未绑定的 code 返回空，
+        # 由调用方保守跳过（宁可不动也不把召唤打给错误专家）。
+        bound = EXPERT_USE_TASKS.get(code)
+        return [(bound[0], bound[1])] if bound else []
     if kind == "skin":
         return _dedup_slice(_fetch_pe_theme(auth), offset, need)
     if kind in ("chat", "glmchat", "automation", "cat"):
@@ -1227,7 +1263,7 @@ def process_minichat_task(auth, code, opts, stats, uid8):
     # 必须在 accept 之前判定——否则会留下「已登记未上报」的半程态（下次仍需 accept
     # 分支才能补报），宁可整任务不动作。
     need = max(1, target - cur)
-    ids = ids_for(kind, auth, need, offset=cur)
+    ids = ids_for(kind, auth, need, offset=cur, code=code)
     if not ids:
         print(f"[task_runner] {uid8} {code}: {kind} 无可用对象 id，WARN 跳过点亮")
         stats["pending"] += 1
@@ -1359,7 +1395,7 @@ def process_task(auth, code, t, opts, stats):
         return
 
     if not opts.yes:
-        ids = ids_for(spec["kind"], auth, need, offset=cur)
+        ids = ids_for(spec["kind"], auth, need, offset=cur, code=code)
         shown = [i for i, _ in ids][:6]
         print(f"[task_runner] {uid8} {code}: query {ast}({cur}/{target}) -> 可点亮 need={need} "
               f"id源={spec['src']} ids={shown}，dry-run 跳过")
@@ -1452,16 +1488,17 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
             if i < need - 1:
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
-    elif spec["kind"] in ("lighthouse", "valorant"):
+    elif spec["kind"] in ("lighthouse", "valorant", "expertuse"):
         # 指定专家「召唤并完成一次对话」：召唤三连 → 真实桌面对话（取服务端 requestId）
         # → 带 has_expert 的六连 → expert_actual_use。不能沿用通用分支：
         # 自造 requestId 服务端不计数（进度恒 0/target）。
-        # 两类仅 actual_use 形态不同：轻量云判据 mode=LOCAL/type 空，市场类专家
-        # 判据 mode=CLOUD/type=分类（见各自构造器注释）。
+        # 三类仅 actual_use 形态与专家来源不同：轻量云判据 mode=LOCAL/type 空；
+        # valorant / expertuse 是市场类专家，判据 mode=CLOUD/type=分类，专家分别
+        # 由 agent_name 搜索与任务绑定 id 得到（见各自构造器注释）。
         kind = spec["kind"]
-        build_use = (desktop_expert_actual_use_cloud if kind == "valorant"
-                     else desktop_expert_actual_use_local)
-        ids = ids_for(kind, auth, need, offset=cur)
+        build_use = (desktop_expert_actual_use_local if kind == "lighthouse"
+                     else desktop_expert_actual_use_cloud)
+        ids = ids_for(kind, auth, need, offset=cur, code=code)
         if not ids:
             print(f"[task_runner] {uid8} {code}: report 无可用对象 id，skip")
             stats["fail"] += 1
@@ -1524,7 +1561,7 @@ def light_up(auth, code, spec, cur, target, uid8, opts, stats, cap=0):
                 time.sleep(opts.gap)
         time.sleep(2.0)  # 服务端归账可能异步
     else:
-        ids = ids_for(spec["kind"], auth, need, offset=cur)
+        ids = ids_for(spec["kind"], auth, need, offset=cur, code=code)
         if not ids:
             print(f"[task_runner] {uid8} {code}: report 无可用对象 id，skip")
             stats["fail"] += 1

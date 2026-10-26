@@ -175,9 +175,10 @@ func (s *Scheduler) runGrowthTasksNow(ctx context.Context) {
 // RunLimitedTasksNow 立即执行限时活动任务：task_runner.py ALL --yes --limited。
 //
 // 与 growth 的分工：growth 跑长期的一次性成长任务（16 项），本入口只跑 MAPPING
-// 里带 valid_end 的限时活动任务（如 WorkBuddy_Valorant「体验无畏契约拼豆专家」，
-// 有效期至 2026-11-15）。活动下线后脚本侧按 valid_end 整体跳过、正常退出，
-// 因此排程无需感知具体活动的存亡——新增限时活动只需在 MAPPING 加 valid_end。
+// 里带 valid_end 的限时活动任务（如 WorkBuddy_Valorant「体验无畏契约拼豆专家」至
+// 2026-11-15、expert_use_* 四条「体验指定专家」至 2026-11-20）。活动下线后脚本侧
+// 按 valid_end 整体跳过、正常退出，因此排程无需感知具体活动的存亡——新增限时活动
+// 只需在 MAPPING 加 valid_end。
 //
 // 全量 growth 补跑会自动排除限时任务（脚本内 LIMITED_CODES），两个排程不会
 // 对同一任务重复点亮。共享 taskRunnerMu：两者是同一脚本、同一批 auth 文件。
