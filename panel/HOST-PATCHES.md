@@ -162,6 +162,23 @@ import 与 state 声明、卡片本体），并把 `load()` 的时间参数加�
 **上游影响面**：上游也在改这个文件（「定时任务」卡片所在），`git subtree pull`
 后需重放本节的字段与 `defaultOn()`。
 
+**2026-10-27 追加：开关与参数合并成组 + 联动只读。** 原布局把七类任务的小时输入
+放在上半张卡、七类开关放在下半张卡，改一项要上下对照着找归属。现改为：每个任务
+一格（`.task-item`），开关在上、它控制的小时紧随其下，七格用 `.grid-2` 排（桌面
+三列/两列、窄屏自动单列）。三张卡依次为「定时任务」「通用排程参数」「能量开盲盒」；
+三个通用参数（`random_delay_minutes` / `account_delay_*_seconds`）没有对应开关，
+继续留在独立卡里，**不要**绑到任何任务上。
+
+联动规则：**开关关闭时只把参数输入 `disabled`，值原样保留**。依据是网关侧语义
+「开关与取值解耦，禁用后仍保留用户显式配的小时」（`internal/config/schedule.go`
+的 `Schedule` 注释）；空数组/null 表示回落默认，不能拿来表意禁用。因此切开关时
+**只写 `*_enabled` 一个字段**，绝不写 `*_hours`、绝不清空。开关自身永不禁用，
+否则关掉后无法再打开。盲盒开关仍用 `bool()`（缺省 false，与其余七项相反）。
+
+样式侧在 `styles.css` 新增 `.task-item` 规则；注意 `.field label` 比 `.checkbox`
+更具体，会把开关压成灰色小字，故另有一条 `.task-item > .checkbox` 把它还原成
+13px 正文色的格标题。
+
 `panel/web/` 改动后须重跑 `npm run build`（产物 hash 会变，`index.html` 需同步提交）。
 
 ### 8. `web/src/pages/ModelAliases.tsx` + 别名端点（**新增页面**）

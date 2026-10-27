@@ -540,6 +540,35 @@ a:hover {
   overflow-wrap: anywhere;
 }
 
+/* ── 定时任务分组（网关配置页）────────────────────────────
+   一个任务 = 开关 + 它控制的小时，同格展示。开关关闭时小时用 disabled 保留显示
+   （值不清空），因此这里补的是「禁用态输入框」外观——全局只有 .btn:disabled。 */
+.task-item {
+  /* 与 .field 同用：卡片内两列由 .grid-2 的 gap 提供间距，清掉 .field 的底部留白。 */
+  margin-bottom: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+/* 开关与参数之间留白，但 desc 紧跟其所属元素（开关或参数），不再额外撑开。 */
+.task-item > .task-param {
+  margin-top: 8px;
+}
+/* .field label 的选择器比 .checkbox 更具体，会把开关压成灰色小字。这里在任务格里
+   把它还原成「格标题」：开关是这个格子的主语，要比下面的参数名更醒目。 */
+.task-item > .checkbox {
+  display: flex;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 0;
+}
+.task-item input:disabled {
+  cursor: not-allowed;
+  background: var(--bg-elev2);
+  color: var(--text-dim);
+}
+
 input[type='text'],
 input[type='password'],
 input[type='number'],
