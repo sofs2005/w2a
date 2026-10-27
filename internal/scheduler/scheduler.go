@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -330,39 +331,60 @@ func (k taskKind) String() string {
 	return "unknown"
 }
 
+// allTaskKinds 七类任务的全集（补跑扫描与测试共用，顺序即 taskKind 声明序）。
+func allTaskKinds() []taskKind {
+	return []taskKind{taskCheckin, taskTravel, taskActivity, taskKeepalive,
+		taskCat, taskGrowth, taskLimited}
+}
+
+// taskHours 返回该类任务的时点表与禁用标记。
+//
+// nextWake 与 missedSlots 共用本方法：补跑是「重算一次漏掉了什么」，两处若各维护
+// 一份七类清单，新增任务类时极易只改一处，补跑就会静默漏掉那一类。
+func (c Config) taskHours(k taskKind) (hours []int, disabled bool) {
+	switch k {
+	case taskCheckin:
+		return c.CheckinHours, c.CheckinDisabled
+	case taskTravel:
+		return c.TravelHours, c.TravelDisabled
+	case taskActivity:
+		return c.ActivityHours, c.ActivityDisabled
+	case taskKeepalive:
+		return c.KeepaliveHours, c.KeepaliveDisabled
+	case taskCat:
+		return c.CatHours, c.CatDisabled
+	case taskGrowth:
+		return c.GrowthHours, c.GrowthDisabled
+	case taskLimited:
+		return c.LimitedHours, c.LimitedDisabled
+	}
+	return nil, true
+}
+
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
 // 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
 // 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
-	type slot struct {
-		at   time.Time
-		kind taskKind
-	}
 	// 取一次快照：热重载可能在计算中途替换配置，若逐个字段重新 Load，本次排程会
 	// 混用新旧两份配置（比如用新小时配旧开关），算出的时点不可解释。
 	cfg := s.snapshot()
 	var slots []slot
-	if !cfg.CheckinDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.CheckinHours, taskCheckin), taskCheckin})
+	for _, k := range allTaskKinds() {
+		if hours, disabled := cfg.taskHours(k); !disabled {
+			slots = append(slots, slot{s.nextScheduledFire(now, hours, k), k})
+		}
 	}
-	if !cfg.TravelDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.TravelHours, taskTravel), taskTravel})
-	}
-	if !cfg.ActivityDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.ActivityHours, taskActivity), taskActivity})
-	}
-	if !cfg.KeepaliveDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.KeepaliveHours, taskKeepalive), taskKeepalive})
-	}
-	if !cfg.CatDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.CatHours, taskCat), taskCat})
-	}
-	if !cfg.GrowthDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.GrowthHours, taskGrowth), taskGrowth})
-	}
-	if !cfg.LimitedDisabled {
-		slots = append(slots, slot{s.nextScheduledFire(now, cfg.LimitedHours, taskLimited), taskLimited})
-	}
+	return earliestSlot(slots)
+}
+
+// slot 一个「时刻 + 该时刻要跑的任务类」候选。
+type slot struct {
+	at   time.Time
+	kind taskKind
+}
+
+// earliestSlot 从候选里挑出最早时刻及与之同时刻的全部任务类。
+func earliestSlot(slots []slot) (time.Time, []taskKind) {
 	var earliest time.Time
 	for _, sl := range slots {
 		if sl.at.IsZero() {
@@ -382,6 +404,79 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 		}
 	}
 	return earliest, kinds
+}
+
+// missedSlot 一个「计划时刻已过、但没跑过」的槽位（补跑候选）。
+type missedSlot struct {
+	at   time.Time
+	kind taskKind
+}
+
+// missedSlots 返回 (ranAt, now] 区间内**应当已触发却从未执行**的槽位，按时间升序。
+//
+// 起因：主循环是串行阻塞的——nextWake 只在批次跑完之后才重新计算，而 nextScheduledFire
+// 只挑 at.After(now) 的时点。于是批次执行期间过去的槽位当天永久丢失，不会补跑。
+// 配了账号间隔（220-600s）后签到批次要跑 22~60 分钟，比 random_delay_minutes 的 26
+// 分钟窗口还长；签到与旅行都配在 9/21 点，签到批次把旅行槽位整个跨过去就成了常态
+// （实测模拟：单个槽位旅行只有约 50% 概率能触发）。
+//
+// 判据用 ranAt（上次唤醒时刻）而不是「今天零点」：更早的槽位要么已执行、要么是
+// 进程停机期间的（不该在启动瞬间补跑一整天的历史任务），ranAt 天然把它们挡在外面。
+//
+// 窗口与 nextScheduledFire 一致，只扫今天与明天：任意 hours 下，ranAt..now 之间的
+// 槽位必定落在这两天内。
+func (s *Scheduler) missedSlots(ranAt, now time.Time) []missedSlot {
+	cfg := s.snapshot()
+	var out []missedSlot
+	// 从 ranAt 当天的零点起扫，保证「ranAt 当天的更早槽位」不会被漏扫；
+	// 实际入选由 at.After(ranAt) 把关。
+	day := time.Date(ranAt.Year(), ranAt.Month(), ranAt.Day(), 0, 0, 0, 0, ranAt.Location())
+	for i := 0; i < 2; i++ {
+		d := day.AddDate(0, 0, i)
+		for _, k := range allTaskKinds() {
+			hours, disabled := cfg.taskHours(k)
+			if disabled {
+				continue
+			}
+			for _, hour := range hours {
+				at := s.scheduledSlot(d, hour, k)
+				if at.After(ranAt) && !at.After(now) {
+					out = append(out, missedSlot{at: at, kind: k})
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].at.Before(out[j].at) })
+	return out
+}
+
+// catchUpMissed 补跑 (ranAt, now] 内被批次跨过的槽位，按原定顺序执行。
+//
+// 同一时刻的多类任务合并成一批（与 nextWake 的「同刻多类一并执行」口径一致）；
+// 不同时刻的槽位逐批串行——它们的原定间隔本就被跨过了，再并行只会让账号间隔
+// 同时落在两批上，失去限速意义。
+//
+// 返回最后一个补跑槽位的计划时刻（零值 = 没有补跑任何东西）。调用方拿它当下一轮的
+// ranAt 再查一次：补跑批次本身也可能跑得足够久、又跨过更后面的槽位（签到补跑 40
+// 分钟足够跨过下一个时点），单次调用看不到这一点，必须由 Run 循环推进。
+func (s *Scheduler) catchUpMissed(ctx context.Context, ranAt, now time.Time) time.Time {
+	missed := s.missedSlots(ranAt, now)
+	var last time.Time
+	for i := 0; i < len(missed); {
+		at := missed[i].at
+		var kinds []taskKind
+		for ; i < len(missed) && missed[i].at.Equal(at); i++ {
+			kinds = append(kinds, missed[i].kind)
+		}
+		if ctx.Err() != nil {
+			return last // 优雅停机：已派发的批次内部会自行收尾，剩余补跑放弃
+		}
+		log.Printf("[sched] catch-up: slot %s missed while previous batch ran, dispatch kinds=%v",
+			at.Format("15:04"), kinds)
+		s.runBatch(ctx, kinds)
+		last = at
+	}
+	return last
 }
 
 // wakeupGraceDelay 迟到唤醒补跑的派发前网络宽限：Windows Modern Standby exit 后
@@ -498,6 +593,19 @@ func (s *Scheduler) Run(ctx context.Context) {
 		// 排障时"签到到底跑没跑"要多跳几层才能判。
 		log.Printf("[sched] wake up: dispatch kinds=%v", kinds)
 		s.runBatch(ctx, kinds)
+		// 批次跑完才重算时点，期间过去的槽位已被 nextWake 的 at.After(now) 判掉。
+		// 补跑一轮，否则配了账号间隔后长批次（签到 22~60 分钟）会跨过同窗口的旅行等
+		// 槽位，当天彻底丢失（见 missedSlots 注释）。
+		//
+		// 循环而非单次：补跑批次自己也可能跨过更后面的槽位，此时 ranAt 推进到刚补跑
+		// 的槽位再查一次，直到没有新的漏跑为止。
+		ranAt := next
+		for ctx.Err() == nil {
+			ranAt = s.catchUpMissed(ctx, ranAt, time.Now())
+			if ranAt.IsZero() {
+				break
+			}
+		}
 	}
 }
 
