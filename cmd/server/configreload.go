@@ -360,5 +360,7 @@ func schedulerConfig(cfg *Config) scheduler.Config {
 		CatDisabled:            !cfg.Schedule.CatEnabled,
 		GrowthDisabled:         !cfg.Schedule.GrowthEnabled,
 		LimitedDisabled:        !cfg.Schedule.LimitedEnabled,
+		BuddyBoxEnabled:        cfg.Schedule.BuddyBoxEnabled,
+		BuddyBoxDailyCap:       cfg.Schedule.BuddyBoxDailyCap,
 	}
 }

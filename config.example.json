@@ -39,6 +39,8 @@
     "cat_enabled": true,
     "growth_enabled": true,
     "limited_enabled": true,
+    "buddy_box_enabled": false,
+    "buddy_box_daily_cap": 5,
     "random_delay_minutes": 0,
     "account_delay_min_seconds": 0,
     "account_delay_max_seconds": 0

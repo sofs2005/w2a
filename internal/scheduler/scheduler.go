@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,16 @@ type Config struct {
 	LimitedHours []int
 	// LimitedDisabled 显式关闭限时活动任务排程（schedule.limited_enabled=false）。
 	LimitedDisabled bool
+
+	// BuddyBoxEnabled 能量开盲盒（/activity/growth/buddy/open）总开关。
+	//
+	// 与其它七类排程的开关命名相反（这里是「启用」而非「禁用」）：盲盒是**消耗性**
+	// 操作，会把账号攒的能量花掉，新功能默认关、由用户显式打开更稳妥；零值 Config
+	// 也因此不会意外开始烧能量。挂在活跃上报链尾（能量刚由连登奖励补进来时开）。
+	BuddyBoxEnabled bool
+	// BuddyBoxDailyCap 每账号每日开箱上限（个）。<=0 = 不限（仍受能量与上游额度约束）。
+	// 上限的意义：能量攒着不会过期，一口气全烧掉就再也开不了；分散到每天开更稳。
+	BuddyBoxDailyCap int
 }
 
 // Scheduler 调度器。
@@ -92,6 +103,12 @@ type Scheduler struct {
 	// CST 重置（上游增长体系按 CST 自然日刷新，见 travelDay/cstZone）。进程重启即清零
 	// （服务端幂等兜底：重启后当日重复 redeem 会拿 409 正常态，无副作用）。
 	rewardClaimed map[string]string
+
+	// buddyBoxOpened 盲盒每日已开数量：uid → {日期, 已开个数}。自然日 CST 重置。
+	// 进程重启即清零——上游没有「今日已开几次」的只读接口（quota 只给 affordable），
+	// 所以重启后当日上限会重新计。这是刻意的：上限是省钱手段而非硬性业务规则，
+	// 宁可重启后多开几个，也不要为了持久化引入一份状态文件。
+	buddyBoxOpened map[string]buddyBoxCount
 
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
@@ -162,12 +179,19 @@ func (s *Scheduler) mutate(fn func(*Config)) {
 	s.cfg.Store(cfg)
 }
 
+// buddyBoxCount 盲盒当日计数（自然日 + 已开个数）。
+type buddyBoxCount struct {
+	day   string
+	count int
+}
+
 // New 构建。
 func New(cfg Config) *Scheduler {
 	s := &Scheduler{
-		adoptTried:    make(map[string]string),
-		rewardClaimed: make(map[string]string),
-		reload:        make(chan struct{}),
+		adoptTried:     make(map[string]string),
+		rewardClaimed:  make(map[string]string),
+		buddyBoxOpened: make(map[string]buddyBoxCount),
+		reload:         make(chan struct{}),
 	}
 	s.cfg.Store(normalizeConfig(cfg))
 	return s
@@ -951,6 +975,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
 		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
 		s.claimGrowthRewards(a)  // 连登奖励 + 抽奖：点亮连登后按天领取（finally 语义：失败不拖累上报）
+		s.openBuddyBoxes(a)      // 能量开盲盒：放在领奖之后，吃刚补进来的能量
 	}
 }
 
@@ -1147,6 +1172,122 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rewardClaimed[uid] = travelDay(time.Now())
+}
+
+// buddyBoxRemaining 该账号今日还能开几个（受每日上限约束；上限 <=0 表示不限）。
+func (s *Scheduler) buddyBoxRemaining(uid string, cap int) int {
+	if cap <= 0 {
+		return math.MaxInt32 // 不限：只由能量与上游额度决定
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.buddyBoxOpened[uid]
+	if !ok || c.day != travelDay(time.Now()) {
+		return cap
+	}
+	if c.count >= cap {
+		return 0
+	}
+	return cap - c.count
+}
+
+// markBuddyBoxOpened 累加该账号今日已开箱数。
+func (s *Scheduler) markBuddyBoxOpened(uid string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	day := travelDay(time.Now())
+	c := s.buddyBoxOpened[uid]
+	if c.day != day {
+		c = buddyBoxCount{day: day} // 跨日重置
+	}
+	c.count += n
+	s.buddyBoxOpened[uid] = c
+}
+
+// openBuddyBoxes 用能量开盲盒（逐个开，开到能量不够或触达每日上限为止）。
+//
+// 逆向来源：CN 成长中心 SPA 实测（2026-10-27，/profile/growth-center 页面「开启盲盒」
+// 按钮，位于「派猫猫旅行」左侧）。能量每开一次扣 cost_per_open（实测 10）。
+//
+// 为什么逐个开而不是一次 count=N：
+//   - 中途失败（能量不足/风控）时能立刻停在已扣费的那个，不会把剩下的请求一起打出去；
+//   - 日志逐条可读（开出哪只、什么稀有度），一次开 5 个只留一行汇总就没法对账。
+//
+// 闸口顺序：总开关 → global/企业版门控 → 每日上限 → 上游 quota.affordable。
+// affordable 是权威闸（上游自己算的「还能开几个」），比本地 balance/10 可靠。
+//
+// 幂等/失败语义：能量已扣、盲盒已开是不可逆的，因此**任何一次开箱成功都立即计数**，
+// 失败则停止本号本轮（不重试）——重试可能重复扣能量。上游若因风控拒绝，下一轮排程再说。
+func (s *Scheduler) openBuddyBoxes(a *auth.Auth) {
+	cfg := s.snapshot()
+	if !cfg.BuddyBoxEnabled {
+		return
+	}
+	// global 门控：国际版任务中心没有 buddy 盲盒（与 travel/claimGrowthRewards 同口径）。
+	if a.IsGlobal() {
+		return
+	}
+	// 企业版门控：成长体系端点对个人版之外一律拒绝（见 auth.IsEnterprise 实测注释）。
+	if a.IsEnterprise() {
+		return
+	}
+	label := logfmt.Label(a.UID, a.Nickname)
+
+	quota, err := cfg.Upstream.BuddyQuotaQuery(a)
+	if err != nil {
+		// 只读判据失败：静默跳过本轮（每轮重试，无扣费风险）。
+		log.Printf("buddy-box %s: quota: %v", label, err)
+		return
+	}
+	if quota.Affordable <= 0 {
+		return // 能量不够：正常态，不刷日志（绝大多数号每天都是这个状态）
+	}
+
+	limit := quota.Affordable
+	if daily := s.buddyBoxRemaining(a.UID, cfg.BuddyBoxDailyCap); daily < limit {
+		limit = daily
+	}
+	if limit <= 0 {
+		return // 今日已达上限（正常态）
+	}
+
+	opened := 0
+	for i := 0; i < limit; i++ {
+		resp, err := cfg.Upstream.BuddyOpen(a, 1)
+		if err != nil {
+			// 已开出的那些已在上一轮循环里计过数；这里停手不重试（避免重复扣能量）。
+			log.Printf("buddy-box %s: open %d/%d: %v", label, i+1, limit, err)
+			break
+		}
+		n := len(resp.Results)
+		if n == 0 {
+			// 上游回 200 但没给结果：能量大概率已扣，按「开了 1 个」计数并停止，
+			// 不再继续开——否则可能连环扣费却拿不到任何记录。
+			log.Printf("buddy-box %s: open %d/%d: empty results (stop)", label, i+1, limit)
+			s.markBuddyBoxOpened(a.UID, 1)
+			opened++
+			break
+		}
+		for _, r := range resp.Results {
+			name := r.Template.Name
+			if name == "" {
+				name = r.Instance.SoulDesc
+			}
+			log.Printf("buddy-box %s: open ok %d/%d name=%q template=%d shiny=%d",
+				label, i+1, limit, name, r.Template.ID, r.Instance.IsShiny)
+		}
+		s.markBuddyBoxOpened(a.UID, n)
+		opened += n
+	}
+
+	if opened > 0 {
+		// 收尾一行：本轮开了几个 + 剩余能量，方便对账（逐条日志在循环里）。
+		left := quota.Balance - opened*quota.CostPerOpen
+		if left < 0 {
+			left = 0
+		}
+		log.Printf("buddy-box %s: done opened=%d energy_left≈%d", label, opened, left)
+	}
 }
 
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。

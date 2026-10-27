@@ -586,6 +586,32 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                   <div className="desc">七类排程互不影响：关掉一个不会停掉其余（小时配置保留，可随时重开）。</div>
                 </div>
               </div>
+              <div className="row">
+                <div className="field" style={{ flex: 1 }}>
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={getPath(doc ?? {}, 'schedule.buddy_box_enabled') === true}
+                      onChange={(e) => update('schedule.buddy_box_enabled', e.target.checked)}
+                    />
+                    启用能量开盲盒
+                  </label>
+                  <div className="desc">
+                    与其它开关相反，此项<b>默认关闭</b>，需手动勾选。开盲盒消耗能量（每开一次 10 点，
+                    不可逆），挂在活跃上报之后、吃刚领到的能量；国际版与企业版账号自动跳过。
+                  </div>
+                </div>
+                <div className="field" style={{ flex: 1 }}>
+                  <label>每日开箱上限 buddy_box_daily_cap</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={String(getPath(doc ?? {}, 'schedule.buddy_box_daily_cap') ?? 5)}
+                    onChange={(e) => update('schedule.buddy_box_daily_cap', Number(e.target.value) || 0)}
+                  />
+                  <div className="desc">每账号每天最多开几个；0 = 不限（仍受能量与上游额度约束）。</div>
+                </div>
+              </div>
             </div>
           )}
 

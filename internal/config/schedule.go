@@ -52,6 +52,15 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+	// BuddyBoxEnabled 能量开盲盒（POST /activity/growth/buddy/open）开关。
+	//
+	// **与其它开关语义相反**：其它 *_enabled 缺省 true（禁用要显式写 false），
+	// 本项缺省 **false**（要用得显式写 true）。原因：开盲盒会消耗能量（每开一次
+	// 扣 cost_per_open，实测 10），是不可逆的花费；新功能默认不动用户的资源。
+	BuddyBoxEnabled bool `json:"buddy_box_enabled"`
+	// BuddyBoxDailyCap 每账号每日开箱上限（个）。缺省 5，0 = 不限（仍受能量与上游
+	// quota.affordable 约束）。上限的意义：能量攒着不过期，一次性全烧掉就再也开不了。
+	BuddyBoxDailyCap int `json:"buddy_box_daily_cap"`
 	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 }
@@ -78,6 +87,9 @@ func DefaultSchedule() Schedule {
 		GrowthEnabled:       true,
 		LimitedEnabled:      true,
 		ActivityReportCount: 5, // 领猫前置需 5 次对话，5 连发刷满 chat_5
+		// BuddyBoxEnabled 缺省 false：开盲盒消耗能量且不可逆，须显式开启。
+		BuddyBoxEnabled:  false,
+		BuddyBoxDailyCap: 5,
 	}
 }
 
@@ -121,6 +133,11 @@ func (s *Schedule) Normalize() error {
 	// 0/负数 → 1 条（兼容旧行为：每号每天 1 条上报点亮连登）。
 	if s.ActivityReportCount <= 0 {
 		s.ActivityReportCount = 1
+	}
+	// 负数 → 默认 5；显式 0 = 不限（与 ActivityReportCount 的「0 = 旧行为」不同，
+	// 这里 0 是有效语义，不能一并归一成默认值）。
+	if s.BuddyBoxDailyCap < 0 {
+		s.BuddyBoxDailyCap = 5
 	}
 	return s.validateHours()
 }
