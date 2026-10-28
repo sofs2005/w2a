@@ -249,27 +249,9 @@ func TestClaimGrowthRewardsMarkerExpiresNextDay(t *testing.T) {
 	}
 }
 
-// TestClaimGrowthRewardsSkipsGlobal global 账号不发任何领取调用（streak 500 实测，门控）。
-func TestClaimGrowthRewardsSkipsGlobal(t *testing.T) {
-	fastActivity(t)
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		http.Error(w, "no call expected for global reward chain", 404)
-	}))
-	defer srv.Close()
-
-	p := pool.New("")
-	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
-		Domain: "www.workbuddy.ai"})
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, GlobalEnabled: true}
-	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 1})
-
-	s.claimGrowthRewards(p.AuthByUID("g1"))
-	if n := calls.Load(); n != 0 {
-		t.Errorf("global reward chain upstream calls=%d want 0（跳过 global）", n)
-	}
-}
+// 注：原 TestClaimGrowthRewardsSkipsGlobal（断言 global 零上游调用）已随「global 不再
+// 无条件跳过」的实测更正一并移除——它固化的正是被推翻的结论。global 的新语义（streak
+// 200 正常领取 / 探测失败才跳过）见 global_reward_test.go。
 
 // TestGrowthEligibleTier 挑档逻辑：最高达标未领档。
 func TestGrowthEligibleTier(t *testing.T) {

@@ -113,6 +113,18 @@ type Scheduler struct {
 	// （服务端幂等兜底：重启后当日重复 redeem 会拿 409 正常态，无副作用）。
 	rewardClaimed map[string]string
 
+	// rewardUnavailable 连登奖励链「当日已确认不可用」标记：uid → 自然日（CST）。
+	// 与 rewardClaimed 同构（同一把 mu、同一个自然日口径 travelDay），语义却是负向的：
+	// 探测发现该号 growth 链今天走不通（reward-state 404/5xx/网络错/解析失败），
+	// 本日不再对 growth 域发任何请求——包括下一次 claimGrowthRewards 调用。
+	//
+	// 为什么需要这份记忆：global 号过去被无条件跳过（见 claimGrowthRewards 的域门控
+	// 注释），放开之后，若某个号确实没有 growth 体系（或上游当天抽风），每趟活跃上报
+	// 都会重打一次 reward-state 并刷一行 WARN，正是旧实现要躲的噪音。正确的躲法是
+	// 「按号 + 按天记住失败」，而不是放弃整个 realm。自然日粒度保证「明天可能就好了」
+	// 的自动恢复；进程重启即清零——宁可多探一次，也不为这份纯优化状态引入持久化。
+	rewardUnavailable map[string]string
+
 	// buddyBoxOpened 盲盒每日已开数量：uid → {日期, 已开个数}。自然日 CST 重置。
 	// 进程重启即清零——上游没有「今日已开几次」的只读接口（quota 只给 affordable），
 	// 所以重启后当日上限会重新计。这是刻意的：上限是省钱手段而非硬性业务规则，
@@ -201,10 +213,11 @@ type buddyBoxCount struct {
 // New 构建。
 func New(cfg Config) *Scheduler {
 	s := &Scheduler{
-		adoptTried:     make(map[string]string),
-		rewardClaimed:  make(map[string]string),
-		buddyBoxOpened: make(map[string]buddyBoxCount),
-		reload:         make(chan struct{}),
+		adoptTried:        make(map[string]string),
+		rewardClaimed:     make(map[string]string),
+		rewardUnavailable: make(map[string]string),
+		buddyBoxOpened:    make(map[string]buddyBoxCount),
+		reload:            make(chan struct{}),
 	}
 	s.cfg.Store(normalizeConfig(cfg))
 	return s
@@ -1083,24 +1096,40 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 //   - 礼包/补偿是「有则领」的幂等写，业务错误静默；补签只在「昨日漏签且有卡」时触发，
 //     无卡/无漏签不写。
 //
+// 域门控（2026-10-28 实测更正，替代此前「global 无条件跳过」的错误结论）：
+//   - 企业版照旧跳过：没有个人成长体系（403 growth system is only available for
+//     personal users / 400 code 10001，见 auth.IsEnterprise 实测注释）。
+//   - global **不再无条件跳过**。旧结论的依据是「global 新账号 GET /activity/growth/streak
+//     返回 500（实测 sliverkiss）」，把一个号的个例当成了普遍规律。2026-10-28 对三个
+//     www.workbuddy.ai 账号（foginsky / sofs2005 / jousleep）实测：streak 全部 200 且字段
+//     完整（streak.days / month_total_days / redemption_status.tiers / makeup_cards）；
+//     foginsky 实打实领了三档（7d/14d/28d，14d 送 50 积分、28d 送 150 积分），积分余额
+//     1044 → 1244，三档状态 available → claimed——上游没有任何 region 拦截。
+//     国际版前端确实没有成长中心页面（workbuddy.ai 26 个初始 JS chunk 里 growth/streak/
+//     redemption 命中 0 次），所以这个功能在 UI 上不可见；我们走 API 领，正因如此
+//     **只领已达标档位、绝不试探未达标档**——试探未达标档（比如 days=1 就 POST 28d）是
+//     会被上游判为异常的动作。判据就是 growthEligibleTier 的
+//     `days >= sp.Days && !rs.Claimed(sp.Tier)`，一个字都不放宽。
+//   - 失败记忆：探测（reward-state）失败即按「号 + 自然日（CST）」记入 rewardUnavailable，
+//     该号当天不再对 growth 域发任何请求，且只打一行日志。global 里确实存在没有 growth
+//     体系的号（以及上游偶发抽风/网络错），不能让它每趟上报都重探一次、刷一行 WARN——
+//     旧实现想躲的正是这份噪音，但正确的躲法是记住失败，而不是放弃整个 realm。
+//
 // 日志每号一行可 grep：`activity %s: redeem tier=%s ...` / `activity %s: lottery ...`。
 func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	if a == nil || a.AccessTokenValue() == "" {
 		return
 	}
-	// global 门控：连登奖励/抽奖链只服务 CN。国际版 /activity/growth/* 端点虽同构存在
-	// （/tmp/analysis-global-credit.md §1.1：lottery/streak/redeem 在国际版上线），但真实
-	// global 新账号 GET /activity/growth/streak 返回 500（实测 sliverkiss）——链上第一步就
-	// 拿不到 days，无法挑档；且 streak 500 会每趟刷 WARN 污染日志。结论：证据不足，跳过
-	// global（不发起任何领取类调用）。CN 账号无此问题（CN streak 200 days=N）。
-	if a.IsGlobal() {
-		return
-	}
 	// 企业版门控：连登奖励链（redeem / lottery / claim-gift）同样是个人成长体系，
 	// 企业版一律 403「growth system is only available for personal users」或
 	// 400 code 10001「企业账号不支持该操作」（见 auth.IsEnterprise 实测注释）。
-	// 与 IsGlobal 正交，须单独判——否则每趟都白跑一轮注定失败的领取链。
+	// 与 realm 正交，须单独判——否则每趟都白跑一轮注定失败的领取链。
 	if a.IsEnterprise() {
+		return
+	}
+	if s.growthUnavailableToday(a.UID) {
+		// 当日已确认该号 growth 链不可用：本日不再发任何请求（连探测都省掉）。
+		// 放在 rewardClaimedToday 之前：负向记忆优先，两者都命中时无需区分。
 		return
 	}
 	if s.rewardClaimedToday(a.UID) {
@@ -1108,10 +1137,19 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	}
 	// 0. 礼包/补偿领取（panel 连登管家口径）：每号一次 / 有则领的幂等写，
 	// 业务错误静默跳过（不刷 WARN），先于 redeem——到账积分不依赖连登状态。
+	// 注意：这两个端点的失败**不参与**「链是否可用」的判定（见下方 state 失败分支）：
+	// 国际版可能本来就没有 claim-gift/claim-compensation，404 属正常，不能据此否定整条链。
 	s.claimGrowthBonus(a)
 	state, err := s.snapshot().Upstream.GrowthRewardState(a)
 	if err != nil {
-		log.Printf("WARN: activity %s: reward-state: %v", logfmt.Label(a.UID, a.Nickname), err)
+		// 链上第一步就失败：404/5xx/网络错/解析失败（企业版 403 也会落到这里，但上面
+		// 的 IsEnterprise 门控已先拦掉绝大多数）→ 判定该号 growth 链本日不可用。
+		// 记忆 + 一行日志：同一号当天后续每趟上报都会在入口被 growthUnavailableToday
+		// 挡掉，所以这行每号每天最多出现一次（靠记忆，不靠 sync.Once——once 只能让
+		// 本进程里少打一行，挡不住上游请求）。
+		s.markGrowthUnavailable(a.UID)
+		log.Printf("WARN: activity %s: growth chain unavailable today, skip claiming (reward-state: %v)",
+			logfmt.Label(a.UID, a.Nickname), err)
 		return
 	}
 	// 0.5 补签保连登（panel makeupYesterday 口径）：昨日漏签（heatmap score==0）且
@@ -1126,6 +1164,8 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	tier := growthEligibleTier(days, &state.Redemption)
 	if tier == "" {
 		// 无新达标档位：不动写接口（不刷 WARN，这是正常态——很多天没到 7d）。
+		// 注意 days==0（上游静默丢弃，checkActivityStreak 已有 WARN 口径）也走这里：
+		// 「没档可领」不等于「链不可用」，故**不**标记 unavailable。
 		return
 	}
 	res, err := s.snapshot().Upstream.GrowthRedeem(a, tier, "")
@@ -1134,8 +1174,14 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 		log.Printf("activity %s: redeem tier=%s ok (+%d credit, +%d energy, +%d chances)",
 			logfmt.Label(a.UID, a.Nickname), tier, res.CreditGranted, res.EnergyGranted, res.ChancesGranted)
 	case upstream.IsRedeemAlreadyClaimed(err) || upstream.IsRedeemNotEnoughDays(err):
+		// 409 duplicate（本月已领）/ 403 天数不足（未达标）= 正常业务态：静默跳过，
+		// 既不是失败也不是「链不可用」，不得标 unavailable、不得刷 WARN。
 		log.Printf("activity %s: redeem tier=%s skip (already claimed or days not enough)", logfmt.Label(a.UID, a.Nickname), tier)
 	default:
+		// 非上面两种正常态（404/5xx/网络错/解析失败）= 该号 growth 链本日不可用，
+		// 与探测失败同口径记入失败记忆。当日重复领取本来已被下面的 markRewardClaimed
+		// 挡住，这里额外记 unavailable 是为了让「不可用」语义对所有入口一致生效。
+		s.markGrowthUnavailable(a.UID)
 		log.Printf("activity %s: redeem tier=%s: %v", logfmt.Label(a.UID, a.Nickname), tier, err)
 	}
 	// 标记当日已处理（无论 redeem 是否成功都记一次：领取类各状态当日不再重试，
@@ -1179,6 +1225,11 @@ func (s *Scheduler) claimGrowthBonus(a *auth.Auth) {
 // → POST makeup-cards/use {"target_date":昨日}。
 // 无卡 / 无漏签 / 无该日格 / 查询失败均静默返回 false（不影响主流程）；
 // 补签成功打一行日志并返回 true（调用方重读 streak 天数挑档）。
+//
+// global 同样生效：调用点在 claimGrowthRewards 里，以前被那道「global 无条件 return」
+// 挡在外面，现在那道门换成了「探测失败才跳过」，补签自然跟着放开。判据一个字没动
+// （heatmap 昨日 score==0 且有卡），heatmap 查询失败仍保持静默——只读判据、无写风险，
+// 不值得升级成 WARN。
 func (s *Scheduler) makeupYesterday(a *auth.Auth) bool {
 	cells, err := s.snapshot().Upstream.GrowthHeatmap(a)
 	if err != nil {
@@ -1240,6 +1291,24 @@ func (s *Scheduler) markRewardClaimed(uid string) {
 	s.rewardClaimed[uid] = travelDay(time.Now())
 }
 
+// growthUnavailableToday 该账号当日是否已确认连登奖励链不可用（自然日 CST）。
+// 语义与 rewardClaimedToday 相反：命中表示「今天别再对 growth 域发请求了」。
+func (s *Scheduler) growthUnavailableToday(uid string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rewardUnavailable[uid] == travelDay(time.Now())
+}
+
+// markGrowthUnavailable 记录该账号当日 growth 链不可用（本日不再探、不再领）。
+// 只由「探测失败」与「redeem 非 403/409 失败」两处调用——业务正常态（403 天数不足 /
+// 409 已领 / days==0 无档可领）**绝不**写这里，否则会把「今天没到档」误记成「链坏了」，
+// 白白少领一天。
+func (s *Scheduler) markGrowthUnavailable(uid string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rewardUnavailable[uid] = travelDay(time.Now())
+}
+
 // buddyBoxRemaining 该账号今日还能开几个（受每日上限约束；上限 <=0 表示不限）。
 func (s *Scheduler) buddyBoxRemaining(uid string, cap int) int {
 	if cap <= 0 {
@@ -1289,7 +1358,9 @@ func (s *Scheduler) openBuddyBoxes(a *auth.Auth) {
 	if !cfg.BuddyBoxEnabled {
 		return
 	}
-	// global 门控：国际版任务中心没有 buddy 盲盒（与 travel/claimGrowthRewards 同口径）。
+	// global 门控：国际版任务中心没有 buddy 盲盒。注意这里与 claimGrowthRewards
+	// **不再同口径**——连登奖励链已实测放开（见该函数域门控注释），但盲盒是「花能量」
+	// 的消耗性操作，国际版无 UI 佐证、也没有实测证据，保持 CN-only 不变。
 	if a.IsGlobal() {
 		return
 	}

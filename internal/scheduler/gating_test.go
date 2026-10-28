@@ -134,38 +134,44 @@ func TestGlobalAndCNMixedPoolServed(t *testing.T) {
 // TestRunActivityNowReportsGlobalAccounts 核心验收：global 账号的 report 上报**不再跳过**
 // （PR #45 实测国际版 /v2/report 在 workbuddy.ai 上 code=0 OK）。fake upstream 断言
 // global 账号真的发出 /v2/report 请求；且按 realm 路由到 global billing base。
+//
+// 只数 /v2/report：runActivity 在 report 成功之后还会走连登自检（streak）与连登奖励链
+// （gift/comp/reward-state）——global 号现在同样参与领奖（见 global_reward_test.go），
+// 所以「global base 只收到 1 个请求」不再是正确断言，正确断言是「report 恰好 1 次」。
+// 其余端点一律 404：既让领奖链当场收敛（探测失败 → 当日不再探），也保证本用例
+// **绝不**碰到真实上游。
 func TestRunActivityNowReportsGlobalAccounts(t *testing.T) {
 	fastActivity(t)
 
-	var globalCalls, cnCalls atomic.Int32
-	reportOK := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v2/report" {
-			t.Errorf("path=%s want /v2/report", r.URL.Path)
-		}
-		w.Write([]byte(`{"code":0,"msg":"OK"}`))
-	})
+	var globalReports, cnCalls atomic.Int32
 	globalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		globalCalls.Add(1)
-		reportOK.ServeHTTP(w, r)
+		if r.URL.Path != "/v2/report" {
+			http.Error(w, "not found", 404)
+			return
+		}
+		globalReports.Add(1)
+		w.Write([]byte(`{"code":0,"msg":"OK"}`))
 	}))
 	defer globalSrv.Close()
 	cnSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cnCalls.Add(1)
-		reportOK.ServeHTTP(w, r)
+		http.Error(w, "global account must not hit CN base", 404)
 	}))
 	defer cnSrv.Close()
 
 	p := pool.New("")
-	// 纯 global 池：若 report 仍被 IsGlobal() 跳过，globalSrv 计数保持 0。
+	// 纯 global 池：若 report 仍被 IsGlobal() 跳过，globalReports 计数保持 0。
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999,
 		Domain: "www.workbuddy.ai"})
+	// ChatBaseGlobal 必须一起指到 fake：growth 域（streak/heatmap）走 chatBase，
+	// 漏设会回落到缺省 https://www.workbuddy.ai —— 那才是真的打上游。
 	up := &upstream.Client{HTTP: globalSrv.Client(), ChatBaseCN: cnSrv.URL, BillingBaseCN: cnSrv.URL,
-		BillingBaseGlobal: globalSrv.URL, GlobalEnabled: true}
+		ChatBaseGlobal: globalSrv.URL, BillingBaseGlobal: globalSrv.URL, GlobalEnabled: true}
 	s := New(Config{Pool: p, Upstream: up, ActivityReportCount: 1})
 
 	s.RunActivityNow()
 
-	if n := globalCalls.Load(); n != 1 {
+	if n := globalReports.Load(); n != 1 {
 		t.Errorf("global account report calls=%d want 1（global 上报不再跳过）", n)
 	}
 	if n := cnCalls.Load(); n != 0 {
