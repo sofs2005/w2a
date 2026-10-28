@@ -85,6 +85,15 @@ type Config struct {
 	// BuddyBoxDailyCap 每账号每日开箱上限（个）。<=0 = 不限（仍受能量与上游额度约束）。
 	// 上限的意义：能量攒着不会过期，一口气全烧掉就再也开不了；分散到每天开更稳。
 	BuddyBoxDailyCap int
+
+	// StatePath 调度状态落盘路径（`<dir>/scheduler_state.json`，见 persist.go），
+	// 记录"已处理到的最后一个槽位时刻"，供下次启动补跑停机期间被跨过的槽位。
+	//
+	// 空 = 关闭本特性：不读不写不补跑，行为与引入持久化之前**逐字节一致**。
+	// 测试与降级都靠这个零值；路径由装配层从 state_file 的同目录派生（见
+	// cmd/server 的 schedulerConfig / statePathFor），**不新增配置项**——这个项目
+	// 明确偏好零配置，多一个"调度状态文件路径"只会多一个能被配错的地方。
+	StatePath string
 }
 
 // Scheduler 调度器。
@@ -121,6 +130,10 @@ type Scheduler struct {
 	// 通道关闭语义（而非发值）：多次重载只需最后一次生效，close 天然合并重复信号。
 	reloadMu sync.Mutex
 	reload   chan struct{}
+
+	// stateWarnOnce 调度状态落盘失败的 WARN 只报一次（见 persist.go 的
+	// persistLastWake）：每批任务完成都会落盘，磁盘满时逐次告警会把日志淹掉。
+	stateWarnOnce sync.Once
 }
 
 // Reload 用新配置替换排程段并立即唤醒主循环重算下一个时点（配置热重载）。
@@ -582,11 +595,39 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 }
 
 // Run 主循环，阻塞直到 ctx 取消。
+//
+// 启动顺序：先补跑停机期间被跨过的槽位（startupCatchUp），再进主循环。补跑必须
+// 在排程之前——它把 last_wake 推进到"刚补的那个槽位"，主循环随后从"现在"往后排，
+// 两者不会重叠。
 func (s *Scheduler) Run(ctx context.Context) {
+	// 跨重启补跑：停机期间过去的槽位不会出现在 nextWake 的候选里（它只挑
+	// at.After(now) 的时点），只能靠落盘的 last_wake 反推。七类任务共用这一个
+	// 入口，不为某一类单独打补丁（线上实案是 activity，但 checkin / travel /
+	// keepalive / cat 等全都会被同样跨过）。StatePath 为空时本调用直接返回零值，
+	// 行为与引入前逐字节一致。
+	//
+	// 补跑完再**接同一个 catch-up 循环**（而不是只调一次就进主循环）：启动补跑自己
+	// 派发的批次也能跑很久——生产 account_delay_min/max=220/600s、7 个账号 → 一轮
+	// 签到 22~60 分钟，跨过 10:00 的活跃上报是常态（checkin_hours=[9,21]、
+	// activity_hours=[10]、random_delay_minutes=26）。只补一次的话，这些被启动批次
+	// 跨过的槽位要等下一次重启才补，在生产上等于丢一天。判据与主循环末尾那段完全
+	// 同源（都是 catchUpMissed），区别只在 ranAt 的来处：这里是"启动补跑处理到的
+	// 最后一个槽位"，那里是"主循环本次唤醒的计划时点"。
+	ranAt := s.startupCatchUp(ctx)
+	for ctx.Err() == nil && !ranAt.IsZero() {
+		ranAt = s.catchUpMissed(ctx, ranAt, time.Now())
+		if ranAt.IsZero() {
+			break
+		}
+		// 补跑批次同样"跑完才推进"（理由同主循环那处 persistLastWakeIfRunning）。
+		s.persistLastWakeIfRunning(ctx, ranAt)
+	}
 	for {
 		next, kinds := s.nextWake(time.Now())
 		if next.IsZero() {
 			// 七类任务全部禁用：不空转，只等退出信号（或配置热重载把它重新打开）。
+			// 这一行也是排障线索：日志里没有 next wake，只可能是全禁用（或正在补跑）。
+			log.Printf("[sched] 全部排程已禁用：不排任何任务，等待配置热重载或退出")
 			select {
 			case <-ctx.Done():
 				return
@@ -594,6 +635,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 				continue // 排程已换：回到顶部重算时点（可能重新有任务可排）
 			}
 		}
+		// 每次重算都打一行 next wake，且打的是**含随机偏移的实际时刻**而不是配置里的
+		// 整点：这次线上排查最大的痛点就是 docker logs 里看不出它打算什么时候干活——
+		// 只有 "[sched] wake up" 说明"刚跑过"，没有任何一行说明"下一次是几点、跑哪几类"，
+		// 于是"10 点的活跃到底排上了没有"只能靠猜。
+		log.Printf("[sched] next wake %s kinds=%v", next.Format("2006-01-02 15:04:05"), kinds)
 		switch s.waitSlot(ctx, next, wallclockCheckStep, s.reloadSignal()) {
 		case slotCancel:
 			return
@@ -617,18 +663,38 @@ func (s *Scheduler) Run(ctx context.Context) {
 		// 排障时"签到到底跑没跑"要多跳几层才能判。
 		log.Printf("[sched] wake up: dispatch kinds=%v", kinds)
 		s.runBatch(ctx, kinds)
+		// 批次跑完才推进 last_wake（**不是派发前**）：批次中途被 kill 时该槽位下次
+		// 启动会重跑一次。这是刻意取舍——七类任务都按自然日幂等（签到回 already、
+		// 活跃上报按自然日计 streak、旅行 claim 幂等、脚本类 task_runner 自身幂等），
+		// 重跑一次的代价是几十秒上游调用，而漏掉一整天不可逆。
+		//
+		// 且只在 ctx 未取消时落盘：runBatch 在 ctx 取消时会提前返回（批次只跑了一
+		// 部分），无条件落盘等于把半截批次标记成"已完成"——剩下没跑的账号下次启动
+		// 不会补，方向与上面那句取舍正好相反（该重复的没重复）。见
+		// persistLastWakeIfRunning 的注释。
+		s.persistLastWakeIfRunning(ctx, next)
 		// 批次跑完才重算时点，期间过去的槽位已被 nextWake 的 at.After(now) 判掉。
 		// 补跑一轮，否则配了账号间隔后长批次（签到 22~60 分钟）会跨过同窗口的旅行等
 		// 槽位，当天彻底丢失（见 missedSlots 注释）。
 		//
 		// 循环而非单次：补跑批次自己也可能跨过更后面的槽位，此时 ranAt 推进到刚补跑
 		// 的槽位再查一次，直到没有新的漏跑为止。
+		//
+		// ranAt 刻意**不与启动补跑那段共用**（两段各有一个 ranAt，形态几乎相同）：
+		// 语义不同——这里接的是"主循环本次唤醒的计划时点 next"，那段接的是"启动补跑
+		// 处理到的最后一个槽位"。合并成一个跨 for 迭代存活的变量后，热重载 continue
+		// 路径（slotReload → 回到顶部重算 next）上的 ranAt 究竟是"上一个排程的时点"
+		// 还是"启动补跑残留的进度"就说不清了，而它一旦错，补跑区间会算成倒挂或跨天。
+		// 两份局部变量各活在自己的一段里，代价是几行重复，换来的是状态可解释。
 		ranAt := next
 		for ctx.Err() == nil {
 			ranAt = s.catchUpMissed(ctx, ranAt, time.Now())
 			if ranAt.IsZero() {
 				break
 			}
+			// 补跑批次同样"跑完才推进"（理由同上一处 persistLastWakeIfRunning）：
+			// 批次被 ctx 取消时只跑了一部分，不落盘才能让下次启动补上剩下的账号。
+			s.persistLastWakeIfRunning(ctx, ranAt)
 		}
 	}
 }

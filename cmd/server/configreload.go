@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -362,5 +363,21 @@ func schedulerConfig(cfg *Config) scheduler.Config {
 		LimitedDisabled:        !cfg.Schedule.LimitedEnabled,
 		BuddyBoxEnabled:        cfg.Schedule.BuddyBoxEnabled,
 		BuddyBoxDailyCap:       cfg.Schedule.BuddyBoxDailyCap,
+		StatePath:              statePathFor(cfg.StateFile),
 	}
+}
+
+// statePathFor 由 state_file 派生调度状态文件的路径（与 pool 的 state.json 同目录）。
+//
+// 为什么派生而不新增配置项：调度状态是纯内部簿记（"上次处理到哪个槽位"），运维没有
+// 理由关心它在哪，也不该有机会把它配到一个不存在/不可写的目录上。放在 state_file
+// 同目录的附带好处是备份/迁移一个 data 目录就带走了全部进程状态。
+//
+// state_file 为空（无状态模式，测试与"不落盘"部署）时返回空串——调度器据此关闭
+// 持久化与启动补跑，行为与引入本特性之前完全一致。
+func statePathFor(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(stateFile), scheduler.StateFileName)
 }
