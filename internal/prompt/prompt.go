@@ -20,8 +20,8 @@ var defaultPrompt string
 
 // FallbackSystem 客户端未提供开头 system 时补的兜底 system 消息内容。
 //
-// 取官方分发包（backups/official-cn-5.8.3-20261019/cli/product.json 与
-// D:\PG\workbuddyAI 国际版同构）里 base-agent-instructions 的模板原文，
+// 取官方分发包（D:\PG\workbuddyAI 5.9.3 的 cli/product.json 与 backups/official-cn-5.8.3-20261019
+// 同构）里 base-agent-instructions 的模板原文，5.9.3 复核逐字节未变，
 // 不是网关自造文案——上游按「是不是官方客户端的请求形态」判渠道校验，
 // 补的这行本身就是官方字节。
 const FallbackSystem = "You are CodeBuddy Code.\n"

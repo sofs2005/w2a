@@ -13,16 +13,18 @@ import (
 const (
 	// defaultClientVersionCN 国内版出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>`
 	// 与白名单头组的 X-IDE-Version）。对齐官方国内版分发包实测版本
-	// （~/.workbuddy/last-launch.json version = 5.8.3，2026-10-16）。两域版本不同步，
-	// 故按 realm 分开内置。config upstream.client_version 可覆盖（空 = 按 realm 取内置）。
-	defaultClientVersionCN = "5.8.3"
+	// （~/.workbuddy/last-launch.json version = 5.9.3，2026-10-29）。两域版本不同步，
+	// 故按 realm 分开内置（当前两域恰好同版）。config upstream.client_version 可覆盖
+	// （空 = 按 realm 取内置）。
+	defaultClientVersionCN = "5.9.3"
 	// defaultClientVersionGlobal 国际版出站 WorkBuddy 客户端版本段。对齐官方国际版
-	// 分发包实测版本（~/.workbuddy-ai/last-launch.json version = 5.8.4，2026-10-17）。
-	defaultClientVersionGlobal = "5.8.4"
+	// 分发包实测版本（~/.workbuddy-ai/last-launch.json version = 5.9.3，2026-10-29）。
+	defaultClientVersionGlobal = "5.9.3"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。两域共用的官方内置 CLI 版本
-	// 实测均为 2.161.0（cli/package.json publishConfig.customPackage.version）。
+	// 实测均为 2.165.0（cli/package.json version；5.9.3 起 publishConfig.customPackage
+	// 已被移除，版本只读顶层 version 字段）。
 	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.161.0"
+	defaultCliVersion = "2.165.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -34,8 +36,8 @@ const (
 	//   `${platform}/${platformVersion} ${applicationName}/${productVersion} ${uaExtension}`
 	// 拼出最终 UA（dist/codebuddy-lite-wb.mjs: buildUserAgent）。
 	// 关键：applicationName 直接取自各自 product.json，**两域不同值**——
-	//   CN     product.json: "applicationName": "WorkBuddy"     → WorkBuddy/5.8.3
-	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.8.4
+	//   CN     product.json: "applicationName": "WorkBuddy"     → WorkBuddy/5.9.3
+	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.9.3
 	// 而 platform 段两域都硬编码 "WorkBuddy"（sidecar-manager.js: var mt=`WorkBuddy`），
 	// 所以只有第二段随 realm 变。此前按「两域 server.js 逐字节相同」推断第二段恒为
 	// WorkBuddy 是搞错了链路：server.js 的 buildVlmGatewayHeaders 只服务本地 VLM 技能
@@ -84,7 +86,11 @@ const (
 	// process.version（CLI 跑在 Electron 内置 Node 上），无法从 Go 侧推断，故内置一个
 	// 与官方桌面端同代的取值作为默认，并留 config upstream.stainless_runtime_version
 	// 覆盖口——线上校准无需求改码重编。
-	defaultStainlessRuntimeVersion = "v22.14.0"
+	//
+	// 取值来源：官方桌面端 5.9.3 跑 Electron 37.10.3，两域 daemon 日志的
+	// `"nodeVersion":"v22.21.1"` 即其内置 Node（CLI 子进程以 ELECTRON_RUN_AS_NODE 跑）；
+	// 5.8.x 时期实测同为 v22.21.1，即该值近期未随桌面包变动。
+	defaultStainlessRuntimeVersion = "v22.21.1"
 
 	// defaultStainlessTimeoutSeconds 出站 X-Stainless-Timeout（秒）。官方
 	// buildOpenAIClientOptions 硬编码 `timeout: this.resolveRequestTimeoutMs()`，其默认
@@ -111,7 +117,7 @@ func originRefererFor(a *auth.Auth) string {
 }
 
 // defaultClientVersionFor 按账号 realm 返回内置客户端版本段：
-// global → 5.8.4，cn（含 a 为 nil / 全局开关未开）→ 5.8.3。
+// global → 5.9.3，cn（含 a 为 nil / 全局开关未开）→ 5.9.3（当前两域同版）。
 func defaultClientVersionFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		return defaultClientVersionGlobal
@@ -186,7 +192,7 @@ func (c *Client) userAgent(a *auth.Auth) string {
 // 为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖掉）。
 // 默认（client_name 空）即生效（伪造官方桌面端指纹）；
 // 显式 client_name="SaaS" 则不设 UA（还原旧行为，Go 默认 UA）。
-// 版本段按账号 realm 取（CN 5.8.3 / global 5.8.4），与 chat 的 UA 保持同域一致。
+// 版本段按账号 realm 取（当前两域同为 5.9.3），与 chat 的 UA 保持同域一致。
 func (c *Client) billingUA(a *auth.Auth) string {
 	if c == nil || c.attributionClientName() == "SaaS" {
 		return ""
@@ -247,7 +253,7 @@ func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
 	// 发对应语言标识，对齐避免上游风控按语言缺失误判。
 	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	// 不再注入 X-Machine-ID / X-Session-ID：官方桌面端 5.8.4 全量分发包里这两个头
+	// 不再注入 X-Machine-ID / X-Session-ID：官方桌面端 5.9.3 全量分发包里这两个头
 	// 一次都没出现过（grep 计数 0），自造的稳定派生值反而是最显眼的网关特征。
 }
 
@@ -412,7 +418,10 @@ func (c *Client) injectStainlessHeaders(req *http.Request) {
 //     TraceId 回落 messageID（恒 32 hex），SpanId 取 messageID[:16]、ParentSpanId
 //     取 messageID[16:]（每消息新）。
 //   - traceparent / b3：W3C 与 B3 单头形式，对齐官方 applyTraceHeaders 的四件套。
-//     官方不发 X-Root-Request-ID（全量分发包 grep 计数 0），本地也不发。
+//     不发 X-Root-Request-ID：5.9.3 的 CLI 虽有该头（ROOT_REQUEST_ID_HEADER），但只在
+//     会话 meta["codebuddy.ai/rootRequestId"] 有值时发——桌面端主对话的 main 会话不设
+//     该 meta，只有 subagent/team 派生的请求才会带上，且值等于其主会话的
+//     conversationRequestId。网关不派生子会话，故不发。
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
@@ -478,21 +487,29 @@ func (c *Client) attributionClientName() string {
 	return "WorkBuddy"
 }
 
-// injectAttribution 注入用量归属头（X-Agent-Intent / X-Agent-Purpose / X-IDE-* /
-// X-Agent-Type / X-Private-Data）。仅在 chat/completions 路径生效（ChatHeaders 调用）。
+// injectAttribution 注入用量归属头（X-Agent-Intent / X-Agent-Purpose / X-Agent-Runtime /
+// X-IDE-* / X-Agent-Type / X-Private-Data）。仅在 chat/completions 路径生效（ChatHeaders 调用）。
 //
-// 头名与取值逐项对齐官方国际版客户端（D:\PG\workbuddyAI 取证，2026-10-19）：
+// 头名与取值逐项对齐官方国际版客户端（D:\PG\workbuddyAI 取证，2026-10-29，5.9.3）：
 //   - CLI 侧 `axiosToFetchAdapter`（dist/codebuddy-lite-wb.mjs）对每条模型请求设
-//     X-Agent-Intent / X-Agent-Purpose / X-IDE-Type / X-IDE-Name / X-IDE-Version /
-//     X-Agent-Type；渲染层 `applyGatewayHeaders` + `YN` 默认表再补 X-Private-Data。
+//     X-Agent-Intent / X-Agent-Purpose / X-Agent-Runtime / X-IDE-Type / X-IDE-Name /
+//     X-IDE-Version / X-Agent-Type；渲染层 `applyGatewayHeaders` + `YN` 默认表再补 X-Private-Data。
 //   - X-Agent-Intent=craft      官方唯一取值为会话 meta["codebuddy.ai/mode"] ?? "craft"
 //   - X-Agent-Purpose=conversation  官方 getEffectiveAgentPurpose 主对话取值
-//   - X-Agent-Type=main         resolveSessionAgentType：无 teamContext/parentConversationId → "main"
-//   - X-Private-Data=true       官方默认表恒设
+//   - X-Agent-Runtime=local-agent  5.9.3 新增。CLI 侧 resolveAgentRuntime → 会话 meta
+//     ["codebuddy.ai/agentRuntime"] ?? env CODEBUDDY_AGENT_RUNTIME ?? "other"，取值域
+//     AGENT_RUNTIMES=["local-agent","cloud-agent","agent-agent"]；桌面端本地会话由
+//     main/conversations.js 在 transport==="local" 时写死 "local-agent"（桌面端主对话
+//     恒为本地 transport），故桌面端形态取 local-agent。5.8.x 无此头。
+//   - X-Agent-Type=main         resolveModelCallAgentType：无 teamContext/parentConversationId
+//     → resolveSessionAgentType 返回 "main"
+//   - X-Private-Data=true       5.9.3 改由 applyPrivateDataHeaderPolicy 决定：企业版/自定义
+//     模型**不发**，个人版普通模型发 true。我们按个人版普通模型形态发 true。
 //
-// **不发 X-Product**：官方 CLI 的 yc.PRODUCT 常量只有声明、全包无赋值点，渲染层
-// YN 默认表仅在 inbound 已带该头时兜底（e.get(n)||r），而 CLI→网关这条链上没人设。
-// 实测国际版出站头集里没有 X-Product，我们之前发 `X-Product: WorkBuddy` 属多出项。
+// **不发 X-Product**：官方 CLI 的 yc.PRODUCT 常量只有声明、全包无赋值点（CLI→网关这条
+// 链上没人设；ProductEndpointHttpInterceptor 只作用于 REST 元数据请求，不在模型请求上），
+// 渲染层 YN 默认表仅在 inbound 已带该头时兜底（e.get(n)||r）。实测国际版 chat 出站头集里
+// 没有 X-Product，我们之前发 `X-Product: WorkBuddy` 属多出项。
 func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	name := c.attributionClientName()
 	if name == "SaaS" {
@@ -502,6 +519,7 @@ func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Agent-Intent", "craft")
 	req.Header.Set("X-Agent-Purpose", "conversation")
+	req.Header.Set("X-Agent-Runtime", "local-agent")
 	req.Header.Set("X-Agent-Type", "main")
 	req.Header.Set("X-Private-Data", "true")
 	req.Header.Set("X-IDE-Name", name)

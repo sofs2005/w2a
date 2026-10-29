@@ -45,7 +45,7 @@ PATH_STREAK         = "/activity/growth/streak"
 PATH_REPORT         = "/v2/report"
 PATH_CHAT           = "/v2/chat/completions"
 
-CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2"
+CLIENT_UA = "CLI/2.165.0 CodeBuddy/2.165.0"
 
 
 def load_auth(uid_or_file: str) -> dict:

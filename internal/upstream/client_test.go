@@ -552,6 +552,11 @@ func TestChatStreamWireBodyHasNoSelfInventedFields(t *testing.T) {
 	if got := gotHeader.Get("X-Agent-Type"); got != "main" {
 		t.Errorf("wire header X-Agent-Type=%q want main（官方 axiosToFetchAdapter 恒发）", got)
 	}
+	// 反向：X-Agent-Runtime 自 5.9.3 起由 CLI 恒发（桌面端本地会话 → local-agent），
+	// 漏发即「官方发了、我们没发」的渠道特征。
+	if got := gotHeader.Get("X-Agent-Runtime"); got != "local-agent" {
+		t.Errorf("wire header X-Agent-Runtime=%q want local-agent（官方 5.9.3 axiosToFetchAdapter 恒发）", got)
+	}
 	// 反向：官方 chat 走 OpenAI Node SDK，X-Stainless-* 族默认必发（见
 	// injectStainlessHeaders）。漏发同样是「官方发了、我们没发」的渠道特征。
 	for _, h := range []string{

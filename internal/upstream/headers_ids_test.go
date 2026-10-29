@@ -14,7 +14,7 @@ var hex16Re = regexp.MustCompile(`^[0-9a-f]{16}$`)
 // TestChatHeadersConversationFullMeta 全量 meta 出站头族（issue #35 后台聚合）：
 // 聚合主键 X-Conversation-Request-ID 必发且等于传入值，消息级双头同值 32 hex，
 // Trace 透传入站值，B3 链路族格式合法（含 ParentSpanId + traceparent/b3 单头），
-// 不发官方没有的 X-Root-Request-ID，既有账号头零回归。
+// 主对话不发 X-Root-Request-ID（官方仅 subagent/team 派生请求携带），既有账号头零回归。
 func TestChatHeadersConversationFullMeta(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	req := mustRequest(t)
@@ -40,7 +40,7 @@ func TestChatHeadersConversationFullMeta(t *testing.T) {
 		t.Errorf("message ID %q not 32 hex", msgID)
 	}
 	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
-		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
+		t.Errorf("X-Root-Request-ID = %q want empty (官方仅子会话发该头)", got)
 	}
 	if got := req.Header.Get("X-Trace-ID"); got != "trace-inbound" {
 		t.Errorf("X-Trace-ID = %q want trace-inbound", got)
@@ -112,7 +112,7 @@ func TestChatHeadersConversationEmptyMeta(t *testing.T) {
 		t.Errorf("X-Conversation-Request-ID = %q want 32 hex (必发)", convReqID)
 	}
 	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
-		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
+		t.Errorf("X-Root-Request-ID = %q want empty (官方仅子会话发该头)", got)
 	}
 	if got := req.Header.Get("X-B3-TraceId"); got != convReqID {
 		t.Errorf("X-B3-TraceId = %q want %q", got, convReqID)
@@ -136,7 +136,7 @@ func TestChatHeadersConversationInvalidTraceConvReqID(t *testing.T) {
 		t.Errorf("X-Conversation-Request-ID = %q want %q (透传不改)", got, bad)
 	}
 	if got := req.Header.Get("X-Root-Request-ID"); got != "" {
-		t.Errorf("X-Root-Request-ID = %q want empty (官方不发该头)", got)
+		t.Errorf("X-Root-Request-ID = %q want empty (官方仅子会话发该头)", got)
 	}
 	msgID := req.Header.Get("X-Conversation-Message-ID")
 	trace := req.Header.Get("X-B3-TraceId")

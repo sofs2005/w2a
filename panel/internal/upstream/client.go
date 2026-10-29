@@ -50,7 +50,7 @@ const (
 	ChatBaseGlobal    = "https://www.workbuddy.ai"
 	BillingBaseGlobal = "https://www.workbuddy.ai"
 
-	clientUA     = "CLI/2.161.0 CodeBuddy/2.161.0"
+	clientUA     = "CLI/2.165.0 CodeBuddy/2.165.0"
 	originCN     = "https://www.codebuddy.cn"
 	originGlobal = "https://www.workbuddy.ai"
 
@@ -303,11 +303,12 @@ func regionBases(region Region) (chatBase, billingBase, origin string) {
 
 // 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersionCN /
 // defaultClientVersionGlobal / defaultCliVersion 同值）。
-// 两域分发包版本不同步，必须按 region 取：CN 5.8.3、global 5.8.4。
+// 两域当前同版（2026-10-29 均为 5.9.3），但仍按 region 取值：官方曾多次不同步发布，
+// 留两条常量避免下次分叉时再改结构。
 const (
-	desktopClientVersionCN     = "5.8.3"
-	desktopClientVersionGlobal = "5.8.4"
-	desktopCLIVersion          = "2.161.0"
+	desktopClientVersionCN     = "5.9.3"
+	desktopClientVersionGlobal = "5.9.3"
+	desktopCLIVersion          = "2.165.0"
 )
 
 // promoFetchTimeout 促销配置的单次超时。
@@ -321,7 +322,7 @@ const promoFetchTimeout = 15 * time.Second
 // 两段品牌都恒为 `WorkBuddy`：官方分发包 buildVlmGatewayHeaders 硬编码
 // `[WorkBuddy/${r}, WorkBuddy/${r}]`，与 productName（global 为 `WorkBuddy AI`）
 // 无关，且两域 main/server.js 逐字节相同（md5 8f8525cb…，2026-10-19 复验）。
-// 版本段仍按 realm 切：CN 5.8.3、global 5.8.4（陈旧版本段会被上游风控挡）。
+// 版本段仍按 realm 切（当前两域同为 5.9.3；陈旧版本段会被上游风控挡）。
 func desktopUA(region Region) string {
 	version := desktopClientVersionCN
 	if region == RegionGlobal {
@@ -333,7 +334,7 @@ func desktopUA(region Region) string {
 
 // desktopHeaders 设置官方桌面端出站请求头（网关 CommonHeaders 的同款口径）。
 //
-// 为什么不能复用包内既有的 commonHeaders（CLI UA `CLI/2.161.0 CodeBuddy/2.161.0`）：
+// 为什么不能复用包内既有的 commonHeaders（CLI UA `CLI/2.165.0 CodeBuddy/2.165.0`）：
 // 实测同一账号同一时刻，两种 UA 从 /v3/config 拿到的是**两份不同配置**——
 //
 //	CLI UA      → 21 个模型，无 modelPromotions

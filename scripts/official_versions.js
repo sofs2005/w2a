@@ -6,13 +6,15 @@
 //   node scripts/official_versions.js                        # 自动探测 %USERPROFILE%
 //   node scripts/official_versions.js --root D:/PG/workbuddyAI --home C:/Users/me
 //
-// 为什么要读这么多处：官方把版本号分散在 4 个文件里，且**两域发布不同步**
-// （2026-10 实测 CN 5.8.3 / global 5.8.4）。任何一处都不能当唯一真源——
+// 为什么要读这么多处：官方把版本号分散在 4 个文件里，且两域**发布节奏不保证同步**
+// （2026-10-29 实测两域均为 5.9.3，此前 2026-10 曾出现 CN 5.8.3 / global 5.8.4 不同步）。
+// 任何一处都不能当唯一真源——
 //   ~/.workbuddy/last-launch.json            CN 桌面端运行时版本（最贴近实际发包）
 //   ~/.workbuddy-ai/last-launch.json         global 同上
 //   <install>/resources/install-manifest.json appVersion
 //   <install>/resources/app.asar!/cli/product.json          genieVersion + isOversea + endpoint
-//   <install>/resources/app.asar!/cli/package.json          publishConfig.customPackage.version（CLI）
+//   <install>/resources/app.asar!/cli/package.json          version（CLI；5.9.3 起
+//                                                          publishConfig.customPackage 已移除）
 //
 // 本脚本只读不写，输出可直接对照 internal/upstream/headers.go 的
 // defaultClientVersionCN / defaultClientVersionGlobal / defaultCliVersion。
@@ -108,8 +110,12 @@ for (const root of roots) {
     push(`install.${root}.genieVersion`, product.genieVersion);
   }
   const cliPkg = asarJSON(a, '/cli/package.json');
-  const cliVer = cliPkg && cliPkg.publishConfig && cliPkg.publishConfig.customPackage
-    ? cliPkg.publishConfig.customPackage.version : null;
+  // 5.9.3 起官方把顶层 version 填成真实 CLI 版本（0.0.0 是未填充占位），
+  // 旧的 publishConfig.customPackage.version 通道已移除；两条都读以兼容老包。
+  const cliVer = (cliPkg && cliPkg.version && cliPkg.version !== '0.0.0')
+    ? cliPkg.version
+    : (cliPkg && cliPkg.publishConfig && cliPkg.publishConfig.customPackage
+      ? cliPkg.publishConfig.customPackage.version : null);
   if (cliVer) push(`install.${root}.cliVersion`, cliVer);
   a.fd && fs.closeSync(a.fd);
 }

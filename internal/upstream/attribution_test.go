@@ -81,11 +81,11 @@ func TestAttributionIncludesIDEVersion(t *testing.T) {
 			t.Errorf("%s = %q want %q", tc.header, got, tc.want)
 		}
 	}
-	// X-IDE-Version 缺省（client_version 空）= 内置默认按 realm 取（CN 5.8.3），且四头齐全。
+	// X-IDE-Version 缺省（client_version 空）= 内置默认按 realm 取（CN 5.9.3），且四头齐全。
 	c2 := &Client{ClientName: "WorkBuddy"}
 	h2 := chatHeadersReq(t, c2, a, "")
-	if got := h2.Get("X-IDE-Version"); got != "5.8.3" {
-		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.8.3")
+	if got := h2.Get("X-IDE-Version"); got != "5.9.3" {
+		t.Errorf("X-IDE-Version = %q want %q (default)", got, "5.9.3")
 	}
 	// 显式 ClientName="SaaS" 时 X-IDE-Version 不设（还原旧行为：只有 X-Product=SaaS）。
 	c3 := &Client{ClientName: "SaaS"}
@@ -105,9 +105,10 @@ func TestProductDefaultWorkBuddyFingerprint(t *testing.T) {
 	for hdr, want := range map[string]string{
 		"X-IDE-Name":      "WorkBuddy",
 		"X-IDE-Type":      "WorkBuddy",
-		"X-IDE-Version":   "5.8.3",
+		"X-IDE-Version":   "5.9.3",
 		"X-Agent-Intent":  "craft",
 		"X-Agent-Purpose": "conversation",
+		"X-Agent-Runtime": "local-agent",
 		"X-Agent-Type":    "main",
 		"X-Private-Data":  "true",
 	} {
@@ -129,7 +130,7 @@ func TestProductSaaSOptOut(t *testing.T) {
 		t.Errorf("X-Product = %q want %q", got, "SaaS")
 	}
 	// X-IDE-Name/Type 不应被设置。
-	for _, hdr := range []string{"X-IDE-Name", "X-IDE-Type", "X-Agent-Purpose", "X-Agent-Intent", "X-Private-Data"} {
+	for _, hdr := range []string{"X-IDE-Name", "X-IDE-Type", "X-Agent-Purpose", "X-Agent-Intent", "X-Agent-Runtime", "X-Private-Data"} {
 		if got := h.Get(hdr); got != "" {
 			t.Errorf("%s = %q want empty (SaaS opt-out)", hdr, got)
 		}

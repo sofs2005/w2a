@@ -922,13 +922,13 @@ type Client struct {
 	ClientName string
 
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + B 段的
-	// X-IDE-Version）。空 = 按账号 realm 取内置默认（CN defaultClientVersionCN 5.8.3 /
-	// global defaultClientVersionGlobal 5.8.4，对齐官方两域分发包）。
+	// X-IDE-Version）。空 = 按账号 realm 取内置默认（CN defaultClientVersionCN 5.9.3 /
+	// global defaultClientVersionGlobal 5.9.3，对齐官方两域分发包，2026-10-29 两域同版）。
 	// config upstream.client_version 覆盖（覆盖值对两域统一生效）。
 	ClientVersion string
 
 	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认 defaultCliVersion
-	// （对齐官方内置 CLI 2.161.0，两域同版）。config upstream.cli_version 覆盖。
+	// （对齐官方内置 CLI 2.165.0，两域同版）。config upstream.cli_version 覆盖。
 	CliVersion string
 
 	// StainlessRuntimeVersion 出站 `X-Stainless-Runtime-Version` 取值（官方 chat 走

@@ -194,7 +194,7 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 // 并集不会比单路更差。版本号需随官方发版跟进——过旧 UA 该端点会返回精简目录。
 const (
 	ideV3UA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
-	cliV3UA = "CLI/2.161.0 CodeBuddy/2.161.0"
+	cliV3UA = "CLI/2.165.0 CodeBuddy/2.165.0"
 )
 
 // probeGlobalModels 发起一次 global 模型目录探测（v3-config-merge）：

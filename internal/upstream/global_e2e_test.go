@@ -274,7 +274,7 @@ func TestGlobalE2EProbeChatVariants(t *testing.T) {
 			r.Header.Set("X-Agent-Purpose", "conversation")
 			r.Header.Set("X-IDE-Name", "WorkBuddy")
 			r.Header.Set("X-IDE-Type", "WorkBuddy")
-			r.Header.Set("X-IDE-Version", "5.8.4")
+			r.Header.Set("X-IDE-Version", "5.9.3")
 			r.Header.Set("X-Agent-Type", "main")
 		}},
 		{"no-content-type", "gpt-5.4", func(r *http.Request) { r.Header.Del("Content-Type") }},

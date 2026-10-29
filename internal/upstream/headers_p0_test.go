@@ -90,7 +90,7 @@ func TestCommonHeadersAcceptLanguageByRealm(t *testing.T) {
 }
 
 // TestChatHeadersDropsUnofficialHeaders chat 出站不得携带官方 Vlm.send 不发/明确
-// 排除的头。判据全部来自官方分发包（CN 5.8.3 / global 5.8.4 的 main/server.js
+// 排除的头。判据全部来自官方分发包（5.9.3 的 main/server.js
 // 逐字节相同）：
 //   - Origin：Vlm 的排除集 qN 显式含 `origin`；
 //   - Referer / Accept-Language / X-No-Enterprise-Id / X-No-Department-Info /

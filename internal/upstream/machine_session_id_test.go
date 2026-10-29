@@ -9,7 +9,7 @@ import (
 
 // TestNoMachineSessionIDHeaders 出站不再注入 X-Machine-ID / X-Session-ID。
 //
-// 官方 WorkBuddy Desktop 5.8.4 全量分发包（app.asar）里这两个头名一次都没出现过
+// 官方 WorkBuddy Desktop 5.9.3 全量分发包（app.asar）里这两个头名一次都没出现过
 // （不分大小写 grep 计数 0）；此前按 uid 稳定派生的自造值反而是最显眼的网关特征。
 // 本测试是反向护栏：任何出站路径重新引入这两个头都会红。
 func TestNoMachineSessionIDHeaders(t *testing.T) {
