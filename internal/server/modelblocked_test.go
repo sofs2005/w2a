@@ -22,8 +22,8 @@ import (
 // 仍 11102、负缓存被重新写回，才走得到「模型不可用」的收口。若上游其实是好的，
 // 正确行为是 200（自愈），不再报 model_unavailable。
 //
-// 断言三件事：状态码 400（不可重试语义）、code=model_unavailable、上游原文透传
-// （requestId 等本地调度层编不出来的信息）。
+// 断言四件事：状态码 400（不可重试语义）、code=model_unavailable、上游原文透传
+// （requestId 等本地调度层编不出来的信息）、被挡账号数仍为 2（自愈未改变快照时机）。
 func TestChatModelBlockedNotNoHealthyAccount(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -56,6 +56,24 @@ func TestChatModelBlockedNotNoHealthyAccount(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "service info not found") {
 		t.Errorf("必须保留上游原文: %s", body)
+	}
+	// 被挡账号数（自 4eb26d9 起这里曾一度只剩「保留上游原文」一条，本断言把它补回）：
+	// 自愈清一次负缓存 + 每号重试一次后，失败会把负缓存原样写回，所以池内快照仍应是
+	// 「2 个号都在这个模型上被挡」。这条钉的是自愈**没有**改变 modelBlock 快照的取值
+	// 时机（快照在 acct==nil 分支取，晚于重试），Count 必须是 2 而不是 0/1。
+	if st := p.ModelBlocked("glm-5.2"); !st.Blocked || st.Count != 2 {
+		t.Errorf("负缓存应被写回且被挡账号数=2，got %+v", st)
+	}
+	// 但「2 account(s)」这句 gateway_hint **不会**出现在本响应里，且这是正确的：
+	// hint 的本地账号数格式只在 ue == nil（本轮压根没打到上游）时生成
+	// （handler 的 `if modelBlock.Blocked && ue == nil`），而本用例每一轮都拿到了
+	// 上游 11102 原文 —— 设计上「有原文时不覆盖，原文比本地推断更权威」。
+	// 该文案在仍可达的 ue==nil 路径（6004 限流窗口内的后续请求）由
+	// TestChatRateWindowReportsRateLimitNotModelUnavailable 逐字钉住（"2 account(s)"
+	// + "earliest unblock at"），所以「被挡账号数」这条信息没有失去覆盖：本用例钉
+	// 池内事实（Count=2），另一条钉对外文案。
+	if strings.Contains(body, "account(s)") {
+		t.Errorf("有上游原文时 gateway_hint 应取上游语义，不该同时拼本地账号数: %s", body)
 	}
 	if strings.Contains(body, "rate_limit_exceeded") {
 		t.Errorf("11102（无此模型）不得报成限流: %s", body)

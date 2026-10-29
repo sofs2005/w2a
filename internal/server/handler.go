@@ -990,6 +990,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					}
 					log.Printf("WARN: [server] model=%q realm=%s: every pickable account blocked by 11102 negative cache, cleared %d and retrying (suspect transient upstream)",
 						bareModel, rk, n)
+					// 回退索引：自愈的「重试」不是一次新的换号机会，而是**同一批号**
+					// 重新参与选号，不该占用 max_rotate 名额。否则 max_rotate=1（或
+					// 号数 ≥ max_rotate-1）的部署里，自愈会清掉负缓存却一次上游都没
+					// 打（本分支的 continue 就把循环走完了），对外仍是
+					// 503 no_healthy_account —— 缓存白丢、请求白失败，且池子全程没有
+					// 一次真实探测（模型恢复了也不会被发现）。
+					// 有界性由 modelBlocksCleared 保证：每请求至多清一次，故最多回退
+					// 一次索引，不会无限循环。与 upstream 里「同路径去压缩重试」同写法。
+					i--
 					continue
 				}
 			}
@@ -1819,8 +1828,8 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 立即终止轮转并回 503（见那里的分支）。该分支只为文档完备与纵深防御。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
-		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶
-		// 24h）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
+		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（2m 起、封顶
+		// 10m；2026-10-28 从 6h/24h 缩短，见 pool.entry.go 的 modelBlockBaseTTL 注释）。选号侧 healthyForModel 对该账号自动避开该模型；切模型/切账号即可用。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
 		h.config().Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason, alsoOut...)
 	case upstream.ErrFallbackModelMissing:
