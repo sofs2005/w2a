@@ -222,8 +222,8 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 		}
 		ch := make(chan probeResult, 1)
 		go func() {
-			n, i, e, d, perr := c.globalModelsOnceUA(a, v3ConfigPath, ua)
-			ch <- probeResult{n, i, e, d, perr}
+			n, i, e, d, t, perr := c.globalModelsOnceUA(a, v3ConfigPath, ua)
+			ch <- probeResult{n, i, e, d, t, perr}
 		}()
 		return ch, resolved
 	}
@@ -241,7 +241,7 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 				lastErr = perr
 				continue
 			}
-			enterpriseCh <- probeResult{names, infos, efforts, defaults, nil}
+			enterpriseCh <- probeResult{names, infos, efforts, defaults, nil, nil}
 			return
 		}
 		enterpriseCh <- probeResult{err: lastErr}
@@ -262,17 +262,23 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	if v3.err != nil {
 		// /v3 失败降级：不拖累企业端点结果（任务书实现要点：降级仅企业端点 + warn）。
+		// 企业端点族没有 modelTiers 段 → 无从判 Pro Only，原样返回。
 		log.Printf("WARN: [upstream] global models: v3/config probe failed (degraded to enterprise endpoint): %v", v3.err)
 		return enterprise.names, enterprise.infos, enterprise.efforts, enterprise.defaults, nil
 	}
 	if enterprise.err != nil {
 		log.Printf("WARN: [upstream] global models: enterprise endpoint failed (v3/config only): %v", enterprise.err)
-		return v3.names, v3.infos, v3.efforts, v3.defaults, nil
+		names, infos, efforts, defaults = v3.names, v3.infos, v3.efforts, v3.defaults
+		names, infos, efforts, defaults = filterProOnlyModels(v3.tiers, names, infos, efforts, defaults)
+		return names, infos, efforts, defaults, nil
 	}
 	// 两路皆成功：v3 为主、企业端点补缺合并。
 	names, infos = mergeGlobalCatalog(v3.names, v3.infos, enterprise.names, enterprise.infos)
 	efforts = mergeEffortBuckets(v3.efforts, enterprise.efforts)
 	defaults = mergeEffortDefaults(v3.defaults, enterprise.defaults)
+	// 剔除 Pro Only 模型（仅 global 域，见 filterProOnlyModels）。用合并后的
+	// v3 三路 tiers，保证即使某一路失败、另两路仍能判出 Pro Only 集合。
+	names, infos, efforts, defaults = filterProOnlyModels(v3.tiers, names, infos, efforts, defaults)
 	return names, infos, efforts, defaults, nil
 }
 
@@ -284,6 +290,7 @@ type probeResult struct {
 	infos    []ModelInfo
 	efforts  map[string][]string
 	defaults map[string]string
+	tiers    []v3ModelTier
 	err      error
 }
 
@@ -326,9 +333,31 @@ func mergeV3Routes(routes []v3Route) probeResult {
 		out.names, out.infos = mergeGlobalCatalog(out.names, out.infos, r.res.names, r.res.infos)
 		out.efforts = mergeEffortBuckets(out.efforts, r.res.efforts)
 		out.defaults = mergeEffortDefaults(out.defaults, r.res.defaults)
+		// modelTiers 取并集（按 id 去重）：任一路判出 Pro Only 都算，避免某路
+		// 缺该段时漏过滤。
+		out.tiers = mergeTiers(out.tiers, r.res.tiers)
 	}
 	if nOK == 0 {
 		return probeResult{err: firstErr}
+	}
+	return out
+}
+
+// mergeTiers 两路 modelTiers 取并集：按条目 id 去重（同 id 保留先到者，权威序与
+// mergeV3Routes 一致）。任一路判出的 Pro Only 集合都不会因另一路缺该段而丢失。
+func mergeTiers(primary, secondary []v3ModelTier) []v3ModelTier {
+	if len(secondary) == 0 {
+		return primary
+	}
+	seen := make(map[string]bool, len(primary)+len(secondary))
+	out := make([]v3ModelTier, 0, len(primary)+len(secondary))
+	for _, t := range append(append([]v3ModelTier{}, primary...), secondary...) {
+		key := t.TrackKey + "|" + strings.Join(t.ModelIDs, ",")
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, t)
 	}
 	return out
 }
@@ -411,7 +440,8 @@ func mergeEffortDefaults(primary, secondary map[string]string) map[string]string
 
 // globalModelsOnce 单端点探测（默认 UA）。2xx + 解析出非空名单 → (names, infos, efforts, defaults, nil)；否则 (nil,...,err)。
 func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelInfo, map[string][]string, map[string]string, error) {
-	return c.globalModelsOnceUA(a, path, "")
+	names, infos, efforts, defaults, _, err := c.globalModelsOnceUA(a, path, "")
+	return names, infos, efforts, defaults, err
 }
 
 // globalModelsOnceUA 单端点探测（ua 非空时覆盖 User-Agent）。
@@ -423,11 +453,11 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]string, []ModelI
 // 实现上在 CommonHeaders 之后**覆写** User-Agent 头，而不是绕过 CommonHeaders：后者的
 // 其余头（Origin/Referer/X-CodeBuddy-Request/Accept-Language/设备头）对 /v3/config 同样
 // 必需（Bearer + web UA → 400 code 12403 的实测门禁，见 global-models-missing.md）。
-func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) ([]string, []ModelInfo, map[string][]string, map[string]string, error) {
+func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) (names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string, tiers []v3ModelTier, err error) {
 	url := c.chatBase(a) + path // 按 realm 切 base：global 账号 → global base
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	c.CommonHeaders(req, a) // 共享请求头（Origin/Referer/UA），与 FetchModels 同款
 	if ua != "" {
@@ -436,22 +466,26 @@ func (c *Client) globalModelsOnceUA(a *auth.Auth, path, ua string) ([]string, []
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
 	client, cerr := c.clientFor(a, false)
 	if cerr != nil {
-		return nil, nil, nil, nil, cerr
+		return nil, nil, nil, nil, nil, cerr
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		// 读失败 → 传输层错误：半截 body 不进解析（探测负缓存走 lastFail，不罚号）。
-		return nil, nil, nil, nil, fmt.Errorf("read body: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, nil, nil, fmt.Errorf("global models status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		return nil, nil, nil, nil, nil, fmt.Errorf("global models status %d: %s", resp.StatusCode, truncate(string(raw), 120))
 	}
-	return parseGlobalModelNames(raw)
+	names, infos, efforts, defaults, err = parseGlobalModelNames(raw)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+	return names, infos, efforts, defaults, parseV3ModelTiers(raw), nil
 }
 
 // parseGlobalModelNames 容忍两种形态解析模型名：
@@ -551,5 +585,87 @@ func parseGlobalModelNames(raw []byte) (names []string, infos []ModelInfo, effor
 			}
 		}
 	}
+	// 注意：Pro Only 剔除**不在此处**。本函数与 CN fetchV3Models 共用，而 CN 的
+	// modelTiers 是调度优先级而非访问限制（见 v3ModelTier 注释）。过滤只在 global
+	// 专属的 probeGlobalModels 出口做，见 filterProOnlyModels。
 	return out, infos, efforts, defaults, nil
+}
+
+// v3ModelTier /v3/config data.modelTiers 单条分层定义。
+//
+// **两域语义不同，不能只看 tier/requiredUserType**（2026-10-29 两域实测）：
+//
+//	CN     id=tier-standard-2026q3  trackKey=model_tier_standard  badge=订阅优先
+//	       → 「资源紧张时旗舰/高级会员优先调度」，免费账号照样能用 glm-5.3
+//	global id=gpt-pro-only           trackKey=gpt_pro_only         badge=Pro Only
+//	       → 「仅面向 Pro 用户开放」，免费账号调用会被上游拒
+//
+// 两域 tier 与 requiredUserType **都是 "standard"**，拿这两个字段判会把 CN 域三个
+// 正常可用模型误删。故判据取 trackKey 含 "pro_only"，且本过滤只在 global 域启用。
+type v3ModelTier struct {
+	Enabled  bool     `json:"enabled"`
+	TrackKey string   `json:"trackKey"`
+	ModelIDs []string `json:"modelIds"`
+}
+
+// proOnlyTierMarker trackKey 中标识「仅 Pro 可用」的片段（global 实测 gpt_pro_only）。
+const proOnlyTierMarker = "pro_only"
+
+// parseV3ModelTiers 从 /v3/config 原始响应取 modelTiers 段；解析失败/缺省 → nil。
+// 与 parseV3Promotions 同纪律：分层是增强项，解析不出绝不能拖垮目录探测。
+func parseV3ModelTiers(raw []byte) []v3ModelTier {
+	var env struct {
+		Data struct {
+			ModelTiers []v3ModelTier `json:"modelTiers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil
+	}
+	return env.Data.ModelTiers
+}
+
+// filterProOnlyModels 从 global 目录里剔除「仅 Pro 可用」的模型（免费账号调用会被
+// 上游拒，留在列表里只会让调用方选到必然失败的模型）。
+//
+// 口径：modelTiers 中 enabled 且 trackKey 含 pro_only 的条目，其 modelIds 全剔除。
+// 同时清掉这些 id 在 names / infos / efforts / defaults 四处的一席，避免 effort 桶
+// 与模型列表不一致。tiers 为空（企业端点族没有该段）→ 原样返回。
+//
+// 不过滤 CN 域：CN 的 tier-standard 是调度优先级而非访问限制（见 v3ModelTier 注释）。
+func filterProOnlyModels(tiers []v3ModelTier, names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string) ([]string, []ModelInfo, map[string][]string, map[string]string) {
+	if len(tiers) == 0 || len(names) == 0 {
+		return names, infos, efforts, defaults
+	}
+	blocked := make(map[string]bool)
+	for _, t := range tiers {
+		if !t.Enabled || !strings.Contains(t.TrackKey, proOnlyTierMarker) {
+			continue
+		}
+		for _, id := range t.ModelIDs {
+			if id != "" {
+				blocked[id] = true
+			}
+		}
+	}
+	if len(blocked) == 0 {
+		return names, infos, efforts, defaults
+	}
+	keptNames := make([]string, 0, len(names))
+	for _, id := range names {
+		if !blocked[id] {
+			keptNames = append(keptNames, id)
+		}
+	}
+	keptInfos := make([]ModelInfo, 0, len(infos))
+	for _, mi := range infos {
+		if !blocked[mi.ID] {
+			keptInfos = append(keptInfos, mi)
+		}
+	}
+	for id := range blocked {
+		delete(efforts, id)
+		delete(defaults, id)
+	}
+	return keptNames, keptInfos, efforts, defaults
 }

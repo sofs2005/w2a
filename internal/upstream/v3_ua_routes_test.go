@@ -149,7 +149,7 @@ func TestGlobalModelsOnceUAOverridesUAOnlyForProbe(t *testing.T) {
 	defer srv.Close()
 
 	c := globalModelsClient(t, srv)
-	if _, _, _, _, err := c.globalModelsOnceUA(globalAcct(), v3ConfigPath, ideV3UA); err != nil {
+	if _, _, _, _, _, err := c.globalModelsOnceUA(globalAcct(), v3ConfigPath, ideV3UA); err != nil {
 		t.Fatalf("覆盖探测失败: %v", err)
 	}
 	if c.UserAgent != "" {
