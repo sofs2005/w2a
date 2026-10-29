@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -168,4 +170,123 @@ func TestChatNoConsoleFallbackOnNonChannelCheck(t *testing.T) {
 			t.Fatalf("非渠道校验的 404 不得回落 /console，实际路径=%v", paths)
 		}
 	}
+}
+
+// 11-128 按 system 内容判定：合法系统提示词不该把账号拖下水。
+//
+// 同一请求体先被渠道校验拦下（/v2 与 /console 都拒），handler 把 system 文本
+// 搬进首条 user 后重试成功；账号不冷却、不禁用。
+func TestChatChannelCheckMovesSystemIntoUserAndRetries(t *testing.T) {
+	var bodies []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			if systemHasPersona(b) {
+				return sseResponse(400, channelCheckBody(testAntiProbeCode())), nil
+			}
+			return sseResponse(200, sseOK), nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, PromptMode: "passthrough", SoftCooldown: 600 * time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[`+
+			`{"role":"system","content":"PERSONA-SAFE"},`+
+			`{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("system 文本搬进 user 后应成功，got code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(bodies) < 2 {
+		t.Fatalf("应至少重试一次，实际上游请求 %d 次", len(bodies))
+	}
+	last := bodies[len(bodies)-1]
+	if systemHasPersona([]byte(last)) {
+		t.Fatalf("重试请求的 system 里仍有原 persona 文本，未搬迁: %s", last)
+	}
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(last), &req); err != nil {
+		t.Fatalf("重试请求不是合法 JSON: %v (%s)", err, last)
+	}
+	if len(req.Messages) < 2 || req.Messages[0].Role != "system" || req.Messages[0].Content != prompt.Degraded {
+		t.Fatalf("重试请求的 system 应是中性文案（%q），got %+v", prompt.Degraded, req.Messages)
+	}
+	// system 文本必须一字不落地搬进首条 user（设定先于用户输入）。
+	if req.Messages[1].Role != "user" ||
+		req.Messages[1].Content != "PERSONA-SAFE\n\nhi" {
+		t.Fatalf("原 system 文本应在 user 消息里且原 user 内容在尾部，got %+v", req.Messages[1])
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling || st.Disabled {
+		t.Fatalf("内容问题不该罚账号：cooling=%v disabled=%v", st.Cooling, st.Disabled)
+	}
+}
+
+// TestChatChannelCheckMoveSkippedInCustomMode custom 模式下 system 是网关自己的
+// 提示词，搬迁没有意义 —— 不做请求级抢救，按既有渠道校验策略处理（软冷却、不禁用）。
+func TestChatChannelCheckMoveSkippedInCustomMode(t *testing.T) {
+	calls := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			calls++
+			return sseResponse(400, channelCheckBody(testAntiProbeCode())), nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{
+		Pool: p, Upstream: up, PromptMode: "custom", PromptText: "GATEWAY-PROMPT",
+		SoftCooldown: 600 * time.Second,
+	})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[`+
+			`{"role":"system","content":"PERSONA-SAFE"},`+
+			`{"role":"user","content":"hi"}]}`)))
+	if rec.Code == 200 {
+		t.Fatalf("custom 模式不做搬迁抢救，应失败，got 200 body=%s", rec.Body.String())
+	}
+	// /v2 + /console 两条路径，没有额外的搬迁重试。
+	if calls != 2 {
+		t.Fatalf("custom 模式应只有两条路径的上游调用，实际 %d 次", calls)
+	}
+	st, _ := p.Status("u1")
+	if st.Disabled {
+		t.Fatal("渠道校验绝不能禁用账号")
+	}
+	if !st.Cooling {
+		t.Fatal("两条路径都被渠道校验拒时应软冷却（既有策略不变）")
+	}
+}
+
+// systemHasPersona 判断请求体里是否还有「原始 system 内容」（persona 标记仍在
+// system 通道）。出站前 client 会 normalize 重排消息字段，所以按 JSON 解析判断，
+// 不依赖字段顺序。
+func systemHasPersona(body []byte) bool {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return false
+	}
+	for _, m := range req.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, "PERSONA") {
+			return true
+		}
+	}
+	return false
 }

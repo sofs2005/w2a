@@ -44,10 +44,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           # 必须开着：go.mod 写的是 `go 1.26`（浮动 minor），不开 check-latest 时
@@ -61,7 +61,7 @@ jobs:
       # 必须与 Dockerfile 的第一个阶段保持同一 Node 主版本，避免「CI 用 22、镜像用 20」
       # 这样前端产物只在其中一条路径上能构建出来。
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
           cache: npm
@@ -245,7 +245,7 @@ jobs:
           echo "panel api ok"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wb2api-linux-amd64
           path: |

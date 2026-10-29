@@ -169,6 +169,15 @@ type Config struct {
 		// PassthroughIP 是否透传客户端 IP（X-Forwarded-For/X-Real-IP 首段）给上游。
 		// 缺省 false（反代安全边界：不把内网/代理 IP 暴露给上游）；true 才透传。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// GzipBody chat 请求体超过 64KB 时用 gzip 压缩后再发上游（省出口带宽）。
+		//
+		// **缺省 false（与上游主干默认相反，刻意为之）**：压缩请求体本身就是一条
+		// 「不像官方客户端」的信号 —— 上游实测长上下文 gzip 后稳定吃 11-128 渠道
+		// 校验，同一 body 不压缩即 200。上游主干默认打开是靠 global 域 /v2 +
+		// /console 双路径兜底；本网关 global 域是单路径 /v2（/console 挂腾讯云
+		// WAF），没有第二条路可退，给全部流量默认打开一个已知的 11-128 触发源
+		// 不划算。做成 opt-in：启用前请先在 11-128 拦截率低的时段灰度验证。
+		GzipBody bool `json:"gzip_body"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -319,6 +328,11 @@ func Default() *Config {
 	// （upstream.Client 的 attributionClientName 空值也回落 WorkBuddy，双保险）；
 	// 显式 client_name="SaaS" 还原旧行为。
 	c.Upstream.ClientName = "WorkBuddy"
+	// 大请求体 gzip 默认**关**（opt-in）。与上游主干的默认相反，理由见
+	// Upstream.GzipBody 字段注释：gzip 是已知的 11-128 触发信号，而本网关的
+	// global 域没有 /console 兜底路径。此处显式写出，防止将来有人「顺手对齐上游」
+	// 改默认值而无处可见。
+	c.Upstream.GzipBody = false
 	c.Features.SanitizeBlacklistFingerprints = true
 	reasoningFallback := true
 	c.ReasoningAsContent = &reasoningFallback
@@ -577,6 +591,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
+		}
+	}
+	if v := os.Getenv("WB2A_GZIP_BODY"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.GzipBody = b
 		}
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {

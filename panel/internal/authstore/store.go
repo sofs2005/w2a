@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,6 +77,11 @@ type Store struct {
 	// 即可根治，避免用户每次手工 chown。
 	ownerUID int
 	ownerGID int
+
+	// chown 可注入的 chown 实现（nil = os.Chown）。**仅测试用**：非 root 环境
+	// 造不出「属主改成功、属组改失败」的真实 EPERM，而「属组失败不阻断」这条
+	// 策略恰好只能在那种场景下验证。
+	chown func(path string, uid, gid int) error
 }
 
 // New 构建 Store；dir 为空时报错（凭证目录是必需配置）。
@@ -264,7 +270,7 @@ func (s *Store) Save(a *Account) error {
 
 // writeAtomic 原子替换（tmp + rename）；在 Docker 单文件挂载等无法 rename 的场景
 // 自动回退为原地写入，避免"凭证刷新成功却存不下去"。
-// 写入后按 SetOwner 配置调整属主，让网关容器（低权限用户）能读到。
+// 写入后按 SetOwner 配置调整属主/属组，让网关容器（低权限用户）能读到。
 // 调用方必须已持有 s.mu。
 func (s *Store) writeAtomic(path string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -273,26 +279,43 @@ func (s *Store) writeAtomic(path string, raw []byte) error {
 	if _, err := fsutil.WriteFileAtomic(path, raw, 0o600); err != nil {
 		return err
 	}
-	// 属主调整：仅当显式配置过（>=0）才生效。
-	// 失败不视为写凭证失败（凭证内容已落盘），但必须让调用方能感知——
-	// 因此返回错误，由上层决定是否降级为告警。
+	// 属主/属组调整：仅当显式配置过（>=0）才生效。
+	//
+	// 分两段而不是一次 chown(uid, gid)，因为两者的失败后果不同：
+	//   - 属主：跨 uid 部署时网关正是靠**属主**读文件（0600 同 uid 可读）。改不动
+	//     就必须报错 —— 静默成功会变成「账号加进去了但池里没有」，比明确报错难查。
+	//   - 属组：属主已就位时网关已经读得到，属组只影响附加的组可读性。改不动只
+	//     告警，不能因此让整个保存失败（此前一次 chown 失败就把用户引去查一个
+	//     其实正常的目录）。
 	if s.ownerUID >= 0 || s.ownerGID >= 0 {
-		uid, gid := s.ownerUID, s.ownerGID
-		if uid < 0 {
-			uid = -1
+		chown := s.chownFn()
+		if s.ownerUID >= 0 {
+			if err := chown(path, s.ownerUID, -1); err != nil {
+				return fmt.Errorf("凭证已写入，但调整文件属主为 %d:%d 失败（网关可能读不到该账号）: %w",
+					s.ownerUID, s.ownerGID, err)
+			}
 		}
-		if gid < 0 {
-			gid = -1
+		if s.ownerGID >= 0 {
+			if err := chown(path, -1, s.ownerGID); err != nil {
+				log.Printf("WARN: [authstore] 凭证已写入但调整属组为 %d 失败（属主已就位，网关仍可读；仅组可读性受影响）: %v",
+					s.ownerGID, err)
+			}
 		}
-		if err := os.Chown(path, uid, gid); err != nil {
-			return fmt.Errorf("凭证已写入，但调整文件属主为 %d:%d 失败（网关可能读不到该账号）: %w", uid, gid, err)
-		}
-		// 目录也要可进入：网关需要 stat/open 该目录下的文件。
+		// 目录也要可进入：网关需要 stat/open 该目录下的文件。目录进不去是真的
+		// 读不到，所以这条失败必须上抛，不能当告警。
 		if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
 			return fmt.Errorf("凭证已写入，但调整目录权限失败: %w", err)
 		}
 	}
 	return nil
+}
+
+// chownFn 返回实际使用的 chown 实现（默认 os.Chown，测试可注入）。
+func (s *Store) chownFn() func(path string, uid, gid int) error {
+	if s.chown != nil {
+		return s.chown
+	}
+	return os.Chown
 }
 
 // ErrNoCredentialFile 表示该账号没有本地凭证文件可删除。

@@ -336,6 +336,8 @@ func buildUpstream(cfg *Config) *upstream.Client {
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
 	up.ClientName = cfg.Upstream.ClientName
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
+	// 大请求体 gzip（缺省 false，opt-in）：>64KB 才压，短请求零开销。
+	up.GzipBody = cfg.Upstream.GzipBody
 
 	// global realm 路由（base 空回落内置默认；开关与 auth 包双保险）。
 	up.ChatBaseGlobal = cfg.Global.ChatBase

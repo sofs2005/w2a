@@ -206,3 +206,86 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 	}
 	return out
 }
+
+// MoveSystemToUser 把 system/developer 消息的文本搬进首条 user 消息，
+// system 换成最小中性提示词（Degraded）。
+//
+// 用途（11-128 渠道校验）：上游按 system 通道的内容做判定，同一段文本放进 user
+// 通道可以通过。请求本身可能完全合法（例如带人格设定的系统提示词），所以给调用方
+// 一次**请求级**重试机会，而不是把账号判成故障。文本一字不改，只换承载通道。
+//
+// 保守返回 (nil, false)：body 非 JSON / 无 messages / 无 system 文本 / 无 user
+// 消息 / 首条 user 的 content 不是纯字符串（数组或多模态）时不碰——那几种形态下
+// 「搬过去」会改变用户请求的语义，宁可让调用方按原错误处理。
+func MoveSystemToUser(body []byte) ([]byte, bool) {
+	if len(body) == 0 {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return nil, false
+	}
+	var sysTexts []string
+	firstUser := -1
+	for i, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := mm["role"].(string)
+		switch role {
+		case "system", "developer":
+			// 只搬非空**纯文本**内容：多模态 system（数组）搬进 user 会变成
+			// 结构不同的 content，语义与形态都变了。
+			if s, ok := mm["content"].(string); ok && s != "" {
+				sysTexts = append(sysTexts, s)
+			}
+		case "user":
+			if firstUser < 0 {
+				firstUser = i
+			}
+		}
+	}
+	if len(sysTexts) == 0 || firstUser < 0 {
+		return nil, false
+	}
+	um, ok := msgs[firstUser].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	userText, ok := um["content"].(string)
+	if !ok {
+		return nil, false
+	}
+	// 系统文本放前、user 原有内容放后：语义顺序不变（设定先于用户输入）。
+	moved := strings.Join(sysTexts, "\n\n") + "\n\n" + userText
+	rewritten := make([]any, 0, len(msgs)-len(sysTexts)+1)
+	// 首条固定为中性 system：上游只要求 system 通道「不像自造人格设定」，
+	// 完全删掉 system 反而不像官方客户端的请求形态（见 EnsureLeadingSystem）。
+	rewritten = append(rewritten, map[string]any{"role": "system", "content": Degraded})
+	for i, m := range msgs {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			rewritten = append(rewritten, m)
+			continue
+		}
+		role, _ := mm["role"].(string)
+		if role == "system" || role == "developer" {
+			continue
+		}
+		if i == firstUser {
+			mm["content"] = moved
+		}
+		rewritten = append(rewritten, mm)
+	}
+	obj["messages"] = rewritten
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}

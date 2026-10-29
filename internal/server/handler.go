@@ -867,6 +867,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
 	degradedApplied := false
+	// systemMoved 标记本次请求是否已经做过「system 文本搬进 user」的 11-128
+	// 请求级抢救。只做一次有意义：搬过之后仍被拦，说明触发词在 user 侧或请求
+	// 其它部分，再搬一遍是确定性重撞。
+	systemMoved := false
 	if h.config().PromptMode == "custom" && h.config().PromptText != "" {
 		body = prompt.Rewrite(body, h.config().PromptText)
 	} else if h.config().PromptMode == "append" && h.config().PromptText != "" && !h.degrade.Active() {
@@ -1147,6 +1151,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			}
+			// 11-128 渠道校验：上游实测判定依据是 system 消息的内容（同一 body 换号
+			// 结果一致；把 system 文本原样搬进首条 user、system 换中性提示词即通过），
+			// 请求本身可能完全合法（带人格设定的系统提示词）。换号/换路径都救不了
+			// 内容问题，所以先做一次**请求级**抢救；失败（ok==false）就什么都不做，
+			// 落到既有的渠道校验软冷却策略——有偿代理里一个被灰度到的号留在池中
+			// 「显示健康、每次选中都失败」比软冷却更贵，罚号策略不动。
+			//
+			// custom 模式不适用：那时 system 是网关自己的提示词，搬它没有意义。
+			if kind == upstream.ErrAccountFault && !systemMoved &&
+				(h.config().PromptMode == "passthrough" || h.config().PromptMode == "append") &&
+				upstream.IsChannelCheck(string(respBody)) {
+				if moved, ok := prompt.MoveSystemToUser(body); ok {
+					body = moved
+					// origBody 必须同步：循环首行 `body = origBody` 会以它为基准重算
+					// model 改写，不同步等于把搬迁结果丢掉、下一轮又发原 system
+					// （与上面降级分支同一写法，同一坑）。
+					origBody = moved
+					systemMoved = true
+					// 单账号池也能拿到重试机会（重试占一次轮换名额，与原账号解绑）。
+					delete(tried, acct.UID)
+					releaseHeld()
+					log.Printf("WARN: [server] channel-check (system content) -> moved system into user, retry")
+					continue
+				}
 			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append

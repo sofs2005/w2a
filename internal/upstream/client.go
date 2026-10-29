@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -879,6 +880,21 @@ type Client struct {
 	// SanitizeFingerprints 出站请求体黑名单指纹脱敏开关（默认 true；false 完全还原）。
 	SanitizeFingerprints bool
 
+	// GzipBody chat 请求体超过 gzipBodyThreshold 时用 gzip 压缩后再发上游
+	// （config upstream.gzip_body，**缺省 false**，opt-in）。
+	//
+	// 只压 chat：refresh/checkin/billing 的请求体都在几 KB 量级，压了纯耗 CPU
+	// 换不到可观测的收益，还多一个上游可能不认的形态。
+	//
+	// 为什么默认关（与上游补丁的默认值相反，刻意）：压缩请求体本身就是一条
+	// 「不像官方客户端」的信号 —— 上游实测长上下文 gzip 后稳定吃 11-128，同一
+	// body 不压缩即 200。上游主干默认打开是因为它的 global 域有 /v2 + /console
+	// 双路径兜底；本网关 global 域是**单路径 /v2**（/console 挂在腾讯云 WAF 的
+	// body 内容规则上，见 chatPaths），没有第二条路可退。给全部流量默认打开一个
+	// 已知的 11-128 触发源，风险与收益不对称。启用前请先在 11-128 拦截率低的
+	// 时段灰度验证（命中渠道校验时会自动去压缩重试一次，见 ChatStreamContext）。
+	GzipBody bool
+
 	// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认 WorkBuddy
 	// 三段式与 billingUA 单段式）。空 = 默认官方形态：chat/refresh/FetchModels 走
 	// `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cliVer>`；billing/checkin 走 `WorkBuddy/<ver>`
@@ -1568,13 +1584,35 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if cerr != nil {
 		return nil, 0, nil, cerr
 	}
-	for i, path := range paths {
+	// 请求体压缩（config upstream.gzip_body，缺省关闭）：>64KB 才压，短请求零开销。
+	// 这里算一次、循环内复用 —— 路径回落（/v2 → /console）不需要重新压。
+	outBody, contentEncoding := c.outboundBody(prepared)
+	// gzipRetried 让「压缩版被判不认 / 命中渠道校验 → 未压缩重试」只发生一次。
+	gzipRetried := false
+	// primaryChannelRaw / primaryChannelErr 记下**主路径**被渠道校验拦下时的原文
+	// 与信封（任务 B：回退路径的 11102 不该替上游改口）。
+	//
+	// 为什么需要：/v2 判渠道校验 → 换 /console → /console 报 11102「无此模型」，
+	// 直接返回 11102 会让对外报文说「模型不存在」，而真实原因是被渠道校验挡住，
+	// 运维与客户端都被带偏。回退路径只是「换条路试试」，不是新的诊断结论，故对外
+	// 用主路径原文。Kind 仍然用 ErrFallbackModelMissing（见下方 11102 降级分支），
+	// 罚号策略一个字不动 —— 这两件事必须分开：报文说真话，分类维持「请求级、零动作」。
+	var primaryChannelRaw []byte
+	var primaryChannelErr *Error
+	// 索引循环而非 range：下面「同一条路径去掉压缩重发」用 i-- 回退，range 里改 i 无效。
+	for i := 0; i < len(paths); i++ {
+		path := paths[i]
 		url := c.chatBase(a) + path
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(prepared))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(outBody))
 		if err != nil {
 			return nil, 0, nil, err
 		}
 		c.ChatHeaders(req, a, clientIP, meta)
+		if contentEncoding != "" {
+			// 用 bytes.Reader 建请求时 Go 会自己算出压缩后的 Content-Length，
+			// 这里只补语义头。
+			req.Header.Set("Content-Encoding", contentEncoding)
+		}
 		// 从调用方 ctx 派生：保留取消传播（父 ctx 取消 → 本 ctx 取消），
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
@@ -1611,15 +1649,56 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 				log.Printf("ERR: [upstream] chat_stream acct=%s: read body: %v", logfmt.Label(a.UID, a.Nickname), rerr)
 				return nil, 0, nil, fmt.Errorf("read body: %w", rerr)
 			}
+			// 上游不接受压缩请求体：改回未压缩重发**同一条路径**。
+			// 只重试一次，且只对 415 / 「请求体解析失败」类 400 生效 —— 别的 4xx
+			// 是请求本身的问题，重发只是多打一次上游（见 gzipUnsupported）。
+			if contentEncoding != "" && !gzipRetried && gzipUnsupported(resp.StatusCode, string(raw)) {
+				gzipRetried = true
+				contentEncoding = ""
+				outBody = prepared
+				log.Printf("WARN: [upstream] chat_stream acct=%s: 上游不接受压缩请求体（%d），改用未压缩重试",
+					logfmt.Label(a.UID, a.Nickname), resp.StatusCode)
+				i-- // 同一条路径再来一次（索引循环才有效，range 里改 i 是空操作）
+				continue
+			}
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
+			// 主路径被渠道校验拦下 → 留档原文与信封，供回退路径失败时「说真话」
+			// （见下方 11102 降级分支）。只记 /v2：/console 是回退路径，它的报文
+			// 恰恰是我们要替换掉的那个。
+			if path == chatCompletionsPath && IsChannelCheck(string(raw)) {
+				primaryChannelRaw = raw
+				primaryChannelErr = &Error{Kind: kind, Status: resp.StatusCode, Msg: string(raw)}
+				if d, ok := ParseRetryAfter(resp.Header); ok {
+					primaryChannelErr.RetryAfter = d
+				}
+			}
 			// 回退路径上的 11102 降级（issue #245）：能走到 /console 是因为 /v2 判了渠道
 			// 校验，而 /console 本来就可能不提供这个模型 —— 11102 只说明「这条路径没有」，
 			// 不是「该账号缺这个模型」。照 ErrModelBlocked 处理，handler 会写 (账号,模型)
 			// 6 小时负缓存，逐个账号轮过去就是整池 503 no_healthy_account，比不换路径更糟。
 			// 也不按 ErrClient 处理：连败计数是账号健康信号，这里失败的是路径不是账号。
 			if i > 0 && kind == ErrModelBlocked {
+				if primaryChannelErr != nil {
+					// 对外返回**主路径**的报文与状态：回退路径的 11102 只说明这条备用
+					// 小道没有这个模型，报出去会让运维和客户端都以为是模型下线，而
+					// 真实原因是被渠道校验挡住。
+					//
+					// Kind 仍取 ErrFallbackModelMissing（不是主路径的 ErrAccountFault）：
+					// handler 的 applyErrorPolicy 对该 Kind 零动作（不冷却/不禁用/不
+					// NoteError），罚号策略一个字不变。换成 ErrAccountFault 会把「换路
+					// 径没换到模型」记成账号故障，正是 issue #245 修掉的那个坑。
+					log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，对外回主路径 %s 的报文（请求级）",
+						logfmt.Label(a.UID, a.Nickname), path, kind, primaryChannelErr.Kind)
+					ue := &Error{
+						Kind:       ErrFallbackModelMissing,
+						Status:     primaryChannelErr.Status,
+						Msg:        truncate(string(primaryChannelRaw), 200),
+						RetryAfter: primaryChannelErr.RetryAfter,
+					}
+					return nil, primaryChannelErr.Status, primaryChannelRaw, ue
+				}
 				log.Printf("WARN: [upstream] chat_stream acct=%s: 回退路径 %s 报 %s，按请求级处理（不写模型冷却）",
 					logfmt.Label(a.UID, a.Nickname), path, kind)
 				kind = ErrFallbackModelMissing
@@ -1631,10 +1710,29 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// 强校验而 /console 放行，不换就是整池被拦。global 域只配单路径
 			// （见 chatPaths），条件天然不成立。两条都失败仍按下面原有逻辑返回，由
 			// handler 决定怎么罚号 —— 那时也**不该禁用**（见其 ErrAccountFault 分支）。
-			if i < len(paths)-1 && IsChannelCheck(string(raw)) {
-				log.Printf("WARN: [upstream] chat_stream acct=%s: %s 被拒（%d），换路径 %s 重试",
-					logfmt.Label(a.UID, a.Nickname), path, resp.StatusCode, paths[i+1])
-				continue
+			if IsChannelCheck(string(raw)) {
+				// 压缩请求体本身就是一条「不像官方客户端」的信号：上游实测长上下文
+				// gzip 后稳定吃 11-128，同一 body 不压缩即 200。命中渠道校验时**先**
+				// 去掉压缩重发同一条路径 —— gzip 只是省带宽的优化，不值得为它换来
+				// 一整轮失败；别急着换路径（换路径是另一件事，救不了「形态不像官方
+				// 客户端」）。
+				//
+				// 位置刻意在「记录主路径原文之后、换路径之前」：原文已经留档（万一
+				// 不压缩也被拦，对外仍报主路径真相），且这一步没花掉路径名额。
+				if contentEncoding != "" && !gzipRetried {
+					gzipRetried = true
+					contentEncoding = ""
+					outBody = prepared
+					log.Printf("WARN: [upstream] chat_stream acct=%s: %s 命中渠道校验且请求体是压缩的，改用未压缩重试",
+						logfmt.Label(a.UID, a.Nickname), path)
+					i-- // 同一条路径再来一次（索引循环才有效，range 里改 i 是空操作）
+					continue
+				}
+				if i < len(paths)-1 {
+					log.Printf("WARN: [upstream] chat_stream acct=%s: %s 被拒（%d），换路径 %s 重试",
+						logfmt.Label(a.UID, a.Nickname), path, resp.StatusCode, paths[i+1])
+					continue
+				}
 			}
 			// ≥400 直接返回（除上面的渠道校验换路径外，chat 层无 fallback 链；billing
 			// 层的 404 fallback 独立存在，语义不受影响）。
@@ -1665,6 +1763,64 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		return monitorBody(body, c.IdleTimeout, cancel), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
+}
+
+// gzipBodyThreshold chat 请求体超过这个大小才压缩（config upstream.gzip_body）。
+//
+// 64KB 的依据：小请求压了只多一次分配与 CPU，省下的带宽可以忽略；而长上下文
+// 请求体常在 1MB 以上，出口带宽窄时首字节要等十几秒 —— 压到 1/4 左右是实打实的
+// 提速。阈值以下一律不压，短对话零开销。
+const gzipBodyThreshold = 64 << 10
+
+// outboundBody 按配置决定 chat 请求体是否压缩，返回最终 body 与 Content-Encoding
+// （空串 = 未压缩）。任何压缩环节出错都原样返回未压缩 body：gzip 是优化，绝不能
+// 因为它把请求做失败。
+func (c *Client) outboundBody(body []byte) ([]byte, string) {
+	if c == nil || !c.GzipBody || len(body) < gzipBodyThreshold {
+		return body, ""
+	}
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+	if err != nil {
+		return body, ""
+	}
+	if _, err := zw.Write(body); err != nil {
+		_ = zw.Close()
+		return body, ""
+	}
+	if err := zw.Close(); err != nil {
+		return body, ""
+	}
+	// 压缩后反而更大（已压缩过的二进制内容）→ 不压，省得上游多解一次。
+	if buf.Len() >= len(body) {
+		return body, ""
+	}
+	return buf.Bytes(), "gzip"
+}
+
+// gzipUnsupported 判「上游不接受压缩请求体」的响应。
+//
+// 触发面只认两类：HTTP 415（Unsupported Media Type），以及 400 且文案像
+// 「请求体解析失败（因为看到的是压缩字节）」。别的 400 一律不重试 —— 那是请求
+// 本身的问题，重发只是多打一次上游。
+func gzipUnsupported(status int, raw string) bool {
+	if status == http.StatusUnsupportedMediaType {
+		return true
+	}
+	if status != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	for _, marker := range []string{
+		"unmarshal chat params failed", "invalid character", "cannot unmarshal",
+		"unexpected end of json", "invalid json", "failed to decode",
+		"content-encoding", "content encoding", "gzip",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：

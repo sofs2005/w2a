@@ -20,6 +20,12 @@ const channelBody = `{"code":"11-128","msg":"request illegal, channel verificati
 //
 // 回退路径上的 11102 只说明「这条路径没有这个模型」：我们是因为 /v2 判了渠道校验才
 // 换过去的，/console 本来就可能不提供这个模型，这不构成「该账号缺这个模型」的证据。
+//
+// 报文口径（本批同步）：对外返回**主路径 /v2 的 11-128 原文**，而不是 /console 的
+// 11102。为什么：回退路径只是「换条小道试试」，它没有这个模型是**预期内**的，不是
+// 新的诊断结论；照它报「模型不存在」会让运维和客户端都以为是模型下线，而真实原因
+// 是被渠道校验挡住 —— 排障方向直接被带偏。Kind 仍是 ErrFallbackModelMissing（不是
+// 主路径的 ErrAccountFault），handler 的 applyErrorPolicy 对它零动作，罚号策略不变。
 func TestConsoleFallbackModelMissingIsRequestLevel(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +54,16 @@ func TestConsoleFallbackModelMissingIsRequestLevel(t *testing.T) {
 	}
 	if ue.Kind != ErrFallbackModelMissing {
 		t.Fatalf("回退路径的 11102 应归请求级（ErrFallbackModelMissing），got %v", ue.Kind)
+	}
+	// 报文说真话：对外是主路径的渠道校验原文，不是 /console 的「模型不存在」。
+	if !strings.Contains(string(raw), "channel verification") {
+		t.Fatalf("应返回主路径（/v2）的渠道校验原文，got %s", raw)
+	}
+	if strings.Contains(string(raw), "service info not found") {
+		t.Fatalf("不能把 /console 的 11102 报文透给客户端（会把排障带偏），got %s", raw)
+	}
+	if !strings.Contains(ue.Msg, "channel verification") {
+		t.Fatalf("错误信封的 Msg 也应取主路径原文，got %q", ue.Msg)
 	}
 	if len(paths) != 2 || !strings.Contains(paths[0], "/v2/") || !strings.Contains(paths[1], "/console/") {
 		t.Fatalf("应当先在 /v2 被拒再换 /console，实际路径=%v", paths)
