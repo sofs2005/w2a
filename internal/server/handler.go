@@ -927,6 +927,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// modelBlocksCleared 标记本次请求是否已经做过「11102 全池负缓存自愈」。
+	// 每请求只清一次：模型**真的**下线时不能变成重试风暴（见下方 acct==nil 分支）。
+	modelBlocksCleared := false
+
 	for i := 0; i < h.config().MaxRotate; i++ {
 		// 出站 body 以 origBody（prompt 改写后、model 改写前）为基准逐号重算：
 		// 别名映射按账号域取值，换号必须重新改写（在已改写 body 上再改会叠加；
@@ -949,6 +953,42 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.config().Pool.PickExcludingForRealms(tried, bareModel, route.CandidateRealms())
 		}
 		if acct == nil {
+			// 11102 全池自愈：上游 11102 有时是**瞬时**故障（模型注册表抖动 / 灰度切换），
+			// 而一次抖动会让每个被选中的账号各写一条指数退避负缓存（2m 起、封顶 10m），
+			// 十几个号轮一遍就是全池 503 —— 模型其实几分钟前就恢复了（实测
+			// deepseek-v4.1-flash 那次：20/20 账号被写负缓存，直连全部 200）。这里在置
+			// 503 之前清一次负缓存并重试一轮。
+			//
+			// 判据必须与**选号同一个域维度**（issue #332）：上面选号走
+			// PickExcludingForRealms(tried, bareModel, route.CandidateRealms())，若这里改用
+			// 全池口径（ModelBlocked / AvailableUIDsForModel），双 realm 部署下只要另一域
+			// 还有账号，判据就恒为「未阻塞」→ 自愈永不触发，而本次请求的候选域已被负缓存
+			// 全挡 → 固定 503（换任何模型都一样，逐个被打成负缓存）。
+			//
+			// 两个条件缺一不可：
+			//   - ModelBlockedInRealms(...).Blocked：候选域里**每个**非停用号都对该模型处于
+			//     模型级冷却。它同时排除「号都健康、只是被在途占满/积分保底挡住」——那类
+			//     选号失败与 11102 无关，清负缓存只会白扔有效缓存（于是也不会去重试）。
+			//   - AvailableUIDsForModelRealms == 0：与选号同一可用口径（域集合 + 成本分层
+			//     + 在途名额），确认「该模型在本次请求的域集合里 0 个可用号」。
+			// 只清一次（modelBlocksCleared）：清完仍 11102 就会把负缓存重新写回，末端口径
+			// 照旧报 model_unavailable，不会退化成重试风暴。
+			if !modelBlocksCleared && bareModel != "" &&
+				h.config().Pool.ModelBlockedInRealms(bareModel, route.CandidateRealms()).Blocked &&
+				len(h.config().Pool.AvailableUIDsForModelRealms(bareModel, route.CandidateRealms())) == 0 {
+				if n := h.config().Pool.ClearModelBlocks(bareModel); n > 0 {
+					modelBlocksCleared = true
+					// 上一轮被负缓存挡下的号全部重新参与（tried 清空）。
+					tried = map[string]bool{}
+					rk := route.CandidateRealms().Key()
+					if rk == "" {
+						rk = "all" // 空集 = 全池（RealmSet.Key 约定），日志里 "" 易被误读成缺值
+					}
+					log.Printf("WARN: [server] model=%q realm=%s: every pickable account blocked by 11102 negative cache, cleared %d and retrying (suspect transient upstream)",
+						bareModel, rk, n)
+					continue
+				}
+			}
 			st.status = http.StatusServiceUnavailable
 			// 记下「是不是模型级阻塞」。选号返回 nil 有两种完全不同的成因：
 			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；

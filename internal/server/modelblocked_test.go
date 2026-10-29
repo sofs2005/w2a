@@ -13,17 +13,22 @@ import (
 
 // TestChatModelBlockedNotNoHealthyAccount 钉住「模型不可用」与「没有可用账号」的区分。
 //
-// 场景：两个号都在，且都对 glm-5.2 处于 11102 模型级负缓存中。选号返回 nil，
-// lastErr 为空（本轮压根没打到上游）。修法前客户端拿到的是 503 no_healthy_account
-// ——读起来像「服务端过载」，于是不停重试；真正该做的是换个模型。
+// 场景：两个号都在，且都对 glm-5.2 处于 11102 模型级负缓存中，而该模型**真的**不可用
+// （上游坚持回 11102）。修法前客户端拿到的是 503 no_healthy_account——读起来像
+// 「服务端过载」，于是不停重试；真正该做的是换个模型。
 //
-// 断言三件事：状态码 400（不可重试语义）、code=model_unavailable、gateway_hint 里
-// 带出被挡账号数与最早解封时间（上游不会告诉客户端的本地调度信息）。
+// 注意与 11102 全池自愈的分界：负缓存全挡时 handler 会先清一次负缓存重试（见
+// model_block_selfheal_test.go），因此本用例必须让上游持续回 11102 —— 自愈清完后重试
+// 仍 11102、负缓存被重新写回，才走得到「模型不可用」的收口。若上游其实是好的，
+// 正确行为是 200（自愈），不再报 model_unavailable。
+//
+// 断言三件事：状态码 400（不可重试语义）、code=model_unavailable、上游原文透传
+// （requestId 等本地调度层编不出来的信息）。
 func TestChatModelBlockedNotNoHealthyAccount(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
-		return 200, sseOK, true
+		return 404, `{"code":11102,"msg":"model [glm-5.2] service info not found"}`, false
 	})
 	p := testPoolWith(
 		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
@@ -38,8 +43,9 @@ func TestChatModelBlockedNotNoHealthyAccount(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 
-	if calls != 0 {
-		t.Errorf("模型级阻塞应在选号阶段止损，不得打上游，实际 %d 次", calls)
+	// 自愈清一次负缓存后每个号各试一次（不得变成重试风暴）。
+	if calls != 2 {
+		t.Errorf("自愈后应每号各试一次（2 次），实际 %d 次", calls)
 	}
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code=%d want 400（模型不可用是不可重试错误）body=%s", rec.Code, rec.Body)
@@ -47,10 +53,9 @@ func TestChatModelBlockedNotNoHealthyAccount(t *testing.T) {
 	if !assertJSONErrorCode(t, rec.Body.String(), "model_unavailable") {
 		t.Errorf("不得混成 no_healthy_account（语义相反：该换模型，不是该重试）: %s", rec.Body)
 	}
-	// 上游不会告诉客户端的两件事：有几个号被挡、最早什么时候可能好。
 	body := rec.Body.String()
-	if !strings.Contains(body, "2 account(s)") {
-		t.Errorf("gateway_hint 应带出被挡账号数: %s", body)
+	if !strings.Contains(body, "service info not found") {
+		t.Errorf("必须保留上游原文: %s", body)
 	}
 	if strings.Contains(body, "rate_limit_exceeded") {
 		t.Errorf("11102（无此模型）不得报成限流: %s", body)

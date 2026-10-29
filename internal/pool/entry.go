@@ -472,7 +472,7 @@ type modelCostEntry struct {
 // 在 2f4c77b 加上持久化后未同步更新，与上方 stateModelCooldown 的「落盘/恢复往返无损」自相矛盾。
 // 承载两种「该模型在此账号上不可用」语义：
 //   - 6004 模型级限流：Until 对齐上游重置墙钟；ResetAt 记录权威恢复时刻。
-//   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
+//   - 11102 该后端无此模型：Until 为指数退避 TTL（2m 起、封顶 10m）；Hits 记录
 //     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
 type modelCooldown struct {
 	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11102：now+退避 TTL）。
@@ -484,7 +484,7 @@ type modelCooldown struct {
 	// Reason 触发原因（透出运维可读文案，同 Status.Reason）。
 	Reason string
 	// Hits 11102 负缓存的累计命中次数（驱动指数退避）。运行态不落盘（同 modelCost 口径：
-	// 重启后从 6h 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
+	// 重启后从 2m 基数重新学习）；6004 条目 Hits 恒 0。持久化来回不会写入该字段。
 	Hits int
 }
 
@@ -505,12 +505,19 @@ const (
 const defaultSoftRateMax = 2 * time.Hour
 
 // 11102「该后端无此模型」负缓存的退避参数（吸收 model_blocks.py 语义，复用 modelCooldowns
-// 机制承载）。首次命中冷却 6h，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
-// 封顶 24h（最多一天再试一次）；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+// 机制承载）。首次命中冷却 2m，半开到期放行重试；再命中按 Hits 指数退避（×2^min(hits-1,6)），
+// 封顶 10m；该模型请求成功即清。6004 限流不参与本退避（各自独立语义）。
+//
+// 2026-10-28 从 6h/24h 缩短到 2m/10m：原参数把「一次偶发 11102」放大成整池锁死——6h 基数
+// 上每次重试还翻倍，十几个号轮一遍就是十几个小时的全池 503，而模型往往几分钟前就恢复了
+// （实测同一波次里账号直连均已 200）。缩短的代价只是「真无此模型」时多试几次（每号每
+// 10 分钟最多试一次，相对一次上游往返的成本可忽略）；收益是全池自愈速度从小时级回到
+// 分钟级——配合 handler 的「全池负缓存清一次」自愈（见 ClearModelBlocks），不会再出现
+// 「一个模型把整个池子锁死一整天」的形态。
 const (
-	modelBlockBaseTTL = 6 * time.Hour
-	modelBlockMaxTTL  = 24 * time.Hour
-	modelBlockShift   = 6 // 2^6=64 倍后封顶：6h×64>24h，实际封顶锚定 24h
+	modelBlockBaseTTL = 2 * time.Minute
+	modelBlockMaxTTL  = 10 * time.Minute
+	modelBlockShift   = 6 // 2^6=64 倍后封顶：2m×64>10m，实际封顶锚定 10m
 )
 
 // sessionDeadThreshold 连续 ErrSessionDead（12153）达到该次数才永久禁用。

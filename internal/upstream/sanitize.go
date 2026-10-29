@@ -8,6 +8,7 @@ package upstream
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
@@ -20,6 +21,44 @@ var sanitizeFeatures = []string{
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
 	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
 	"11128",                      // 上游反探测：裸数字错误码
+	"workspace root",         // DSH file-reference 提示词（上游 2026-10-27 新增词）
+	"Tokens prefixed with @", // DSH file-reference 首句（上游 2026-10-28 新增词，issue #321）
+}
+
+// sanitizeExtraFeatures 运行期从 config 追加的特征串（features.sanitize_extra_features）。
+//
+// 为什么要可配置：上游的内容审核黑名单是**逐词扩充**的——2026-10-24 是 GUI 句、
+// 10-27 变成 workspace root、10-28 又加了 file-reference 首句（issue #321），每次都得
+// 重编译镜像、重新发版才能跟上。做成配置项后运维改 config.json 重启即生效，不必等发版。
+//
+// 与内置 sanitizeFeatures 分开存放，是为了让重复配置幂等（整体替换而不是 append）。
+// 读侧要加锁：配置热重载会在请求处理中途改这两张表（面板改配置即可触发），
+// 无锁读写切片头是数据竞争。锁只保护「切片头的替换」，切片内容一经发布不再原地修改
+// （ConfigureSanitize 每次构造新切片再整体替换），故 RLock 返回的切片可安全遍历。
+var sanitizeExtraFeatures []string
+
+// sanitizeExtraRewrites 运行期从 config 追加的逐字替换对（features.sanitize_extra_rewrites），
+// 格式 [["原串","替换串"], …]，只做精确替换（大小写敏感）。
+// 与 sanitizeExtraFeatures 配套：先把新词加进 features 保证进入净化分支，再加进
+// rewrites 做实际改写——只加 features 不加 rewrites 只会「命中但改不动」。
+var sanitizeExtraRewrites [][2]string
+
+// sanitizeExtraMu 保护上面两张运行期词表的**切片头替换**（见 sanitizeExtraFeatures 注释）。
+// 与 transport.go 的 routes.mu（ConfigureProxies 热重载同一形态）同风格。
+var sanitizeExtraMu sync.RWMutex
+
+// extraFeatures 取运行期特征表的快照（切片头副本；内容不可变，可安全遍历）。
+func extraFeatures() []string {
+	sanitizeExtraMu.RLock()
+	defer sanitizeExtraMu.RUnlock()
+	return sanitizeExtraFeatures
+}
+
+// extraRewrites 取运行期替换表的快照（同上）。
+func extraRewrites() [][2]string {
+	sanitizeExtraMu.RLock()
+	defer sanitizeExtraMu.RUnlock()
+	return sanitizeExtraRewrites
 }
 
 // sanitizeHdrRe 剥离层：header 键名即触发（与值无关），整段删除。
@@ -76,6 +115,24 @@ var sanitizeRewrites = [][2]string{
 		"11128",
 		"11-128",
 	},
+	{
+		// 工作区句（上游 2026-10-27 新增词）：DSH 的 dsh-file-reference 插件把
+		// "Relative paths resolve from the workspace root; absolute paths identify
+		//  files or directories on the host." 注入 system，上游对 "root" 一词逐字匹配
+		// （sys[:2075] 放行、sys[:2081] 拒绝）。root→base 一词之差即可绕过，语义不变
+		// （base 与 root 在此同义）。这句随 DSH 每个请求发出，命中频率最高。
+		"workspace root",
+		"workspace base",
+	},
+	{
+		// file-reference 首句（issue #321 二分实测）：DSH 0.2.1 起 system 里带
+		// "Tokens prefixed with @ are paths the user explicitly referenced."，
+		// 上游对这句原样出现即判 400 code=11-128；仅把 "@" 换成 "the at-sign" 即 200。
+		// 只改这一处字面量，后文 `@"..."` 的示例写法保持原样（那是语法说明，改了反而
+		// 误导模型），语义不变。
+		"Tokens prefixed with @ are paths the user explicitly referenced",
+		"Tokens prefixed with the at-sign are paths the user explicitly referenced",
+	},
 }
 
 // sanitizeDshRe 通配层：客户端「自我介绍句」的模板匹配（issue #246）。
@@ -86,6 +143,10 @@ var sanitizeRewrites = [][2]string{
 // "You are an AI assistant built on …" / "You are an assistant built on …"
 // （DSH 的第二句就是 "You are a coding agent powered by the <model> model."）
 // 同样 400 code=11-128（issue #246 逐项实测，与请求规模、tools、stream 无关）。
+//
+// 动词集合是社区实测的 7 个（powered by / built on / built by / created by /
+// developed by / made by / trained by）：上游拦的是「你不是官方客户端却在自称某某的
+// agent」这类**句式**，各客户端句子的动词并不统一，只认最前面两个会漏掉一整类变体。
 //
 // 所以这里按句式而不是按品牌匹配，整句换成通用自我介绍：
 //
@@ -105,7 +166,7 @@ var sanitizeRewrites = [][2]string{
 //   - 命中位置不限行首：真实请求里这句是 system 第一条，但客户端也可能把它嵌在
 //     模板里（"<system>You are …"）。放宽的代价只是把一句自我介绍换个说法。
 var sanitizeDshRe = regexp.MustCompile(
-	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on) [^\n]{0,120}?\.(\s|$)`)
+	`(?i)\byou are (?:a|an) (?:ai )?(?:coding )?(?:agent|assistant) (?:powered by|built on|built by|created by|developed by|made by|trained by) [^\n]{0,120}?\.(\s|$)`)
 
 // sanitizeDshRepl 是上面那句的替身：中性、无品牌，不含任何已知指纹片段。
 // `${1}` 把句尾那个空白/行尾原样接回去——不接的话 "…Harness. Use the read tool"
@@ -138,6 +199,15 @@ func sanitizeText(text string) string {
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
 	}
+	// 运行期注入的额外逐字替换（features.sanitize_extra_rewrites）。顺序在内置改写之后、
+	// 句式通配之前：内置表是逐字节验证过的上游黑名单（见 TestSanitizeLiteralByteExact），
+	// 额外表属于「新词补充」，让内置规则先命中可以保证两者的替换结果不互相打架。
+	for _, rw := range extraRewrites() {
+		if rw[0] == "" || rw[0] == rw[1] {
+			continue
+		}
+		text = strings.ReplaceAll(text, rw[0], rw[1])
+	}
 	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	// DSH Web GUI 段落：上游按「跨两句的连续文本」拦截，必须动品牌短语才拆得开。
 	text = sanitizeDshGuiRe.ReplaceAllString(text, sanitizeDshGuiRepl)
@@ -162,8 +232,22 @@ func sanitizeText(text string) string {
 // 必须再用不要求冒号的 (?i) 正则兜底（sanitizeBareHdrRe），否则整条净化被跳过。
 // sanitizeBareHdrRe 不要求冒号，是 sanitizeHdrRe 的超集，故无需再单独匹配后者。
 func hasFingerprint(text string) bool {
+	// 特征表本身也要大小写不敏感：issue #246 的教训是「原文写 AI agent 大写、小写特征
+	// 串永远命中不到」，此前只靠 sanitizeDshRe 的 (?i) 兜住句式类；workspace root 这类
+	// 普通短语同样可能被用户在正文里大写复述（"WORKSPACE ROOT"），预检一放行，改写层
+	// 根本不会执行。lower 只在进入函数时算一次。
+	lower := strings.ToLower(text)
 	for _, f := range sanitizeFeatures {
-		if strings.Contains(text, f) {
+		if strings.Contains(text, f) || strings.Contains(lower, strings.ToLower(f)) {
+			return true
+		}
+	}
+	// 运行期注入的额外特征（features.sanitize_extra_features）：同一口径，也走小写兜底。
+	for _, f := range extraFeatures() {
+		if f == "" {
+			continue
+		}
+		if strings.Contains(text, f) || strings.Contains(lower, strings.ToLower(f)) {
 			return true
 		}
 	}
@@ -288,4 +372,41 @@ func sanitizeMessages(messages []any) bool {
 		}
 	}
 	return changed
+}
+
+// ConfigureSanitize 注入运行期额外词表（启动装配 + 配置热重载各调一次，来自
+// config.json 的 features.sanitize_extra_features / sanitize_extra_rewrites）。
+//
+// 为什么需要这个入口：上游黑名单是**逐词扩充**的（10-24 GUI 句 → 10-27 workspace root
+// → 10-28 file-reference 首句），每加一个词都要重编译镜像、重新部署才能跟上。做成配置
+// 项后运维改 config.json 重启容器即可，不必等发版——而这类词的「漏拦」表现为整池
+// 400 code=11-128，等不起一个发版周期。
+//
+// 幂等：每次都是**整体替换**而不是 append，重复调用（含热重载反复触发）不会让同一个词
+// 在表里叠加多次。参数为空表示清空额外词表（回落到内置静态表，行为与旧版一致）。
+//
+// 入参会做清洗：features 去首尾空白、跳过空串；rewrites 跳过空原串与「原串==替换串」
+// 这类无效项（空原串会让 strings.ReplaceAll 在每个字符间插入替换串，是灾难性的）。
+//
+// 并发说明：启动装配与配置热重载（cmd/server 的 buildUpstream，两条路径共用）都会调用
+// 本函数，而热重载发生时请求可能正在处理——两张表由 sanitizeExtraMu 保护整体替换，
+// 请求侧通过 extraFeatures/extraRewrites 取快照，因此热重载与请求并发是安全的。
+func ConfigureSanitize(extraFeatures []string, extraRewrites [][2]string) {
+	cleanFeatures := make([]string, 0, len(extraFeatures))
+	for _, f := range extraFeatures {
+		if f = strings.TrimSpace(f); f != "" {
+			cleanFeatures = append(cleanFeatures, f)
+		}
+	}
+	cleanRewrites := make([][2]string, 0, len(extraRewrites))
+	for _, rw := range extraRewrites {
+		if rw[0] == "" || rw[0] == rw[1] {
+			continue
+		}
+		cleanRewrites = append(cleanRewrites, rw)
+	}
+	sanitizeExtraMu.Lock()
+	defer sanitizeExtraMu.Unlock()
+	sanitizeExtraFeatures = cleanFeatures
+	sanitizeExtraRewrites = cleanRewrites
 }

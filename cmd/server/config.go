@@ -174,6 +174,14 @@ type Config struct {
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
+		// SanitizeExtraFeatures 运行期追加的特征预检串：任一命中即进入净化。
+		// 上游黑名单是**逐词扩充**的（GUI 句 → workspace root → file-reference 首句 → …），
+		// 放配置里就不必为每个新词重编译镜像；空 = 只用内置静态表（行为与旧版一致）。
+		SanitizeExtraFeatures []string `json:"sanitize_extra_features"`
+		// SanitizeExtraRewrites 运行期追加的逐字替换对，格式 [["原串","替换串"], …]。
+		// 只做精确替换（大小写敏感），与 sanitize_extra_features 配套使用：通常把新增词
+		// 先加进 features 保证进入净化分支，再加进 rewrites 做实际改写。
+		SanitizeExtraRewrites [][2]string `json:"sanitize_extra_rewrites"`
 	} `json:"features"`
 
 	Prompt struct {
@@ -404,6 +412,49 @@ func priorRunEvidence(stateFile string) string {
 		}
 	}
 	return ""
+}
+
+// weakAPIKeyPlaceholders api_key 的典型占位值：示例配置/脚手架/文档里抄来的字符串。
+// 命中即视为「运维忘了改」，与空 key 同等危险（同样是把账号池裸暴露）。
+var weakAPIKeyPlaceholders = []string{"test_key", "your-api-key", "changeme", "sk-xxx"}
+
+// weakAPIKeyMinLen 疑似占位符的长度阈值：WriteDefault 生成的 key 是
+// "sk-" + 24 字符 base64（总长 27），真实运维自定的 key 也远长于 16。
+const weakAPIKeyMinLen = 16
+
+// weakAPIKeyNotice 判定 api_key 是否是「弱值」，返回告警文案；空串 = 正常（不告警）。
+//
+// 为什么只告警、不 fail-fast：空 api_key 是 w2a **有意支持**的部署形态（纯内网部署，
+// 或前置反代已做鉴权），改成退出会挡掉既有部署。但「空 key + listen 绑 0.0.0.0」等于把
+// 网关连同全部账号池裸暴露给任何能连上该端口的人，必须在启动日志里说得足够显眼
+// （沿用仓库既有的 "WARN: [组件]" 前缀，便于日志检索与告警规则匹配）。
+//
+// 两类弱值分开报：空 key 是「明着不鉴权」，占位符是「以为设了其实等于没设」——后者
+// 更隐蔽（运维看到 api_key 非空就放心了），文案必须点明它是示例值。
+func (c *Config) weakAPIKeyNotice() string {
+	key := strings.TrimSpace(c.APIKey)
+	if key == "" {
+		return fmt.Sprintf("WARN: [config] api_key 为空 = 不鉴权，且 listen=%q 默认绑 0.0.0.0："+
+			"任何能访问该端口的人都能直接消耗你的账号池。若前置反代已鉴权可忽略；否则请立即设置 api_key", c.Listen)
+	}
+	for _, ph := range weakAPIKeyPlaceholders {
+		if strings.EqualFold(key, ph) {
+			return fmt.Sprintf("WARN: [config] api_key=%q 是示例占位符（等同于不鉴权）：请改成一串随机值"+
+				"（可用 `openssl rand -base64 24` 生成）", key)
+		}
+	}
+	if len(key) < weakAPIKeyMinLen {
+		return fmt.Sprintf("WARN: [config] api_key 仅 %d 个字符，疑似示例占位符/弱口令："+
+			"请改成一串随机值（可用 `openssl rand -base64 24` 生成）", len(key))
+	}
+	return ""
+}
+
+// warnWeakAPIKey 启动时打印弱 api_key 告警（只告警不退出，理由见 weakAPIKeyNotice）。
+func warnWeakAPIKey(c *Config) {
+	if notice := c.weakAPIKeyNotice(); notice != "" {
+		log.Printf("%s", notice)
+	}
 }
 
 // WriteDefault 在 path 落一份推荐配置（首次运行自动生成，免去「手工复制 config.example.json

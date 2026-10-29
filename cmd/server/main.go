@@ -106,6 +106,11 @@ func main() {
 		}
 	}
 
+	// 弱 api_key 启动告警（空 key / 示例占位符 / 过短）：只告警、不退出——空 key 是
+	// w2a 有意支持的部署形态（纯内网 / 前置反代已鉴权），改成 fail-fast 会挡掉既有部署。
+	// 判定与文案见 config.go 的 weakAPIKeyNotice。
+	warnWeakAPIKey(cfg)
+
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
 		log.Fatalf("load auths: %v", err)

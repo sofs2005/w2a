@@ -186,9 +186,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 //
 // 语义与 6004 正交：6004 是「模型被限流、对齐重置墙钟」，本入口是「官方确定该后端无此模型、
 // 重试无意义，只能换模型/换账号」。退避按 reference model_blocks.py 口径（吸收语义、不抄实现）：
-//   - 首次命中 TTL = modelBlockBaseTTL（6h）；
+//   - 首次命中 TTL = modelBlockBaseTTL（2m，2026-10-28 起；见 entry.go 的缩短理由）；
 //   - 半开到期后允许放行重试；再次命中 Hits++ → TTL = base × 2^min(hits-1, modelBlockShift)；
-//   - 封顶 modelBlockMaxTTL（24h，最多一天再试一次）；
+//   - 封顶 modelBlockMaxTTL（10m，最多十分钟再试一次）；
 //   - 该模型请求成功即由 BlockModelClear 清除（注意：6004 的 NoteSuccess 不清 modelCooldowns，
 //     故清理必须由 handler 在成功且 model 命中 11102 条目时显式调用，见 BlockModelClear）。
 //
@@ -278,6 +278,46 @@ func (p *Pool) BlockModelClear(uid, model string, also ...string) {
 	p.dirty.Store(true)
 }
 
+// ClearModelBlocks 清掉**所有账号**上该模型的 11102 负缓存，返回清理条数。
+//
+// 背景：上游 11102 有时是**瞬时**故障（模型注册表抖动 / 灰度切换）。一次抖动会让每个
+// 被选中的账号各写一条从 2m 起的指数退避负缓存，十几个号轮一遍后对外就是「全池 503
+// no_healthy_account」，而模型其实早已恢复（实测：同一波次里 20/20 账号直连均 200）。
+//
+// 选号侧发现「该模型的负缓存把整个候选域集合挡死」时调本方法自愈：清一次、重试一次
+// （见 internal/server/handler.go 的 11102 自愈分支）。
+//
+// 只清 reason 以 "11102" 开头的条目，**绝不碰 6004**——6004 走 rateLimitedModels 的
+// 额度重置语义（等上游重置墙钟），不是「该模型没有」，抹掉只会让客户端空转。
+// 清理口径与 BlockModelClear 一致：清空后把空 map 置 nil（与仓库既有写法对齐），
+// 有清理才置 dirty。
+func (p *Pool) ClearModelBlocks(model string) int {
+	if model == "" {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.byUID {
+		if len(e.modelCooldowns) == 0 {
+			continue
+		}
+		mc, ok := e.modelCooldowns[model]
+		if !ok || !strings.HasPrefix(mc.Reason, "11102") {
+			continue // 该账号没有该模型条目，或条目是 6004（额度重置语义，不能清）
+		}
+		delete(e.modelCooldowns, model)
+		if len(e.modelCooldowns) == 0 {
+			e.modelCooldowns = nil
+		}
+		n++
+	}
+	if n > 0 {
+		p.dirty.Store(true)
+	}
+	return n
+}
+
 // BlockCause 说明全池模型级阻塞的**性质**——决定客户端该等还是该换模型。
 //
 // 为什么必须区分：6004（模型限流）与 11102（该后端无此模型）共用 modelCooldowns
@@ -338,12 +378,28 @@ type ModelBlockStatus struct {
 // 就不能算全池阻塞 —— 此时返回 Blocked=false，让上层继续用原有的
 // no_healthy_account 文案（选号失败另有原因：在途占满/积分保底/账号级冷却）。
 //
+// 本方法是**全池**口径（供 /status 与错误文案用）。需要与选号同一域维度的调用方
+// （如 handler 的 11102 自愈）必须用 ModelBlockedInRealms——见其注释。
+//
 // 口径必须与选号一致：用 modelCooled（与 healthyForModel 同一谓词），不直接查 map，
 // 将来该谓词加了豁免（如只审计不拦截的条目）这里自动跟随。
 //
 // 注意 Blocked 不等于「模型不可用」：6004（限流，会自行到期）同样写 modelCooldowns、
 // 同样让选号返回 nil。调用方必须再看 Cause 分别处置，别一律报 model_unavailable。
 func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
+	return p.ModelBlockedInRealms(model, nil)
+}
+
+// ModelBlockedInRealms 是 ModelBlocked 的**域集合**形态：只在 realms 允许的账号里判定
+// 「该模型是否被模型级冷却全挡」，Cause/Reason/Until/Count 语义与 ModelBlocked 逐字一致
+// （realms 为 nil/空 = 全池，即 ModelBlocked 的既有行为）。
+//
+// 为什么必须有这一维：11102 自愈的判据必须与**选号同一个域维度**。选号走
+// PickExcludingForRealms(tried, model, route.CandidateRealms())，若自愈判据退回全池
+// 口径（ModelBlocked），双 realm 部署下只要另一域还有账号能服务该模型，判据就恒为
+// 「未阻塞」→ 自愈永不触发；而本次请求的候选域已被负缓存全挡 → 固定 503（换任何模型
+// 都一样，逐个被打成负缓存）。realm 为空/全池请求时退化为全池语义，单 realm 行为不变。
+func (p *Pool) ModelBlockedInRealms(model string, realms RealmSet) ModelBlockStatus {
 	if model == "" {
 		return ModelBlockStatus{}
 	}
@@ -356,6 +412,9 @@ func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
 	for _, e := range p.byUID {
 		if e.disabled || e.manualDisabled {
 			continue // 停用号不参与：它的不可用与模型无关
+		}
+		if !realms.Allows(e.a.Realm()) {
+			continue // 不在本次请求的候选域集合内：它能不能服务这个模型与本请求无关
 		}
 		if !e.modelCooled(now, model) {
 			// 还有账号能服务这个模型 → 不是模型级阻塞。

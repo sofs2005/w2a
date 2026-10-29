@@ -314,6 +314,19 @@ func buildUpstream(cfg *Config) *upstream.Client {
 
 	// 出站指纹段：脱敏开关、UA、版本段、Stainless、设备风控、用量归属、IP 透传。
 	up.SanitizeFingerprints = cfg.Features.SanitizeBlacklistFingerprints
+	// 运行期追加的黑名单词表（features.sanitize_extra_features / _rewrites）：上游按
+	// **逐词**扩充黑名单，运维改 config.json 重启或面板热重载即可跟上，不必重编译镜像。
+	// 空表 = 只用内置静态表（行为与旧版一致）。
+	//
+	// 注入点刻意放在 buildUpstream 内：启动装配（main）与热重载（apply）共用本函数，
+	// 分别在两处各写一遍必然漂移——漏一处就是「改了配置不生效」的暗坑。
+	upstream.ConfigureSanitize(cfg.Features.SanitizeExtraFeatures, cfg.Features.SanitizeExtraRewrites)
+	if n := len(cfg.Features.SanitizeExtraFeatures); n > 0 {
+		log.Printf("INFO: [sanitize] 运行期额外特征词表已加载 %d 条（features.sanitize_extra_features）", n)
+	}
+	if n := len(cfg.Features.SanitizeExtraRewrites); n > 0 {
+		log.Printf("INFO: [sanitize] 运行期额外替换对已加载 %d 条（features.sanitize_extra_rewrites）", n)
+	}
 	up.UserAgent = cfg.Upstream.UserAgent
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
