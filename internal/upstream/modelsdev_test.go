@@ -399,8 +399,11 @@ func TestEnsureDocAsyncDoesNotBlock(t *testing.T) {
 	if got != DefaultContextWindow {
 		t.Fatalf("slow fetch: %d want immediate 1M", got)
 	}
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("lookup blocked on models.dev: %v (must be async)", elapsed)
+	// 非阻塞语义的判据是「耗时远小于 fake 的 500ms 阻塞窗口」，取窗口的一半（250ms）
+	// 作阈值：真阻塞时耗时 ≈500ms 必被抓；而 100ms 与调度抖动同数量级（慢 runner 上
+	// 纯内存查找也可能被 CPU 抢占/GC 停顿推到 100ms 以上）→ 会把慢机误报成 bug。
+	if elapsed > 250*time.Millisecond {
+		t.Errorf("lookup blocked on models.dev: %v (must be async, window=500ms)", elapsed)
 	}
 	// 等慢拉取收尾，避免 defer 期间 goroutine 泄漏误报 race。
 	time.Sleep(600 * time.Millisecond)

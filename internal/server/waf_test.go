@@ -270,9 +270,9 @@ func TestChatWafProbeNoEscalation(t *testing.T) {
 
 // TestRotateBackoffRealDelay 轮转退避真实生效（任务书 P0-2 验收点）：
 // 首个号 WAF 403 后，换 good 号前有可观测的退避间隔（测试态 base=0 被恢复为
-// 短基数 30ms，抖动界 [22.5ms, 37.5ms]，断言总耗时 ≥ 20ms 且不超界太多）。
+// 基数 300ms，抖动界 [225ms, 375ms]，断言总耗时 ≥ 200ms 且不超界太多）。
 func TestRotateBackoffRealDelay(t *testing.T) {
-	withRotateBackoff(t, 30*time.Millisecond)
+	withRotateBackoff(t, 300*time.Millisecond)
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz == "Bearer at-bad" {
 			return 403, "", false
@@ -294,11 +294,15 @@ func TestRotateBackoffRealDelay(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("code=%d body=%s (want 200 after rotate)", rec.Code, rec.Body)
 	}
-	// 一次轮转退避 ≥ 22.5ms（30ms 基数下界）；上限放宽到 1s 防环境抖动误报。
-	if elapsed < 22*time.Millisecond {
-		t.Fatalf("rotate must back off before retry, elapsed=%v want ≥ 22ms", elapsed)
+	// 下界 200ms：真退避的抖动下界是 225ms（300ms 基数·0.75），而「没退避」的
+	// 基线只是进程内 fake 上游的微秒级耗时——200ms 夹在两者之间，与调度抖动（毫秒级）
+	// 拉开两个数量级、与退避（225ms 起）留 25ms 余量，故慢 runner 不会误报，真漏了
+	// 退避又必被抓（原来 22ms 阈值离 22.5ms 的真实下界只有 0.5ms，机器时钟粒度一大
+	// 就会误报）。上限同样放宽到 5s（远大于 375ms 抖动上界），只用来抓「退避跑飞」。
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("rotate must back off before retry, elapsed=%v want ≥ 200ms", elapsed)
 	}
-	if elapsed > time.Second {
+	if elapsed > 5*time.Second {
 		t.Fatalf("rotate backoff runaway, elapsed=%v", elapsed)
 	}
 }

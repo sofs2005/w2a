@@ -134,8 +134,16 @@ func TestQAGatewayNetworkRetriesSameAccountNotRotation(t *testing.T) {
 }
 
 // TestQAGatewayNetworkRetryAbortsImmediatelyOnClientGone ctx 中断必须是**立即**的：
-// 退避基数 200ms，客户端在第一次失败时断连 → 总耗时必须远小于一次退避（<100ms），
-// 且只打一次上游。sleepCtx 用 time.NewTimer + defer Stop，无 goroutine 泄漏。
+// 退避基数故意放大到 30s（真睡了退避，本用例会肉眼可见地卡 30s 并失败），客户端在
+// 第一次失败时断连 → 总耗时必须远小于一次退避（<5s），且只打一次上游。
+// sleepCtx 用 time.NewTimer + defer Stop，无 goroutine 泄漏。
+//
+// 判据下界选 5s 的理由（针对 CI 慢 runner 的误报）：整条 ServeHTTP 本身要 JSON 解析、
+// 选号、打日志，慢机上耗时可能到几十甚至上百毫秒，但它与「有没有睡退避」无关——把
+// 阈值贴在这段基线附近（例如原来的 100ms）就会误报。5s 与调度抖动（毫秒级）拉开三个
+// 数量级，与一次退避（30s 基数，抖动后 ≥22.5s）也拉开近一个数量级：正常实现无论 runner
+// 多慢都落在 5s 内，而「没感知 ctx、真睡了退避」的实现在这里必然 ≥22.5s（且 calls 会
+// 变成 2，两条断言同时兜住），不存在两头都判不出的空档。
 func TestQAGatewayNetworkRetryAbortsImmediatelyOnClientGone(t *testing.T) {
 	p := testPoolWith(&auth.Auth{UID: "solo", AccessToken: "at-solo", ExpiresAt: 9999999999})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,7 +157,8 @@ func TestQAGatewayNetworkRetryAbortsImmediatelyOnClientGone(t *testing.T) {
 	})}
 	h := NewHandler(Config{
 		Pool: p, Upstream: up, MaxRotate: 3,
-		ConnectRetry: 2, ConnectRetryBackoff: 200 * time.Millisecond,
+		// 退避基数 30s：真睡了退避 → 卡 30s（抖动后 ≥22.5s）必失败，且肉眼可辨。
+		ConnectRetry: 2, ConnectRetryBackoff: 30 * time.Second,
 	})
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
@@ -162,9 +171,11 @@ func TestQAGatewayNetworkRetryAbortsImmediatelyOnClientGone(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("ctx 已取消不得继续重试, calls=%d", calls)
 	}
-	// 200ms 基数抖动 ±25% → 若真的 sleep 了，耗时 ≥150ms；阈值取 100ms 留足余量。
-	if elapsed >= 100*time.Millisecond {
-		t.Fatalf("退避未感知 ctx：耗时 %v（应 <100ms，说明睡了退避）", elapsed)
+	// 下界 5s：与调度抖动（毫秒级）差三个数量级，与一次退避（30s 基数、抖动后
+	// ≥22.5s）差近一个数量级——慢 runner 上 ServeHTTP 也绝不可能要 5s，而真睡了
+	// 退避则 ≥22.5s，故不会因调度抖动误报。
+	if elapsed >= 5*time.Second {
+		t.Fatalf("退避未感知 ctx：耗时 %v（应 <5s，说明睡了 30s 退避）", elapsed)
 	}
 	if st, _ := p.Status("solo"); st.InFlight != 0 {
 		t.Errorf("中断后 InFlight 必须归零, got %d", st.InFlight)
