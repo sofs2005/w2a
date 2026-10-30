@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/upstream"
 )
 
 type timeoutErr struct{ timeout bool }
@@ -90,6 +91,16 @@ func TestChatUpstreamTimeoutNoRotationNoPenalty(t *testing.T) {
 		if s, _ := p.Status(uid); s.ConsecutiveFails != 0 {
 			t.Errorf("超时不得喂连败计数: %s consecutive_fails=%d", uid, s.ConsecutiveFails)
 		}
+	}
+	// 扩展断言（超时 hint 修正）：gateway_hint 必须与 message 同向——超时专用文案，
+	// 不得退回「no healthy account available in pool」（那会把运维指向账号池，
+	// 而真正该查的是上游/网络）。单次超时的其余语义（不罚号/不轮转）不变。
+	hint := gatewayHintOf(t, rec.Body.String())
+	if hint != upstream.UpstreamTimeoutHint() {
+		t.Errorf("gateway_hint 应为超时专用文案, got %q", hint)
+	}
+	if strings.Contains(hint, "no healthy account available in pool") {
+		t.Errorf("超时 hint 不得退回池子文案（自相矛盾）: %q", hint)
 	}
 }
 

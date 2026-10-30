@@ -30,6 +30,23 @@ func (k CoolKind) String() string {
 // 运维在 /status 一处即可看到「为什么被降权/冷却」，不新增台账字段。
 const degradeReason = "consecutive failures"
 
+// timeoutDegradeReason 「连续上游超时」出池写 reason 的固定文案（NoteTimeout 触发）。
+// 与 degradeReason 并列而非合并：两者在 /status 的排查方向完全不同——连败降权指向
+// 「这个号在报错」，超时出池指向「这个号（或它背后的上游）在挂起」，运维据此决定
+// 是换号还是查网络/上游。
+const timeoutDegradeReason = "consecutive upstream timeouts (slow account), temporarily out of pool"
+
+// 触发 degradeUntil（临时出池）的成因取值（entry.degradeCause / stateAccount.DegradeCause）。
+// 提为常量：落盘、恢复校验（persist.go 只认这两个值）与 /status 的文案分流（state.go）
+// 三处必须用同一组字面量，各写一份是漂移的温床（改了一处，恢复侧就静默丢弃成因，
+// reason 又漂回连败文案）。
+//   - degradeCauseFails：连败降权（NoteFailures，issue #114）。
+//   - degradeCauseTimeout：连续上游超时 / 慢号（NoteTimeout）。
+const (
+	degradeCauseFails   = "fails"
+	degradeCauseTimeout = "timeout"
+)
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
 	UID           string    `json:"uid"`
@@ -68,7 +85,10 @@ type Status struct {
 	// 零值也透出（运维口径：与 err_total/session_dead_fails 一致，零值缺失会让人
 	// 误以为"没记录"，实际是零值被 omitempty 省略）。
 	ConsecutiveFails int       `json:"consecutive_fails"`
-	DegradeUntil     time.Time `json:"degrade_until,omitempty"` // 连败降权截止（非零且未过 = 降权中）
+	// ConsecutiveTimeouts 连续上游超时计数（慢号信号，见 entry.consecutiveTimeouts）。
+	// 与 ConsecutiveFails 并列、零值也透出（同一运维口径：缺失会让人误以为"没记录"）。
+	ConsecutiveTimeouts int       `json:"consecutive_timeouts"`
+	DegradeUntil        time.Time `json:"degrade_until,omitempty"` // 临时出池截止（连败降权 / 连续超时；非零且未过 = 出池中）
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
 	CheckinDone bool `json:"checkin_done,omitempty"`
@@ -188,7 +208,28 @@ type entry struct {
 	// degradeUntil 连败降权截止：非零且未到期时该账号不参与 normal 选号（临时
 	// 出池）。与冷却/熔断**取更长者不叠加**（healthy/degraded 判定统一取最远
 	// 截止），到期自动回池，无需显式复位。落盘仅未过期条目（同 breakerUntil）。
+	//
+	// 复用范围（不是新机制）：连败降权（NoteFailures）与「连续上游超时」
+	// （NoteTimeout）共用这一个「临时出池」通道——两者的语义都是「该号在一小段
+	// 时间内不该被选中」，差别只在成因文案（degradeCause）。不新造第四个 deadline
+	// 字段的理由：多一个截止就要同步 entry.healthy / healthyForModel / expiry
+	// 聚合 / statusOf 的 Cooling+CoolRemaining / persist 的加载与保存五处，漏一处
+	// 就是「出池了但选号照选」这类静默 bug。
 	degradeUntil time.Time
+	// consecutiveTimeouts 连续「上游超时（慢号）」计数（NoteTimeout 维护）。
+	// 为什么**不落盘**：连续超时是分钟级的短期信号，重启归零无害——重启后最多
+	// 再观察 timeoutStreak 次才出池；而真正需要跨重启保住的是「该号已出池」这个
+	// 事实，它由 degradeUntil 承载且已经持久化（persist.go 只落未过期的
+	// degradeUntil），出池状态不会因重启丢失。多一个落盘字段就多一处
+	// 加载/保存/归一 要同步，收益为零。
+	consecutiveTimeouts int
+	// degradeCause 最近一次触发 degradeUntil 的成因："" / "fails" / "timeout"。
+	// 仅供 statusOf 区分 /status 的 reason 文案（「连败」还是「连续超时」）。
+	// **持久化**（stateAccount.DegradeCause，与 degradeUntil 同分支落盘/恢复）：
+	// 成因跨重启必须保真——否则「超时出池 → 落盘 → 重启」后 reason 会漂回连败文案，
+	// 运维照着去查号，而真正该查的是上游是否挂起（重启不影响选号，只影响排查方向）。
+	// 老 state.json 无该键 → 零值 "" → statusOf 回落连败文案（向后兼容）。
+	degradeCause string
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
 
@@ -215,9 +256,10 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 	return mc, true
 }
 
-// healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
-// 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
-// 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
+// healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/临时出池期）。
+// 临时出池（degradeUntil：连败降权 / 连续上游超时两种成因）与冷却/熔断同入本判定
+// （取更长者不叠加：三个截止是并列的或门，只要任一未到期即不可选，天然「并存取更远者」
+// ——不需要显式比较长短）。
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled || e.manualDisabled {
 		return false
@@ -401,9 +443,18 @@ type stateAccount struct {
 	// ConsecutiveFails 连续失败计数（连败降权进度，见 entry.consecutiveFails）。
 	// 零值也显式写出（运维口径，同上）。
 	ConsecutiveFails int `json:"consecutive_fails"`
-	// DegradeUntil 连败降权截止（issue #114）。仅未过期才持久化（落盘/恢复均惰性
-	// 过滤），避免降权期重启失忆；过期/零值不写。指针语义同 BreakerUntil。
+	// DegradeUntil 临时出池截止（连败降权 issue #114 / 连续上游超时 NoteTimeout）。
+	// 仅未过期才持久化（落盘/恢复均惰性过滤），避免降权期重启失忆；过期/零值不写。
+	// 指针语义同 BreakerUntil。
 	DegradeUntil *time.Time `json:"degrade_until,omitempty"`
+	// DegradeCause 触发 DegradeUntil 的成因（entry.degradeCause："" / "fails" / "timeout"）。
+	// 与 DegradeUntil **同分支**落盘/恢复（只在截止未过期时写出与读回）：只持久化截止
+	// 不持久化成因，重启后 /status 的 reason 会从「连续超时」漂回「连败」——出池行为
+	// 正确、排查方向指错（超时该查上游/网络，连败该查该号），这是同一份 503 响应里
+	// message 与 hint 互相矛盾的同类问题。
+	// 向后兼容：老 state.json 无此键 → 零值 ""，加载时按「成因未知」处理，statusOf
+	// 回落连败文案（既有行为），零迁移、无需改写旧文件。
+	DegradeCause string `json:"degrade_cause,omitempty"`
 
 	// BreakerUntil 熔断截止（指数退避）。仅未过期才持久化（落盘/恢复均惰性过滤），
 	// 避免熔断期重启失忆：breakerUntil 在未来时重启后仍阻断选号。过期/零值不写。
@@ -541,6 +592,24 @@ const (
 	defaultDegradeThreshold   = 5
 	defaultDegradeCooldown    = 10 * time.Minute
 	defaultDegradeCooldownMax = 2 * time.Hour
+)
+
+// 「上游超时（慢号）」出池的默认参数（NoteTimeout 维护，SetTimeout 注入）。
+// 与连败降权同哲学：复用 degradeUntil 这一条「临时出池」通道，只是成因文案不同
+// （degradeCause="timeout"），不新造第四个 deadline 字段。
+//   - defaultTimeoutStreak=2：连续**同一账号**两次超时才出池。单次超时保持
+//     150af36 的原设计（不罚号、不解绑粘性、不换号）——超时多半是上游抖动的
+//     常态，且 header_timeout 600s 的部署里罚号代价极高。但同一账号连续两次超时
+//     已是「这个号真的挂起」的强信号（真挂起的号在 header_timeout 120s 下下一次
+//     请求必再挂）。
+//   - defaultTimeoutCooldown=60s：出池时长。60s 的取值理由是两个约束的交集——
+//     下界要「够让会话漂到别的号」（粘性已在出池时解绑，下一次请求重新分配，60s
+//     远大于一次请求的往返），上界要「不把偶发抖动放大成长时间缺号」（单次抖动
+//     已被 streak 门槛滤掉，能走到这里的一定是连续两次）。相比连败降权的 10m，
+//     这里刻意短一个量级：超时是「慢」不是「坏」，且上游一旦恢复该号应立即可用。
+const (
+	defaultTimeoutStreak   = 2
+	defaultTimeoutCooldown = 60 * time.Second
 )
 
 // defaultCostExploreInterval costTier 条件探索的默认窗口（issue #136 方案 a′）。

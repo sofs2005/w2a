@@ -262,6 +262,8 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 // 同样清 sessionDeadFails：成功证明 session 未死（与 ClearSessionDead 语义一致）。
 // 连败降权（issue #114）同样按「成功是恢复的最强证据」清零：consecutiveFails 归零、
 // degradeUntil 清空——成功即回池，不等降权到期（与 NoteSuccess 清 breakerUntil 同口径）。
+// 「连续上游超时」（NoteTimeout）一并清零 consecutiveTimeouts 与 degradeCause：同一条
+// degradeUntil 通道，成功即撤销出池、门槛重新累计。
 // **不碰 modelCooldowns**：6004 模型级 limit 每模型独立计时，其他模型成功不得抹掉
 // 本模型的冷却截止（这正是"每模型独立"的语义）。模型级冷却只由到期/复活/账号级
 // 冷却（Cooldown/reviveCoolingLocked）清除。
@@ -278,6 +280,11 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.sessionDeadFails = 0
 		e.consecutiveFails = 0
 		e.degradeUntil = time.Time{}
+		// 连续上游超时（慢号）计数同样按「成功是恢复的最强证据」清零：一次成功即
+		// 证明该号不慢，出池门槛必须重新累计（否则「超时一次 → 成功 → 再超时一次」
+		// 会凭空凑满阈值）。degradeCause 一并归空，避免降权撤销后 reason 文案残留。
+		e.consecutiveTimeouts = 0
+		e.degradeCause = ""
 		p.dirty.Store(true)
 	}
 }
@@ -521,12 +528,15 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		LastSuccessTime:  e.lastSuccess,
 		LastErrTime:      e.lastErr,
 		ConsecutiveFails: e.consecutiveFails,
-		DegradeUntil:     e.degradeUntil,
-		Until:            e.until,
-		SoftStreak:       e.softStreak,
-		InFlight:         int(e.inFlight.Load()),
-		BreakerFails:     e.fails,
-		BreakerUntil:     e.breakerUntil,
+		// 连续上游超时计数（慢号信号）：与 ConsecutiveFails 并列透出，运维据此在
+		// 出池前就看到「这个号已经在连续超时了」。
+		ConsecutiveTimeouts: e.consecutiveTimeouts,
+		DegradeUntil:        e.degradeUntil,
+		Until:               e.until,
+		SoftStreak:          e.softStreak,
+		InFlight:            int(e.inFlight.Load()),
+		BreakerFails:        e.fails,
+		BreakerUntil:        e.breakerUntil,
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
@@ -554,11 +564,18 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 			st.CoolRemaining = 0
 		}
 		st.CoolKind = e.coolKind.String()
-		// 纯降权形态（无生效的 until/熔断）时 reason 取连败文案：降权由 NoteFailures
-		// 触发，不写 until/reason（coolKind 也不是它写的），运维在 /status 需要看到
-		// "为什么非健康"。有生效冷却时以冷却 reason 为准（冷却通常语义更具体）。
+		// 纯降权形态（无生效的 until/熔断）时 reason 取成因文案：降权由 NoteFailures
+		// 或 NoteTimeout 触发，都不写 until/reason（coolKind 也不是它们写的），运维在
+		// /status 需要看到 "为什么非健康"。成因按 degradeCause 区分——「连败」与
+		// 「连续超时」的排查方向不同（前者查该号，后者查上游/网络是否挂起），
+		// 混成一句会让运维去错地方。degradeCause 为空（旧状态/老 state.json 无
+		// degrade_cause 键）回落连败文案；成因已随 degradeUntil 持久化（M-2 修复），
+		// 重启后不再漂移。
 		if st.Reason == "" && now.Before(e.degradeUntil) {
 			st.Reason = degradeReason
+			if e.degradeCause == degradeCauseTimeout {
+				st.Reason = timeoutDegradeReason
+			}
 			st.CoolKind = "degrade"
 		}
 	}

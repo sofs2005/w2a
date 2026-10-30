@@ -1129,14 +1129,42 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 超时和「网络抖动」共用同一条换号路径。
 			//
 			// 账号处置与抖动分支刻意不同：**不** NoteFailures（超时不代表号坏）、
-			// **不** fail（不释放粘性绑定——该号下一轮仍可能是对的，解绑只会让
-			// 会话重新随机分配），只释放本轮在途名额并终止轮转。
+			// **不** fail（单次超时不释放粘性绑定——该号下一轮仍可能是对的，解绑
+			// 只会让会话重新随机分配），只释放本轮在途名额并终止轮转。
+			//
+			// 唯一的例外是「同一个号**连续**超时达阈」（NoteTimeout）：这时它不再是
+			// 抖动，而是「这个号真的挂起」，必须临时出池**并解绑粘性**——粘性命中
+			// 优先于评分选号，不解绑的话客户端重试会再次钉在同一个慢号上（超时 →
+			// 503 → 重试 → 又等满一个 header_timeout 的死循环，线上实测形态）。
+			// 阈值门槛保证「单次超时」的原设计不被破坏。
 			if isUpstreamTimeout(terr, r.Context().Err() != nil) {
 				releaseHeld()
 				st.status = http.StatusServiceUnavailable
 				lastErr = fmt.Errorf("%w: %v", errUpstreamTimeout, terr)
-				log.Printf("WARN: [server] upstream timeout acct=%s: %v (rotation stopped, account not penalized)",
-					logfmt.Label(acct.UID, acct.Nickname), terr)
+				// stickyHit 必须在 unbindSticky() 之前取：那个闭包会把 stickyUID 清空，
+				// 之后再也判不出「本轮是否命中了粘性号」（这是超时日志里最需要的一列）。
+				stickyHit := stickyUID != "" && acct.UID == stickyUID
+				// 喂「慢号」计数：达阈则该号临时出池，并解绑粘性（否则会话被钉死在
+				// 一个已出池的号上，下次请求还要多走一遍「粘性命中失败→解绑→轮换」）。
+				cooled := h.config().Pool.NoteTimeout(acct.UID)
+				if cooled {
+					unbindSticky()
+				}
+				// 尾注随 cooled 二态化（不要一句通用的「未罚号」）：尾注说的是**轮转与
+				// 连败计数**——不换号（换号只会撞同一个慢上游）、不喂 NoteFailures
+				// （超时不等于号坏），这是超时止损的原设计，与 cooled 无关；而「是否把
+				// 该号摘出池子」是另一回事，由 cooled= 这一列单独表达。cooled=true 时
+				// 号确实已被摘出池（degradeUntil 生效 timeout_cooldown 时长），此时再说
+				// "account not penalized" 就与同一行的 cooled=true 自相矛盾——本行日志
+				// 存在的意义就是让运维一眼看出「号被怎么处置了」，自相矛盾的尾注比没有
+				// 尾注更糟。故二态化：未达阈保持原文案（该号确实没被动过），达阈明确写
+				// 「已按慢号临时出池」，运维不必再去 /status 反推。
+				tail := "(rotation stopped, account not penalized)"
+				if cooled {
+					tail = "(rotation stopped, slow-account threshold reached: account cooled)"
+				}
+				log.Printf("WARN: [server] upstream timeout acct=%s model=%q i=%d sticky=%v cooled=%v err=%v %s",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel, i, stickyHit, cooled, terr, tail)
 				break
 			}
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
@@ -1462,7 +1490,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 上游超时：轮转已在传输层分支止损（见 isUpstreamTimeout），这里给一条**能区分**
 	// 的文案，别混进「没有可用账号」——两者的排查方向完全不同（前者是上游慢/网络，
 	// 后者是池里没号），混在一起运维只会去查账号池。
-	if errors.Is(lastErr, errUpstreamTimeout) {
+	timedOut := errors.Is(lastErr, errUpstreamTimeout)
+	if timedOut {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
 	}
@@ -1516,7 +1545,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - 11102 无此模型：重试永远失败，只能换模型。报 400 model_unavailable。
 	// 此前二者都被读成 no_healthy_account（issue #102），客户端既不知道该等
 	// 也不知道该换，只能按 5xx 不断重试。
-	if modelBlock.Blocked && ue == nil {
+	if modelBlock.Blocked && ue == nil && !timedOut {
 		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
 			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
@@ -1535,6 +1564,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			msg = "model is unavailable on every account (per-model cooldown), try another model"
 			status = http.StatusBadRequest
 		}
+	}
+	// 超时止损的 hint 最后落定（覆盖权）：上面两处都可能改写 hint（*upstream.Error
+	// 的 Kind 映射、模型级阻塞文案），而超时是**本地哨兵** errUpstreamTimeout
+	// （errors.As 成不了 *upstream.Error），默认会停在 no_healthy_account 文案上——
+	// 那与 message 的「rotation stopped (slow upstream)」自相矛盾，把运维指向池子。
+	// 两条分支各自 break，模型级阻塞块已用 !timedOut 挡住（纵深防御），此处再兜一次
+	// 保证「超时 ⇔ 超时专用 hint」的对应关系不被后续逻辑改回。
+	if timedOut {
+		hint = upstream.UpstreamTimeoutHint()
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status

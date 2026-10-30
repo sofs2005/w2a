@@ -250,6 +250,7 @@ func applyConfig(cfg *Config, t configTargets) {
 	p := t.pool
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
+	p.SetTimeout(cfg.Pool.TimeoutStreak, cfg.TimeoutCooldownDur) // 上游超时（慢号）出池
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)

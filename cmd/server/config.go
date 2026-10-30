@@ -219,9 +219,39 @@ type Config struct {
 		// 连败降权（issue #114「累计错误率高/连续失败 N 次的账号移出候选池一段时间」）：
 		// ErrClient/传输层这类「不罚号」失败连续计数，达阈临时出池。与冷却/熔断
 		// 并存取更长者不叠加。默认 5 次 / 10m。
-		DegradeThreshold   int     `json:"degrade_threshold"`    // 连败次数触发降权，默认 5
-		DegradeCooldown    string  `json:"degrade_cooldown"`     // 降权时长（固定，非指数退避），默认 "10m"
-		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
+		DegradeThreshold int    `json:"degrade_threshold"` // 连败次数触发降权，默认 5
+		DegradeCooldown  string `json:"degrade_cooldown"`  // 降权时长（固定，非指数退避），默认 "10m"
+		// DegradeCooldownMax degrade_cooldown 的上限钳制，默认 "2h"（池内
+		// degradeDurationLocked 再钳一次，与本键同口径）。"0"/负值 = 不设上界。
+		//
+		// ⚠️ 本键**不**再兜 timeout_cooldown：那条路径改用独立键
+		// timeout_cooldown_max（默认 "10m"）。分开的理由是两个键的合理量级差一个
+		// 数量级（10m vs 60s），共用一个 2h 的上界等于对 timeout_cooldown 没有上界
+		// ——"60m" 这类单位笔误会被放行（见下方 TimeoutCooldown 注释）。
+		DegradeCooldownMax string `json:"degrade_cooldown_max"`
+		// 「上游超时（慢号）」出池（复用连败降权的 degradeUntil 通道，成因文案不同）：
+		// 同一账号连续 N 次上游超时即临时出池 + 解绑粘性。单次超时仍按 150af36 的
+		// 止损设计处理（不罚号、不换号），只有「连续」才是强信号。默认 2 次 / 60s。
+		TimeoutStreak int `json:"timeout_streak"` // 连续上游超时次数触发临时出池，默认 2
+		// TimeoutCooldown 超时出池时长，默认 "60s"。
+		// **钳制口径**：解析成功后若超过 timeout_cooldown_max（默认 "10m"）则钳制到
+		// 该上限并打 WARN（不 fail-fast）。理由：手写 "60m"（本意 60s）这类单位笔误
+		// 会让号出池整整 1 小时，表现为「只慢了一下却整小时缺号」，且没有任何日志
+		// 提示；钳到上限仍是一个可用的保守值（同 proxy 段的 WARN 回落口径），没必要
+		// 为一个可钳正的笔误挡住启动。
+		// 上限**只在本文件 normalize 里钳一次**，pool 侧只消费已归一的值
+		// （timeoutCooldownLocked 不做上限判断，见 internal/pool/degrade.go）。
+		// 非法/非正值同样 WARN + 回落默认 60s（不 fail-fast）。
+		TimeoutCooldown string `json:"timeout_cooldown"`
+		// TimeoutCooldownMax timeout_cooldown 的**独立**上限钳制，默认 "10m"。
+		// 为什么独立（而不是复用 degrade_cooldown_max）：默认出池时长是 60s，
+		// 而 degrade_cooldown_max 默认 2h——2h 的边界对 60s 量级的键等于没有上界，
+		// "60m"（本意 60s）这类笔误照样放行，号被摘出池整整 1 小时。
+		// 10m 的取值理由：比默认出池时长高一个数量级，容得下「上游持续慢 → 多轮
+		// 顺延」（每轮出池 60s，10m 内可顺延约 10 轮），同时把 1 小时级笔误挡在门外。
+		// 归一规则：空值 → 默认 10m（不告警）；非法/<=0 → 默认 10m + WARN（"0" 不得
+		// 成为绕过上限的后门，与 degrade_cooldown_max 的处理同口径）。
+		TimeoutCooldownMax string  `json:"timeout_cooldown_max"`
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
@@ -284,6 +314,14 @@ type Config struct {
 	BreakerCooldownMaxD time.Duration `json:"-"`
 	DegradeCooldownDur  time.Duration `json:"-"`
 	DegradeCooldownMaxD time.Duration `json:"-"`
+	// TimeoutCooldownDur 解析后的「上游超时出池」时长（pool.timeout_cooldown）。
+	// 非法/非正值**不 fail-fast**：回落默认 60s 并 WARN（理由见 normalize 注释——
+	// 这个参数坏掉最坏是「超时号多挨一轮」，不值得让整个网关起不来）。
+	// 已按 TimeoutCooldownMaxD 钳过上限，注入池子时直接用本字段即可。
+	TimeoutCooldownDur time.Duration `json:"-"`
+	// TimeoutCooldownMaxD 解析后的出池时长上限（pool.timeout_cooldown_max，默认 10m）。
+	// 恒为正值：非法/<=0 在 normalize 里回落默认 10m（"0" 不是绕过上限的后门）。
+	TimeoutCooldownMaxD time.Duration `json:"-"`
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
@@ -300,6 +338,24 @@ type Config struct {
 const (
 	defaultCreditFloorCN     int64 = 100
 	defaultCreditFloorGlobal int64 = 30
+)
+
+// 「上游超时（慢号）」出池的默认值（pool.timeout_streak / pool.timeout_cooldown）。
+// 提为常量是为了让 Default()/normalize() 的回落分支共用同一个数——两处各写一个
+// 字面量是最容易漂移的地方（改了 Default 忘了 normalize 的回落，配置写空串时行为
+// 就变了）。取值理由见 internal/pool/entry.go 的 defaultTimeout* 注释（同一口径）。
+const (
+	defaultPoolTimeoutStreak   = 2
+	defaultPoolTimeoutCooldown = "60s"
+	// defaultPoolTimeoutCooldownMax timeout_cooldown 的独立上限，默认 "10m"。
+	// Default()（写入默认配置）与 normalize（本键非法/<=0 时回落）共用本常量——
+	// 两处各写字面量是最容易漂移的地方。10m 的取值理由见 Pool.TimeoutCooldownMax
+	// 字段注释（比默认出池时长 60s 高一个数量级，拦住 1 小时级笔误）。
+	//
+	// 注：本组不再需要「degrade_cooldown_max 的默认值」常量——那条钳制路径已改由
+	// 本键承担，degrade_cooldown_max 的默认值仍在 Default()/normalize 里写 "2h"
+	// （pool 侧 degradeDurationLocked 有自己的 defaultDegradeCooldownMax 兜底）。
+	defaultPoolTimeoutCooldownMax = "10m"
 )
 
 // Default 默认配置。
@@ -348,6 +404,12 @@ func Default() *Config {
 	c.Pool.DegradeThreshold = 5
 	c.Pool.DegradeCooldown = "10m"
 	c.Pool.DegradeCooldownMax = "2h"
+	// 上游超时（慢号）出池：连续 2 次 / 60s。与 pool 包的 defaultTimeout* 同值——
+	// 两处口径必须一致（config 的默认值决定注入值，pool 的默认值只是「未注入时」的
+	// 兜底；漂移的表现是「配置文件缺键时行为与文档不一致」）。
+	c.Pool.TimeoutStreak = defaultPoolTimeoutStreak
+	c.Pool.TimeoutCooldown = defaultPoolTimeoutCooldown
+	c.Pool.TimeoutCooldownMax = defaultPoolTimeoutCooldownMax
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
@@ -614,6 +676,28 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_STATE_FLUSH"); v != "" {
 		c.Pool.StateFlush = v
 	}
+	// 上游超时（慢号）出池：次数用整数、时长用 duration 串，与其余 pool 参数同形。
+	// 非法值不在 env 层校验——统一交给 normalize（单一校验点，避免两套口径）。
+	if v := strings.TrimSpace(os.Getenv("WB2A_TIMEOUT_STREAK")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pool.TimeoutStreak = n
+		} else {
+			log.Printf("WARN: [config] WB2A_TIMEOUT_STREAK=%q 非法（非整数），忽略", v)
+		}
+	}
+	if v := os.Getenv("WB2A_TIMEOUT_COOLDOWN"); v != "" {
+		c.Pool.TimeoutCooldown = v
+	}
+	// WB2A_TIMEOUT_COOLDOWN_MAX 出池时长上限（默认 10m）。照 WB2A_TIMEOUT_STREAK 的
+	// 既有写法：env 层只判「能不能解析成时长」，解析不了就 WARN + 忽略（保留配置文件
+	// 的值）；能解析但 <=0 的语义（回落默认）统一交给 normalize，避免两套口径。
+	if v := strings.TrimSpace(os.Getenv("WB2A_TIMEOUT_COOLDOWN_MAX")); v != "" {
+		if _, err := time.ParseDuration(v); err != nil {
+			log.Printf("WARN: [config] WB2A_TIMEOUT_COOLDOWN_MAX=%q 非法（%s），忽略", v, err)
+		} else {
+			c.Pool.TimeoutCooldownMax = v
+		}
+	}
 	// 注：WB2A_ADMIN_ENABLED 随 admin 段一并删除，设置了也不再被读取（管理面已下线）。
 }
 
@@ -686,6 +770,73 @@ func (c *Config) normalize() error {
 	}
 	if c.Pool.DegradeCooldownMax == "" {
 		c.Pool.DegradeCooldownMax = "2h"
+	}
+	// 上游超时（慢号）出池参数缺省归一。与上面两个 degrade_* 的 fail-fast 不同，
+	// 这里**非法/<=0 一律回落默认并 WARN**（照抄 proxy.cn 的宽容口径）：这个参数
+	// 坏掉的最坏后果只是「超时号多挨一轮 header_timeout」，而 fail-fast 会让一个
+	// 笔误把整个网关挡住——收益与代价不成比例。次数同理（<=0 无合理语义 → 默认 2）。
+	// 解析成功后还要按 timeout_cooldown_max 钳**上界**并 WARN（"60m" 这类单位笔误
+	// 会让号出池 1 小时，见下方分支注释）：同样是「钳正 + 告警」而不是 fail-fast。
+	if c.Pool.TimeoutStreak <= 0 {
+		c.Pool.TimeoutStreak = defaultPoolTimeoutStreak
+	}
+	// 上限键先归一，再钳出池时长（顺序不能反：钳制要用到归一后的上限）。
+	// 空值 → 默认 10m（不告警，同其它「空值回落」键）；非法/<=0 → 默认 10m + WARN。
+	// 为什么 <=0 也回落而**不是**当作「不设上界」：那等于给 "0" 开一个绕过上限的
+	// 后门（配 0 + timeout_cooldown="60m" 就让缺陷原样复现），与 degrade_cooldown_max
+	// 在 pool 侧 degradeDurationLocked 的处理同口径。
+	if strings.TrimSpace(c.Pool.TimeoutCooldownMax) == "" {
+		c.Pool.TimeoutCooldownMax = defaultPoolTimeoutCooldownMax
+		c.TimeoutCooldownMaxD, _ = time.ParseDuration(defaultPoolTimeoutCooldownMax)
+	} else if maxD, perr := time.ParseDuration(c.Pool.TimeoutCooldownMax); perr != nil || maxD <= 0 {
+		// why 区分「解析失败」与「解析成功但非正值」（后者 perr 为 nil，直接打
+		// perr 会输出 "<nil>"，读日志的人会以为没出错）。
+		why := "非正时长"
+		if perr != nil {
+			why = perr.Error()
+		}
+		log.Printf("WARN: [config] pool.timeout_cooldown_max=%q 非法或非正值（%s），回落默认 %s",
+			c.Pool.TimeoutCooldownMax, why, defaultPoolTimeoutCooldownMax)
+		c.Pool.TimeoutCooldownMax = defaultPoolTimeoutCooldownMax
+		c.TimeoutCooldownMaxD, _ = time.ParseDuration(defaultPoolTimeoutCooldownMax)
+	} else {
+		c.TimeoutCooldownMaxD = maxD
+	}
+	if c.Pool.TimeoutCooldown == "" {
+		c.Pool.TimeoutCooldown = defaultPoolTimeoutCooldown
+	}
+	if d, perr := time.ParseDuration(c.Pool.TimeoutCooldown); perr != nil || d <= 0 {
+		// why 区分「解析失败」与「解析成功但非正值」（后者 perr 为 nil，直接打
+		// perr 会输出 "<nil>"，读日志的人会以为没出错）。
+		why := "非正时长"
+		if perr != nil {
+			why = perr.Error()
+		}
+		log.Printf("WARN: [config] pool.timeout_cooldown=%q 非法或非正值（%s），回落默认 %s",
+			c.Pool.TimeoutCooldown, why, defaultPoolTimeoutCooldown)
+		c.Pool.TimeoutCooldown = defaultPoolTimeoutCooldown
+		c.TimeoutCooldownDur, _ = time.ParseDuration(defaultPoolTimeoutCooldown)
+	} else {
+		// 上限钳制：按**独立键** timeout_cooldown_max（默认 10m）钳（M-3）。
+		// 此前 timeout_cooldown 只有下界（>0）没有上界，而它比 degrade_cooldown 短
+		// 一个量级（60s vs 10m），手写时最容易犯的就是单位笔误——"60m" 本意 "60s"，
+		// 结果是号被摘出池整整 1 小时，表现为「只慢了一下却整小时缺号」，且全程
+		// 没有任何日志提示（这正是本条 Minor 的由来）。
+		// 为什么不复用 degrade_cooldown_max：默认 2h 对 60s 量级的键等于没有上界，
+		// 笔误照样放行（已实测，见 timeout_cooldown_clamp_test.go）。
+		// 处理口径与 proxy 段一致：**不 fail-fast**，钳到上限 + WARN。钳制后的值
+		// 仍是一个「保守但可用」的出池时长；为一个可钳正的笔误挡住整个网关，收益
+		// 与代价不成比例。上限本身已在上方归一为正值（非法/<=0 回落 10m），这里
+		// 只需用 TimeoutCooldownMaxD。
+		// 生效值与字符串字段一并归一为上限值，保持「Pool.TimeoutCooldown 即生效值」
+		// 的既有不变式（回落分支同口径，见 TestTimeoutBadCooldownFallsBack）。
+		c.TimeoutCooldownDur = d
+		if max := c.TimeoutCooldownMaxD; max > 0 && d > max {
+			log.Printf("WARN: [config] pool.timeout_cooldown=%q 超过上限 pool.timeout_cooldown_max=%q，钳制为 %s",
+				c.Pool.TimeoutCooldown, c.Pool.TimeoutCooldownMax, max)
+			c.TimeoutCooldownDur = max
+			c.Pool.TimeoutCooldown = max.String()
+		}
 	}
 	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
 	if c.Pool.MaxInFlightGlobal <= 0 {

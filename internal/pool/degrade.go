@@ -1,6 +1,10 @@
-// 连败降权（issue #114）：NoteFailures 计数 + 达阈临时出池 + NoteSuccess 清零。
-// 与冷却/熔断「并存取更长者不叠加」由 entry.healthy 的并列或门天然保证
-// （三个截止是或门，任一未到期即不可选，生效的一定是最远者——见 entry.degradeUntil 注释）。
+// 临时出池（degradeUntil 通道）：两种成因 + 成功清零。
+//   - NoteFailures：「连败降权」（issue #114），计数 consecutiveFails，成因 "fails"。
+//   - NoteTimeout：「连续上游超时（慢号）」，计数 consecutiveTimeouts，成因 "timeout"。
+//
+// 两者共用同一个 degradeUntil 截止，与冷却/熔断「并存取更长者不叠加」由 entry.healthy
+// 的并列或门天然保证（三个截止是或门，任一未到期即不可选，生效的一定是最远者
+// ——见 entry.degradeUntil 注释）。
 package pool
 
 import "time"
@@ -37,7 +41,80 @@ func (p *Pool) NoteFailures(uid string) {
 		return
 	}
 	e.degradeUntil = time.Now().Add(p.degradeDurationLocked())
+	e.degradeCause = degradeCauseFails
 	p.dirty.Store(true)
+}
+
+// NoteTimeout 记录一次「上游超时（慢号）」信号，返回该账号是否因此被临时出池。
+//
+// 为什么需要这条通道（线上故障复盘）：handler 的超时分支是**止损**设计（150af36：
+// 不换号、不罚号、不解绑粘性），本意正确——超时多半是上游抖动，换号只会把客户端
+// 拖到 MaxRotate × header_timeout。但它有两个叠加盲区：
+//  1. 超时信号完全不进池子（不 NoteFailures/NoteError/applyErrorPolicy），于是
+//     「持续挂起的号」在选号三因子里权重不变、没有连败降权、没有冷却，会被反复
+//     抽中，每次白烧一个 header_timeout；
+//  2. 超时不解绑粘性，而粘性命中**优先于**评分选号——OpenAI 兼容客户端的粘性键
+//     是首条 user 消息派生的会话级 fallback 键，等于一个会话终生钉在一个号上，
+//     于是「超时 → 503 → 客户端重试 → 又命中同一个慢号」形成死循环。
+//
+// 本函数只解决「同一个号**连续**超时」这一种强信号，语义边界严格：
+//   - 单次超时：consecutiveTimeouts++ 后返回 false —— **不罚**（保持原设计，
+//     罚号的门槛必须高于一次抖动）；
+//   - 达阈（timeoutStreak，默认 2）：计数清零（供下一轮重新累计，同 NoteFailures）
+//     并复用 degradeUntil 临时出池（degradeCause="timeout"）。调用方据此解绑粘性，
+//     否则会话会被钉在一个已出池的号上，下一次请求又要走一遍「粘性命中失败→解绑
+//     →回落轮换」，白白多一次往返。
+//
+// 不缩短既有降权（与 NoteFailures 同哲学）：degradeUntil 取 max(既有未到期值,
+// now+timeoutCooldown)。若该号已因连败降权 10m，一次超时达阈不该把它「洗」成
+// 60s——惩罚只能加重不能减轻，否则客户端重试可以当减刑器用。
+func (p *Pool) NoteTimeout(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	e.consecutiveTimeouts++
+	streak := p.timeoutStreak
+	if streak <= 0 {
+		streak = defaultTimeoutStreak
+	}
+	if e.consecutiveTimeouts < streak {
+		p.dirty.Store(true)
+		return false
+	}
+	// 达阈：清零供下一轮累计（出池期结束后再连续超时才会再次出池）。
+	e.consecutiveTimeouts = 0
+	until := now.Add(p.timeoutCooldownLocked())
+	if e.degradeUntil.After(until) {
+		// 既有降权更远：保持原截止与成因（不缩短、不改文案，防"减刑"）。
+		// 仍返回 true —— 该号此刻**确实**在池外（不管是哪个成因把它摘出去的），
+		// 调用方必须据此解绑粘性，否则会话会被钉在一个不可选的号上。
+		p.dirty.Store(true)
+		return true
+	}
+	e.degradeUntil = until
+	e.degradeCause = degradeCauseTimeout
+	p.dirty.Store(true)
+	return true
+}
+
+// timeoutCooldownLocked 返回超时出池时长（未注入/非法值时回落默认 60s）。
+// **不做上限钳制**：上界由配置层钳好再注入——键是 pool.timeout_cooldown_max
+// （默认 10m），钳制点在 cmd/server 的 normalize，**只有那一处**。这里只消费已
+// 归一的值：两处各钳一次会让「生效值」有两个事实来源，而池子又拿不到上限键
+// （SetTimeout 只收一个时长），钳制逻辑放在这里必然与 config 的默认值漂移。
+// 不做指数升级：与连败降权同哲学（见 degradeDurationLocked 注释）——成因计数在
+// 达阈时清零、历史触发次数不持久化，档位不可推导；且超时是「慢」不是「坏」，
+// 上游一恢复该号就该立刻可用。调用方必须已持有 p.mu。
+func (p *Pool) timeoutCooldownLocked() time.Duration {
+	d := p.timeoutCooldown
+	if d <= 0 {
+		d = defaultTimeoutCooldown
+	}
+	return d
 }
 
 // degradeDurationLocked 返回降权时长（当前实现为固定 degradeCooldown，钳到

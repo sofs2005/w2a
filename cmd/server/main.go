@@ -150,6 +150,8 @@ func main() {
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
 	// 连败降权（issue #114）：ErrClient/传输层连败 N 次临时出池。
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
+	// 上游超时（慢号）出池：连续 N 次超时临时出池 + 解绑粘性（复用 degradeUntil 通道）。
+	p.SetTimeout(cfg.Pool.TimeoutStreak, cfg.TimeoutCooldownDur)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）

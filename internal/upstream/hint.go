@@ -95,6 +95,24 @@ const noHealthyHint = "no healthy account available in pool; check /status or re
 // NoHealthyAccountHint 本地调度错误的 gateway_hint（与 no_healthy_account code 配套）。
 func NoHealthyAccountHint() string { return noHealthyHint }
 
+// upstreamTimeoutHint 本地「上游超时止损」的固定 hint（code=upstream_timeout 配套）。
+// 不进 GatewayHint：它没有 ErrKind（超时是传输层事实，不是上游返回的业务错误），
+// 与 noHealthyHint 同属「网关自己的调度事实」。
+const upstreamTimeoutHint = "upstream was slow or stalled before the first byte; the gateway stopped rotating (another account would hit the same slow upstream) — retry later, repeated timeouts take that account out of the pool briefly"
+
+// UpstreamTimeoutHint 上游超时止损的 gateway_hint（与 upstream_timeout code 配套）。
+//
+// 为什么必须与 NoHealthyAccountHint 分开（线上文案自相矛盾的修复）：两者在
+// **同一份 503 响应**里出现时指向完全相反的排查方向——
+//   - 超时：池里有号，只是上游慢/挂起；换号无意义（同一份请求撞同一个慢上游），
+//     该等一会儿再试，或去查上游/网络；
+//   - no_healthy：池里**没号可用**（全冷却/全停用/在途占满），该去看 /status。
+//
+// 此前末端只按 lastErr 能否 errors.As 成 *upstream.Error 换 hint，而超时是本地哨兵
+// errUpstreamTimeout，于是 message 说「rotation stopped (slow upstream)」、hint 却说
+// 「no healthy account available in pool」，运维照着 hint 去查池子，方向全错。
+func UpstreamTimeoutHint() string { return upstreamTimeoutHint }
+
 // FrameHintFunc 返回 SSE error 帧的 gateway_hint 判定函数（Stream 的可选参数）。
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询
 // 不会为每个成功请求触发）。

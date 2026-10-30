@@ -46,6 +46,11 @@ type Pool struct {
 	degradeThreshold   int
 	degradeCooldown    time.Duration
 	degradeCooldownMax time.Duration
+	// timeoutStreak / timeoutCooldown 「上游超时（慢号）」出池参数
+	// （SetTimeout 注入；默认值见 defaultTimeout*）。复用 degradeUntil 通道，
+	// 见 entry.degradeUntil 注释。
+	timeoutStreak   int
+	timeoutCooldown time.Duration
 	// creditFloorCN / creditFloorGlobal 积分保底（SetCreditFloor 注入；0 = 该域关闭）。
 	// 按**账号自身所属域**（e.a.Realm()，只有 "cn"/"global" 两值）分档取值，见
 	// creditFloorFor。账号 credits < 本域 floor 时不再参与选号——防止收费请求把余额
@@ -113,6 +118,9 @@ func New(stateFp string) *Pool {
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
+		// 上游超时（慢号）出池：连续 2 次 / 出池 60s（理由见 defaultTimeout* 注释）。
+		timeoutStreak:   defaultTimeoutStreak,
+		timeoutCooldown: defaultTimeoutCooldown,
 		// 探索缺省 30m：tier 0 垄断下的 tier 1 探索窗口（issue #136）。用户经
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
@@ -231,6 +239,19 @@ func (p *Pool) SetDegrade(threshold int, cooldown, cooldownMax time.Duration) {
 	}
 	if cooldownMax > 0 {
 		p.degradeCooldownMax = cooldownMax
+	}
+}
+
+// SetTimeout 注入「上游超时（慢号）」出池参数（main 从 config 解析后调用）。
+// 非正值保留原值（用默认，见 defaultTimeout*），风格同 SetBreaker/SetDegrade。
+func (p *Pool) SetTimeout(streak int, cooldown time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if streak > 0 {
+		p.timeoutStreak = streak
+	}
+	if cooldown > 0 {
+		p.timeoutCooldown = cooldown
 	}
 }
 

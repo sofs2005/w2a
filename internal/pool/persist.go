@@ -213,11 +213,21 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			e.breakerUntil = *s.BreakerUntil
 			e.retryCount = s.RetryCount
 		}
-		// 恢复连败降权（issue #114）：degradeUntil 在未来才恢复（惰性过滤，与
-		// breakerUntil 同口径）——降权期重启不失忆。consecutiveFails 恒恢复
-		// （半开进度：重启归零会让「持续故障 + 频繁重启」组合重新学满阈值）。
+		// 恢复临时出池（issue #114 连败降权 / NoteTimeout 连续上游超时）：degradeUntil
+		// 在未来才恢复（惰性过滤，与 breakerUntil 同口径）——出池期重启不失忆。
+		// 成因与截止**同分支**恢复：重启后 reason 必须与重启前一致（否则「超时出池」
+		// 会错报成 consecutive failures，把排查方向指向账号而非上游/网络）。
+		// 向后兼容：老 state.json 无 degrade_cause 键 → 零值 ""，这里只接受已知取值
+		// （"fails"/"timeout"），其余（含手改脏数据）按「成因未知」留空，statusOf 回落
+		// 连败文案——不让 /status 冒出第三种没人认识的文案。零迁移，无需改写旧文件。
+		// consecutiveFails 恒恢复（半开进度：重启归零会让「持续故障 + 频繁重启」组合
+		// 重新学满阈值）。
 		if s.DegradeUntil != nil && !s.DegradeUntil.IsZero() && now.Before(*s.DegradeUntil) {
 			e.degradeUntil = *s.DegradeUntil
+			switch s.DegradeCause {
+			case degradeCauseFails, degradeCauseTimeout:
+				e.degradeCause = s.DegradeCause
+			}
 		}
 		// 恢复 modelCooldowns，惰性过滤已过期条目（Until 在未来才恢复）。
 		// 防止重启后残留已过期的模型级冷却条目（与 pick 路径的 pruneExpiredModelCooldowns 同口径）。
@@ -423,11 +433,17 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			breakerUntil = &bu
 			retryCount = e.retryCount
 		}
-		// 连败降权 degradeUntil 落盘（同惰性过滤口径，issue #114）：仅未过期才写出。
+		// 临时出池 degradeUntil 落盘（同惰性过滤口径，issue #114）：仅未过期才写出。
+		// 成因 degradeCause 与截止**同分支**落盘：两者是一对不可拆的语义——只写截止
+		// 不写成因，重启后 /status 的 reason 会从「连续上游超时」漂回「连败降权」，
+		// 出池行为虽正确但把运维指向错的地方（超时该查上游/网络，连败该查该号）。
+		// 过期时不写成因：截止已失效，成因没有承载对象（与 degradeUntil 同口径）。
 		var degradeUntil *time.Time
+		var degradeCause string
 		if !e.degradeUntil.IsZero() && now.Before(e.degradeUntil) {
 			du := e.degradeUntil
 			degradeUntil = &du
+			degradeCause = e.degradeCause
 		}
 		// 惰性清理僵尸 reason：until 为零值或已过期时不写出 cool_kind/reason，
 		// 避免 state.json 残留「until=0001 零值 + reason=6004 model rate limit」
@@ -456,6 +472,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			SessionDeadFails: e.sessionDeadFails,
 			ConsecutiveFails: e.consecutiveFails,
 			DegradeUntil:     degradeUntil,
+			DegradeCause:     degradeCause,
 			BreakerUntil:     breakerUntil,
 			RetryCount:       retryCount,
 			CreditsExpiring:  e.creditsExpiring,
