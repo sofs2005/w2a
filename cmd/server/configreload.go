@@ -244,6 +244,10 @@ func applyConfig(cfg *Config, t configTargets) {
 	hcfg.PromptMode = cfg.Prompt.Mode
 	hcfg.PromptText = cfg.PromptText
 	hcfg.GlobalEnabled = cfg.Global.Enabled
+	// 网关侧网络错误（DNS/Dial/TLS）同号重试：与启动装配（main.go）同一对字段，
+	// 两处都必须赋值——handler 的零值是「关闭」，漏接线的表现是「热重载后重试消失」。
+	hcfg.ConnectRetry = cfg.Upstream.ConnectRetry
+	hcfg.ConnectRetryBackoff = cfg.ConnectRetryBackoffDur
 	t.handler.ApplyConfig(hcfg)
 
 	// 4) 池参数与冷却（Set* 全部持锁、幂等）。

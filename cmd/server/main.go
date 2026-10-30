@@ -311,6 +311,12 @@ func main() {
 		SoftCooldown:  cfg.SoftRateDur,
 		PromptMode:    cfg.Prompt.Mode,
 		PromptText:    cfg.PromptText,
+		// 网关侧网络错误（DNS/Dial/TLS）同号重试（upstream.connect_retry /
+		// connect_retry_backoff）。**必须显式接线**：handler 侧的零值是「关闭」
+		// （0 是合法语义），漏接线的表现是「配置写了却不重试」。热重载路径见
+		// configreload.go 的 applyConfig（同一对字段）。
+		ConnectRetry:        cfg.Upstream.ConnectRetry,
+		ConnectRetryBackoff: cfg.ConnectRetryBackoffDur,
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 模型别名表（热加载；nil 时 handler 按无别名运行）。

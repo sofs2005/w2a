@@ -60,6 +60,8 @@
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,
     "idle_timeout_seconds": 300,
+    "connect_retry": 2,
+    "connect_retry_backoff": "200ms",
     "user_agent": "",
     "client_version": "",
     "cli_version": "",

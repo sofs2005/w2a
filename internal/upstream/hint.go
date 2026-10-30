@@ -113,6 +113,25 @@ const upstreamTimeoutHint = "upstream was slow or stalled before the first byte;
 // 「no healthy account available in pool」，运维照着 hint 去查池子，方向全错。
 func UpstreamTimeoutHint() string { return upstreamTimeoutHint }
 
+// gatewayNetworkHint 网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手失败）的固定 hint
+// （code=gateway_network_error 配套）。不进 GatewayHint：它没有 ErrKind（这类失败
+// 发生在拿到任何上游报文之前，压根没有 body 可分类），与 noHealthyHint /
+// upstreamTimeoutHint 同属「网关自己的调度/网络事实」。
+//
+// 三者必须互不串味（线上文案自相矛盾的教训，见 UpstreamTimeoutHint 注释）：
+//   - no_healthy_account：池里没号可用 → 去看 /status、稍后重试；
+//   - upstream_timeout：请求已发出、上游首字节慢 → 换号无用，等一会儿；
+//   - gateway_network_error（本函数）：**请求根本没发出去**（网关解析不了/连不上），
+//     与账号、与上游模型都无关 → 换号/换模型都不会好，该查网关出口的 DNS。
+//
+// 刻意不复用另外两条文案：把「网关解析不了域名」说成「池里没号」会让运维去翻账号，
+// 说成「上游慢」会让人等一个根本不会好转的上游。
+const gatewayNetworkHint = "gateway could not reach the upstream endpoint (DNS resolution / TCP dial / TLS handshake failed before the request was sent); this is a gateway-side network problem — not an account problem and not an upstream model problem, so switching accounts or models will not help; retry, and if it persists check the gateway's outbound DNS/resolv.conf"
+
+// GatewayNetworkHint 网关侧网络错误（DNS/Dial/TLS）的 gateway_hint
+// （与 gateway_network_error code 配套）。见 gatewayNetworkHint 注释。
+func GatewayNetworkHint() string { return gatewayNetworkHint }
+
 // FrameHintFunc 返回 SSE error 帧的 gateway_hint 判定函数（Stream 的可选参数）。
 // ctxFn 惰性求值：仅在实际撞到 error 帧才调用（正常流零开销，模型目录查询
 // 不会为每个成功请求触发）。

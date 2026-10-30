@@ -16,6 +16,7 @@ import (
 
 	"workbuddy2api/internal/config"
 	"workbuddy2api/internal/prompt"
+	"workbuddy2api/internal/server"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -131,6 +132,29 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
+		// ConnectRetry 网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手失败——即**请求
+		// 字节还没发出去**的失败）的**同号**重试次数上限，默认 2（= 最多 3 次尝试）。
+		//
+		// 为什么需要它：线上实证 4/4 次 code=upstream_timeout 全是容器内 DNS 解析超时
+		// （`lookup www.workbuddy.ai on 127.0.0.11:53: i/o timeout`），而 DNS 抖动是
+		// 毫秒级的（事故当时宿主对 10.6.6.90 / 223.5.5.5 / 119.29.29.29 各 100/100
+		// 成功、p95=1ms）——同号重试一次几乎必成，不重试就是白等 5~10s 再报 503。
+		//
+		// 语义：这类失败发生在发字节之前，与账号无关、与上游模型无关，**换号没有
+		// 收益**（同一个域名、同一个解析器、同一条出口），所以是「同一个号再试」而
+		// 不是「换个号」。重试不占 max_rotate（换号预算）名额，也不罚号/不冷却/
+		// 不解绑粘性；重试耗尽才报 502 gateway_network_error。
+		//
+		// 取值：0 = 关闭重试（直接报错，适合「DNS 有独立兜底、不想多等」的部署）；
+		// 负数按 0 处理（不 fail-fast：笔误不该让网关起不来）。默认值与
+		// internal/server 的 DefaultConnectRetry 同源（本常量直接引用它），
+		// config.example.json 也写同一个数——三处口径必须一致。
+		ConnectRetry int `json:"connect_retry"`
+		// ConnectRetryBackoff 同号重试的退避基数（第 n 次重试等 base·2^n 再施加
+		// ±25% 抖动），默认 "200ms"。ctx 可中断（客户端断连即停止重试）。
+		// 非法/非正值**回落默认 + WARN**，不 fail-fast（照 pool.timeout_cooldown 的
+		// 宽容口径：这个参数坏掉最坏只是重试间隔不对，不值得挡住整个网关）。
+		ConnectRetryBackoff string `json:"connect_retry_backoff"`
 		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
 		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
 		// issue #42 深挖：官网「使用端」列基于出站请求 UA 的服务端归因，官方 WorkBuddy
@@ -331,6 +355,9 @@ type Config struct {
 	StateFlushDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（server.read_timeout）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ConnectRetryBackoffDur 解析后的同号重试退避基数（upstream.connect_retry_backoff）。
+	// 恒为正值：空值/非法/非正 在 normalize 里回落默认 200ms（非正值 + WARN）。
+	ConnectRetryBackoffDur time.Duration `json:"-"`
 }
 
 // 积分保底（pool.credit_floor_cn / credit_floor_global）的默认值。提为常量是因为
@@ -358,6 +385,20 @@ const (
 	defaultPoolTimeoutCooldownMax = "10m"
 )
 
+// 「网关侧网络错误（DNS/Dial/TLS）」同号重试的默认值（upstream.connect_retry /
+// upstream.connect_retry_backoff）。三处口径必须一致：
+//
+//	config 常量（本组）↔ config.example.json ↔ internal/server 侧默认
+//
+// 次数直接引用 internal/server 的 DefaultConnectRetry（同一份事实来源，改一处即全局
+// 生效，不会漂移）；退避基数在 config 里是 duration **字符串**（JSON 友好），故此处
+// 写字面量，由 connect_retry_config_test.go 的 TestConnectRetryDefaults 断言它与
+// server.DefaultConnectRetryBackoff 逐值相等——那条测试就是防漂移的闸门。
+const (
+	defaultUpstreamConnectRetry        = server.DefaultConnectRetry
+	defaultUpstreamConnectRetryBackoff = "200ms"
+)
+
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
@@ -376,6 +417,10 @@ func Default() *Config {
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
+	// 网关侧网络错误（DNS/Dial/TLS）同号重试：2 次 / 200ms 起指数（理由见字段注释）。
+	// 显式写出（而不是留给零值）：零值是 0 = 关闭，而默认语义是「开启」。
+	c.Upstream.ConnectRetry = defaultUpstreamConnectRetry
+	c.Upstream.ConnectRetryBackoff = defaultUpstreamConnectRetryBackoff
 	// Global.Enabled 缺省 true（纯 CN 行为不变：CN 账号恒判 cn，global base 不被使用）；
 	// ChatBase/BillingBase 缺省空（回落内置默认）。
 	c.Global.Enabled = true
@@ -609,6 +654,23 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_IDLE_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.IdleTimeoutSeconds = n
+		}
+	}
+	// 网关侧网络错误（DNS/Dial/TLS）同号重试：次数用整数、退避用 duration 串，
+	// 与 pool.timeout_* 同形。非法值不在 env 层判语义（0/负数怎么处理交给 normalize
+	// 单一校验点），只判「能不能解析」——解析不了就 WARN + 忽略，保留配置文件的值。
+	if v := strings.TrimSpace(os.Getenv("WB2A_CONNECT_RETRY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Upstream.ConnectRetry = n
+		} else {
+			log.Printf("WARN: [config] WB2A_CONNECT_RETRY=%q 非法（非整数），忽略", v)
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("WB2A_CONNECT_RETRY_BACKOFF")); v != "" {
+		if _, err := time.ParseDuration(v); err != nil {
+			log.Printf("WARN: [config] WB2A_CONNECT_RETRY_BACKOFF=%q 非法（%s），忽略", v, err)
+		} else {
+			c.Upstream.ConnectRetryBackoff = v
 		}
 	}
 	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
@@ -914,6 +976,35 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	// 网关侧网络错误（DNS/Dial/TLS）同号重试。与 timeout_streak 的宽容口径一致：
+	// 非法值一律「钳正 + 告警」而不是 fail-fast（一个笔误不该挡住整个网关）。
+	//   - connect_retry：负数按 0（负次数无意义）；**0 是合法值**（显式关闭重试），
+	//     故这里**不**做 <=0 回落默认——那会让「关掉重试」变成不可能。默认值 2 由
+	//     Default() 预置（键缺席即保留），语义与 credit_floor 的「键缺席取默认、
+	//     显式写 0 才关闭」完全同款。
+	//   - connect_retry_backoff：空 → 默认 200ms（不告警）；非法/非正 → 默认 + WARN
+	//     （区分「解析失败」与「解析成功但非正值」，后者 perr 为 nil，直接打会输出
+	//     "<nil>"，读日志的人会以为没出错）。
+	if c.Upstream.ConnectRetry < 0 {
+		log.Printf("WARN: [config] upstream.connect_retry=%d 为负数（无意义），按 0 处理（关闭同号重试）",
+			c.Upstream.ConnectRetry)
+		c.Upstream.ConnectRetry = 0
+	}
+	if strings.TrimSpace(c.Upstream.ConnectRetryBackoff) == "" {
+		c.Upstream.ConnectRetryBackoff = defaultUpstreamConnectRetryBackoff
+		c.ConnectRetryBackoffDur, _ = time.ParseDuration(defaultUpstreamConnectRetryBackoff)
+	} else if d, perr := time.ParseDuration(c.Upstream.ConnectRetryBackoff); perr != nil || d <= 0 {
+		why := "非正时长"
+		if perr != nil {
+			why = perr.Error()
+		}
+		log.Printf("WARN: [config] upstream.connect_retry_backoff=%q 非法或非正值（%s），回落默认 %s",
+			c.Upstream.ConnectRetryBackoff, why, defaultUpstreamConnectRetryBackoff)
+		c.Upstream.ConnectRetryBackoff = defaultUpstreamConnectRetryBackoff
+		c.ConnectRetryBackoffDur, _ = time.ParseDuration(defaultUpstreamConnectRetryBackoff)
+	} else {
+		c.ConnectRetryBackoffDur = d
 	}
 	// 出站代理（proxy.cn / proxy.global）：空串合法（= 回落环境变量）。非空则校验，
 	// 非法**不 fail-fast** 而是 WARN + 置空回落——理由见 Proxy 字段注释：代理配错

@@ -46,6 +46,22 @@ type Config struct {
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 
+	// ConnectRetry 网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手——即**请求字节
+	// 还没发出去**的失败）的**同号**重试次数上限。生产值来自 config
+	// upstream.connect_retry（默认 2，即最多 3 次尝试）。
+	//
+	// ⚠️ 零值是「关闭」而不是「默认 2」——因为 0 本身就是合法语义（关闭重试，
+	// 直接报 gateway_network_error）。所以 cmd/server 的**两条**装配路径
+	// （main 的启动装配与 configreload 的热重载）都必须显式赋值，别指望零值兜底：
+	// 漏接线的表现是「配置写了 connect_retry 却不重试」。
+	// 语义见 handler.chatCompletions 的传输层错误分支（同号重试不占 max_rotate 名额）。
+	ConnectRetry int
+	// ConnectRetryBackoff 同号重试的退避基数：第 n 次重试等 base·2^n 再施加 ±25%
+	// 抖动（复用 backoff.go 的 jitterDur，单一抖动来源），ctx 可中断。
+	// <=0 回落 DefaultConnectRetryBackoff；生产值来自 config
+	// upstream.connect_retry_backoff（默认 200ms）。
+	ConnectRetryBackoff time.Duration
+
 	// PromptMode "passthrough"（默认，透传客户端原始 system）/ "custom"（网关替换）。
 	PromptMode string
 	// PromptText custom 模式下注入的系统提示词文本（来自 config.PromptText）。
@@ -68,6 +84,26 @@ type Config struct {
 // 若共用 soft_rate（600s 起 + 指数升级），一次偶发 404 会把好账号罚 10 分钟并逐次加倍。
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
+
+// 网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手）同号重试的默认值。
+//
+// 三处口径必须一致：本包默认（handler 的兜底与测试基准）、cmd/server/config.go 的
+// 默认常量（`defaultUpstreamConnectRetry` 直接引用本值）、config.example.json 的
+// `upstream.connect_retry` / `connect_retry_backoff`。取值理由：
+//   - 2 次（最多 3 次尝试）：DNS 抖动是毫秒级的（事故当时宿主对 10.6.6.90 /
+//     223.5.5.5 / 119.29.29.29 各 100/100 成功、p95=1ms），同号重试一次几乎必成；
+//     第三次是「别在刚好两次抖动上认输」的余量。再多只是把客户端拖长。
+//   - 200ms 基数：抖动窗口远短于此，退避只为避开瞬时拥塞；指数后 200/400ms，
+//     总代价（≤600ms）远小于一次白等的 header_timeout（生产 60s 量级）。
+const (
+	// DefaultConnectRetry 同号连接级重试次数默认值（0 = 关闭）。
+	DefaultConnectRetry = 2
+	// DefaultConnectRetryBackoff 同号重试退避基数默认值（200ms）。
+	DefaultConnectRetryBackoff = 200 * time.Millisecond
+	// connectRetryBackoffCap 退避封顶：只约束极端配置（connect_retry 配成几十），
+	// 正常 2 次重试根本碰不到。
+	connectRetryBackoffCap = 5 * time.Second
+)
 
 // wafCooldownBase WAF 403 软冷却基数（任务书 P0-1 建议 60s 起；抖动 ±25% 后落
 // [45s,75s]，实际进入 CooldownSoftRate 后再按 softStreak 指数、封顶 soft_rate_max）。
@@ -144,6 +180,15 @@ func normalizeHandlerConfig(cfg Config) Config {
 	}
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "passthrough" // 缺省 passthrough：透传客户端原始 system
+	}
+	// 连接级重试：负值无意义 → 按 0（关闭）。**0 不回落默认**——0 是合法语义
+	// （显式关闭重试），默认 2 由 cmd/server 的 config 提供并显式接线（见
+	// Config.ConnectRetry 字段注释）。
+	if cfg.ConnectRetry < 0 {
+		cfg.ConnectRetry = 0
+	}
+	if cfg.ConnectRetryBackoff <= 0 {
+		cfg.ConnectRetryBackoff = DefaultConnectRetryBackoff
 	}
 	return cfg
 }
@@ -786,6 +831,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// 网关侧网络错误（DNS/Dial/TLS）的末端成因：lastErr 只包哨兵 errGatewayNetwork
+	// （%w 链上只有它，原始错误是按 %v 拼进文本的），所以「哪一步失败 / 是否绑了
+	// 出口线路 / 重试了几次 / 原始错误」单独留档，供末端 message 说清成因。
+	var (
+		gatewayStage   upstream.TransportStage
+		gatewayRoute   string
+		gatewayRetries int
+		gatewayCause   error
+	)
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的「没有可用账号」口径报错。
 	var modelBlock pool.ModelBlockStatus
@@ -1099,6 +1153,44 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 传 r.Context()：客户端断连/请求取消立即中断在途上游调用并释放租约，
 		// 不再让"幽灵请求"占满账号在途名额直到 IdleTimeout。
 		rc, status, respBody, terr := h.config().Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+
+		// —— 网关侧网络错误：**同号有界重试**（A 段分类器的连接阶段）——
+		//
+		// DNS 解析 / TCP 拨号 / TLS 握手失败都发生在「请求字节还没发出去」之前：
+		// 与账号无关、与上游模型无关，**换号也解析同一个域名、拨同一条出口**。
+		// 线上实证（本次修复的起点）：容器内 127.0.0.11 的 DNS 抖动 4/4 次被记成
+		// upstream_timeout（报文说「换个号也会撞同一个慢上游」），还把完全无辜的
+		// 账号喂进 NoteTimeout 冷却 60s，而且全程没有任何重试——白等 5~10s 再报 503。
+		//
+		// 处置：同号重试 connectRetry 次（默认 2，即最多 3 次尝试），退避
+		// base·2^n + jitter，ctx 可中断。**不** NoteTimeout、**不** NoteFailures、
+		// **不**冷却、**不**解绑粘性、**不**占 max_rotate 名额。
+		//
+		// 为什么不用 `i--` 回退轮转索引（11102 自愈那种写法）：那会重新走一遍加权
+		// 选号，可能落到**另一个**账号（与「同号重试」相反），还会把「换号预算」和
+		// 「连接重试预算」耦合成「max_rotate=1 时一次都重试不了」的怪语义。这里用
+		// 请求内独立计数器，有界性一目了然，两个预算彻底正交。
+		//
+		// 在途名额全程不释放：这是**同一个**请求、同一个账号的一次逻辑调用，重试
+		// 不该再抢一次名额（Acquire 是计数式，重复占会泄漏名额）。
+		connectRetries := 0
+		for {
+			stage := upstream.TransportStageOf(terr)
+			if !stage.IsConnectStage() || connectRetries >= h.config().ConnectRetry {
+				break
+			}
+			// 退避（可中断）：客户端已断连时不再白等——人已走，重试没有意义。
+			if !sleepCtx(r.Context(), connectRetryDelay(connectRetries, h.config().ConnectRetryBackoff)) {
+				break
+			}
+			connectRetries++
+			// 自愈成功的重试只记 info 级（无 WARN 前缀）：这是「已经扛住了」的瞬时
+			// 抖动，不是需要运维介入的错误；WARN 留给重试耗尽的那一次（见下方分支）。
+			log.Printf("[server] gateway network error, retrying same account: stage=%s acct=%s model=%q i=%d retry=%d/%d err=%v",
+				stage, logfmt.Label(acct.UID, acct.Nickname), bareModel, i, connectRetries, h.config().ConnectRetry, terr)
+			rc, status, respBody, terr = h.config().Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		}
+
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析，见 ChatStreamContext 注释）。传输层错误（非 *Error）走
 		// 抖动换号分支；防御分支（terr 为 nil 但 status>=400，如 ErrNone 兜底）回落
@@ -1121,7 +1213,32 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if uerr == nil && terr != nil {
-			// 上游超时 / 停滞：**不换号、不罚号**。
+			// 分支一：网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手）——请求字节
+			// 还没发出去，同号重试已在上方耗尽。**不换号**（换号解析同一个域名、
+			// 拨同一条出口，纯属浪费一次轮转名额）、**不罚号**（与账号无关）、
+			// **不**叫 upstream_timeout（那会把运维指向「上游慢」，方向全错）。
+			if stage := upstream.TransportStageOf(terr); stage.IsConnectStage() {
+				releaseHeld()
+				st.status = http.StatusBadGateway
+				lastErr = fmt.Errorf("%w: %v", errGatewayNetwork, terr)
+				gatewayStage, gatewayRoute, gatewayRetries, gatewayCause = stage, strings.TrimSpace(acct.ProxyName), connectRetries, terr
+				// 出口线路例外（D 段）：账号绑了线路（Auth.ProxyName → TransportFor 的
+				// 独立 Transport）时，DNS/Dial 失败可能是**该线路**的问题，不是网关
+				// 全局问题。处置与未绑线路完全一致（线路的问题不该记到账号头上：
+				// 不冷却、不禁用），差别只在日志里点名线路，让运维只盯那条线路查。
+				// 目前没有线路级健康状态（upstream.routes 只有 Transport 缓存），故
+				// 「只对该线路记账」在此落地为「日志点名」；将来若加了线路级状态机，
+				// 记账点就在这里——**不要**退化成罚账号。
+				tail := "(gateway-side DNS/network problem, account not penalized)"
+				if gatewayRoute != "" {
+					tail = "(outbound route may be the cause, account not penalized)"
+				}
+				log.Printf("WARN: [server] gateway network error stage=%s acct=%s model=%q i=%d retries=%d route=%q err=%v %s",
+					stage, logfmt.Label(acct.UID, acct.Nickname), bareModel, i, connectRetries, gatewayRoute, terr, tail)
+				break
+			}
+			// 分支二：上游超时 / 停滞（header 阶段——请求已发出、等首字节超时）：
+			// **不换号、不罚号**。
 			//
 			// 超时不是账号的问题：同一份请求换到别的号，撞上的是同一个慢上游，
 			// 只会把客户端拖到 MaxRotate × header_timeout（部署值 600s 时最坏约
@@ -1167,7 +1284,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, i, stickyHit, cooled, terr, tail)
 				break
 			}
-			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
+			// 分支三：其余传输层抖动（连接被重置、读写中断、客户端断连……）：
+			// 只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 连败兜底（issue #114）：喂连败计数——连不上上游是「不知道原因的失败」，
 			// 连败 N 次临时出池，单次/偶发不罚（NoteFailures 内部达阈才动作）。
 			// 上游 client 已打 transport error 日志。
@@ -1484,6 +1602,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     （rate_limit_exceeded / no_healthy_account）。
 	//   - 本地调度类错误（无可用账号 acct==nil、传输层抖动、非上游返回的 lastErr）
 	//     → 保留自有文案 no_healthy_account（本地错误没有上游原文可透传，不编造）。
+	//   - 网关侧网络错误（DNS/Dial/TLS，请求字节没发出去）→ 502 gateway_network_error：
+	//     既不是「池里没号」也不是「上游慢」，第三条独立的排查方向（网关出口 DNS）。
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
@@ -1494,6 +1614,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if timedOut {
 		code = "upstream_timeout"
 		msg = "upstream timed out: rotation stopped (another account would hit the same slow upstream), please retry later"
+	}
+	// 网关侧网络错误（DNS/Dial/TLS）：请求字节还没发出去，成因在**网关出口**，
+	// 与账号、与上游模型都无关。502 而非 503：这是「网关连不上上游」的标准网关
+	// 错误语义，且与 upstream_timeout（503，上游慢）和 no_healthy_account（503，
+	// 池里没号）在状态码上也能区分开。
+	networkErr := errors.Is(lastErr, errGatewayNetwork)
+	if networkErr {
+		code = "gateway_network_error"
+		status = http.StatusBadGateway
+		msg = gatewayNetworkMessage(gatewayStage, gatewayRoute, gatewayRetries, gatewayCause)
 	}
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定（11133/11135
 	// 在 hint 层自带形态判定，ErrClient 家族也能带上 hint）；本地调度类错误
@@ -1545,7 +1675,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - 11102 无此模型：重试永远失败，只能换模型。报 400 model_unavailable。
 	// 此前二者都被读成 no_healthy_account（issue #102），客户端既不知道该等
 	// 也不知道该换，只能按 5xx 不断重试。
-	if modelBlock.Blocked && ue == nil && !timedOut {
+	if modelBlock.Blocked && ue == nil && !timedOut && !networkErr {
 		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
 			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
@@ -1573,6 +1703,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 保证「超时 ⇔ 超时专用 hint」的对应关系不被后续逻辑改回。
 	if timedOut {
 		hint = upstream.UpstreamTimeoutHint()
+	}
+	// 网关侧网络错误的 hint 落定（最高优先级）：同样是**本地哨兵**（errGatewayNetwork，
+	// 链上没有 *upstream.Error），默认会停在 no_healthy_account 文案上——那会让运维
+	// 去翻账号池，而真实原因是网关出口解析不了域名。三条文案互不串味是硬要求：
+	//   no_healthy_account → 池里没号；upstream_timeout → 上游慢；本分支 → 网关连不上。
+	if networkErr {
+		hint = upstream.GatewayNetworkHint()
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
@@ -1634,29 +1771,135 @@ func (h *Handler) noteChatSuccess(uid, bareModel, outModel, stickyKey string) {
 // errUpstreamTimeout 上游超时的哨兵：末端出口据此给出与「没号可用」可区分的文案。
 var errUpstreamTimeout = errors.New("upstream timeout")
 
+// errGatewayNetwork 网关侧网络错误（DNS 解析 / TCP 拨号 / TLS 握手失败）的哨兵：
+// 末端出口据此给出 502 gateway_network_error，与「上游慢」(upstream_timeout) 和
+// 「池里没号」(no_healthy_account) 分开。三个哨兵互不嵌套、互不复用文案。
+var errGatewayNetwork = errors.New("gateway network error")
+
+// gatewayNetworkMessage 网关侧网络错误的对外 message：先说**哪一步**失败（DNS 解析 /
+// 拨号 / TLS 握手），再附原始错误文本。
+//
+// 为什么必须分成因：三种阶段的排查动作完全不同——DNS 看 resolv.conf/上游解析器，
+// 拨号看出口路由/防火墙，TLS 看证书链/中间盒。一句笼统的 "gateway network error"
+// 等于没说话，运维还得去翻日志。原文（解析器地址、超时形态、域名）一律保留在尾部：
+// 那是排障的唯一线索，别为了「好看」把它删掉。
+func gatewayNetworkMessage(stage upstream.TransportStage, route string, retries int, cause error) string {
+	causeText := "network failure"
+	switch stage {
+	case upstream.StageDNS:
+		causeText = "dns resolution failed"
+	case upstream.StageDial:
+		causeText = "dial failed"
+	case upstream.StageTLS:
+		causeText = "tls handshake failed"
+	}
+	msg := "gateway could not reach upstream: " + causeText
+	if route != "" {
+		// 绑了出口线路（Auth.ProxyName）：失败可能是**该线路**的问题，不是网关全局
+		// DNS 问题。报文必须点名线路，否则运维会去查网关的 resolv.conf，方向全错。
+		msg = fmt.Sprintf("gateway could not reach upstream via outbound route %q: %s", route, causeText)
+	}
+	if retries > 0 {
+		msg += fmt.Sprintf(" (after %d retries)", retries)
+	}
+	if cause != nil {
+		msg += ": " + cause.Error()
+	}
+	return msg
+}
+
+// connectRetryDelay 第 n 次（0 基）同号重试前的退避：base·2^n 封顶
+// connectRetryBackoffCap，再施加 ±25% 抖动（复用 backoff.go 的 jitterDur，单一抖动
+// 来源，不重复造轮子）。base<=0 时回落 DefaultConnectRetryBackoff（配置非法已在
+// config.normalize 里 WARN 过，这里只是兜底）。
+func connectRetryDelay(n int, base time.Duration) time.Duration {
+	if base <= 0 {
+		base = DefaultConnectRetryBackoff
+	}
+	d := base
+	for k := 0; k < n; k++ {
+		d *= 2
+		if d <= 0 || d >= connectRetryBackoffCap { // 翻倍溢出/触顶：按封顶处理
+			d = connectRetryBackoffCap
+			break
+		}
+	}
+	if d > connectRetryBackoffCap {
+		d = connectRetryBackoffCap
+	}
+	return jitterDur(d)
+}
+
 // isUpstreamTimeout 判断这一跳的失败是否属于「上游超时 / 停滞」。超时不是账号的
 // 问题，换号注定白换（同一份请求撞同一个慢上游），必须止损：不轮转、不罚号。
 //
-// 三态判定：
+// **判定范围已收窄到 header 阶段**（本次修复）：DNS 解析 / TCP 拨号 / TLS 握手的
+// 失败/超时虽然也满足 net.Error.Timeout()，但那是**请求字节还没发出去**，与上游
+// 快慢无关——把它们算成「上游慢」正是线上 4/4 次误报的根因（见 transport_stage.go）。
+// 这类失败由 handler 的连接阶段分支接管（同号有界重试 + gateway_network_error）。
+// 收窄写在这里而不是只靠调用点顺序，是纵深防御：将来任何新调用点都不会再吞掉它们。
+//
+// 三态判定（余下的 header 阶段）：
 //   - net.Error.Timeout()——Transport.ResponseHeaderTimeout（首字节阶段）与
 //     HTTP.Client.Timeout 都归此；
-//   - 显式 deadline（context.DeadlineExceeded / os.ErrDeadlineExceeded）；
+//   - 显式 deadline（Unwrap 链里真有 context.DeadlineExceeded / os.ErrDeadlineExceeded）
+//     **且客户端仍在**——客户端自己的 deadline 与「上游慢」同型（同一次修复里 DNS
+//     误冷却的翻版），故与下面的 Canceled 一样要求 !clientGone；
 //   - **客户端仍在但 ctx 被取消**——那只能是我们自己的空闲看门狗（idle.go 的
 //     idleMonitoringBody 在流中静默超阈值时 cancel）掐的流，也就是上游停滞。
 //     客户端主动断连时 r.Context() 已取消（clientGone=true），不误判为上游超时，
 //     照常走抖动分支——人已走，把它算成上游故障只会污染超时统计。
+//
+// 加 !clientGone 对 header 阶段契约零影响（已核对）：本网关自己的
+// Transport.ResponseHeaderTimeout 产出的是 "net/http: timeout awaiting response
+// headers"（*url.Error 包 net.Error，Timeout()==true），http.Client.Timeout 产出
+// *url.Error 且 Timeout()==true——两者都走 net.Error 分支，不依赖 deadline 这一支。
+//
+// **坑（实测，Go 1.26）**：这两个真实错误都满足 errors.Is(err, context.DeadlineExceeded)
+// ——net/http 内部的 *timeoutError 实现了 `Is(context.DeadlineExceeded)==true`
+// （见 net/http/transport.go 的 timeoutError.Is，client.go 的 Client.Timeout 也用它）。
+// 所以既不能用 errors.Is 区分「客户端自己的 deadline」，也不能把 deadline 分支简单
+// 挪到 net.Error 之前（那会把 header 阶段超时一并抢走，clientGone=true 时改判 false，
+// 契约就破了）。这里改用**哨兵值身份**判定：只有 Unwrap 链里真躺着
+// context.DeadlineExceeded / os.ErrDeadlineExceeded（ctx 真的到期）才受 clientGone
+// 约束；header 阶段超时只是「自称」deadline，仍走 net.Error 分支。
 func isUpstreamTimeout(err error, clientGone bool) bool {
 	if err == nil {
 		return false
+	}
+	// 连接建立期（DNS/Dial/TLS）的失败不是「上游慢」：请求还没发出去。
+	if stage := upstream.TransportStageOf(err); stage.IsConnectStage() {
+		return false
+	}
+	// 显式 deadline：客户端自己带的 deadline 与「上游慢」同型，必须看 clientGone。
+	if hasDeadlineSentinel(err) {
+		return !clientGone
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
 		return true
 	}
+	// 兜底：自称 deadline 却不是 net.Error 超时（真实世界几乎没有）——保持原判 true。
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return true
 	}
 	return !clientGone && errors.Is(err, context.Canceled)
+}
+
+// hasDeadlineSentinel 报告 err 的 Unwrap 链里是否**真的**含有 deadline 哨兵值
+// （context.DeadlineExceeded / os.ErrDeadlineExceeded）。
+//
+// 不能用 errors.Is 代替：net/http 的 header 阶段超时错误（ResponseHeaderTimeout 与
+// http.Client.Timeout 产出的都是内部 *timeoutError）实现了
+// `Is(context.DeadlineExceeded) == true`，errors.Is 会把它们与「客户端自己的 deadline」
+// 混为一谈。只有真值才代表 ctx 到期，才该受 clientGone 约束。
+func hasDeadlineSentinel(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if e == context.DeadlineExceeded || e == os.ErrDeadlineExceeded {
+			return true
+		}
+	}
+	return false
 }
 
 // applyErrorPolicy 按错误分类对账号施加冷却/禁用/熔断策略（最终版状态机）。
