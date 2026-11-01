@@ -303,11 +303,10 @@ func regionBases(region Region) (chatBase, billingBase, origin string) {
 
 // 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersionCN /
 // defaultClientVersionGlobal / defaultCliVersion 同值）。
-// 两域当前同版（2026-10-29 均为 5.9.3），但仍按 region 取值：官方曾多次不同步发布，
-// 留两条常量避免下次分叉时再改结构。
+// 两域不同步发布（2026-11-01 实测 CN 5.9.3 / global 5.9.4），故按 region 取值。
 const (
 	desktopClientVersionCN     = "5.9.3"
-	desktopClientVersionGlobal = "5.9.3"
+	desktopClientVersionGlobal = "5.9.4"
 	desktopCLIVersion          = "2.165.0"
 )
 
@@ -322,7 +321,7 @@ const promoFetchTimeout = 15 * time.Second
 // 两段品牌都恒为 `WorkBuddy`：官方分发包 buildVlmGatewayHeaders 硬编码
 // `[WorkBuddy/${r}, WorkBuddy/${r}]`，与 productName（global 为 `WorkBuddy AI`）
 // 无关，且两域 main/server.js 逐字节相同（md5 8f8525cb…，2026-10-19 复验）。
-// 版本段仍按 realm 切（当前两域同为 5.9.3；陈旧版本段会被上游风控挡）。
+// 版本段仍按 realm 切（CN 5.9.3 / global 5.9.4；陈旧版本段会被上游风控挡）。
 func desktopUA(region Region) string {
 	version := desktopClientVersionCN
 	if region == RegionGlobal {

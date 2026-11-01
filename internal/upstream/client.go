@@ -923,7 +923,7 @@ type Client struct {
 
 	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + B 段的
 	// X-IDE-Version）。空 = 按账号 realm 取内置默认（CN defaultClientVersionCN 5.9.3 /
-	// global defaultClientVersionGlobal 5.9.3，对齐官方两域分发包，2026-10-29 两域同版）。
+	// global defaultClientVersionGlobal 5.9.4，对齐官方两域分发包，2026-11-01 实测）。
 	// config upstream.client_version 覆盖（覆盖值对两域统一生效）。
 	ClientVersion string
 

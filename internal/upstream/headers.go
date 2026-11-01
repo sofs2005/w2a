@@ -13,13 +13,14 @@ import (
 const (
 	// defaultClientVersionCN 国内版出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>`
 	// 与白名单头组的 X-IDE-Version）。对齐官方国内版分发包实测版本
-	// （~/.workbuddy/last-launch.json version = 5.9.3，2026-10-29）。两域版本不同步，
-	// 故按 realm 分开内置（当前两域恰好同版）。config upstream.client_version 可覆盖
+	// （~/.workbuddy/last-launch.json version = 5.9.3，2026-11-01 复验仍为 5.9.3）。
+	// 两域版本不同步，故按 realm 分开内置。config upstream.client_version 可覆盖
 	// （空 = 按 realm 取内置）。
 	defaultClientVersionCN = "5.9.3"
 	// defaultClientVersionGlobal 国际版出站 WorkBuddy 客户端版本段。对齐官方国际版
-	// 分发包实测版本（~/.workbuddy-ai/last-launch.json version = 5.9.3，2026-10-29）。
-	defaultClientVersionGlobal = "5.9.3"
+	// 分发包实测版本（~/.workbuddy-ai/last-launch.json version = 5.9.4，2026-11-01）。
+	// 注：5.9.4 与 5.9.3 的 CLI 包仅构建期临时路径不同，请求头逻辑零变化。
+	defaultClientVersionGlobal = "5.9.4"
 	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。两域共用的官方内置 CLI 版本
 	// 实测均为 2.165.0（cli/package.json version；5.9.3 起 publishConfig.customPackage
 	// 已被移除，版本只读顶层 version 字段）。
@@ -37,7 +38,7 @@ const (
 	// 拼出最终 UA（dist/codebuddy-lite-wb.mjs: buildUserAgent）。
 	// 关键：applicationName 直接取自各自 product.json，**两域不同值**——
 	//   CN     product.json: "applicationName": "WorkBuddy"     → WorkBuddy/5.9.3
-	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.9.3
+	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.9.4
 	// 而 platform 段两域都硬编码 "WorkBuddy"（sidecar-manager.js: var mt=`WorkBuddy`），
 	// 所以只有第二段随 realm 变。此前按「两域 server.js 逐字节相同」推断第二段恒为
 	// WorkBuddy 是搞错了链路：server.js 的 buildVlmGatewayHeaders 只服务本地 VLM 技能
@@ -117,7 +118,7 @@ func originRefererFor(a *auth.Auth) string {
 }
 
 // defaultClientVersionFor 按账号 realm 返回内置客户端版本段：
-// global → 5.9.3，cn（含 a 为 nil / 全局开关未开）→ 5.9.3（当前两域同版）。
+// global → 5.9.4，cn（含 a 为 nil / 全局开关未开）→ 5.9.3。
 func defaultClientVersionFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		return defaultClientVersionGlobal
@@ -192,7 +193,7 @@ func (c *Client) userAgent(a *auth.Auth) string {
 // 为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖掉）。
 // 默认（client_name 空）即生效（伪造官方桌面端指纹）；
 // 显式 client_name="SaaS" 则不设 UA（还原旧行为，Go 默认 UA）。
-// 版本段按账号 realm 取（当前两域同为 5.9.3），与 chat 的 UA 保持同域一致。
+// 版本段按账号 realm 取（CN 5.9.3 / global 5.9.4），与 chat 的 UA 保持同域一致。
 func (c *Client) billingUA(a *auth.Auth) string {
 	if c == nil || c.attributionClientName() == "SaaS" {
 		return ""

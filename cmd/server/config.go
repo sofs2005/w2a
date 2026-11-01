@@ -163,7 +163,8 @@ type Config struct {
 		UserAgent string `json:"user_agent"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与白名单
 		// 头组 X-IDE-Version 的取值）。空 = 按账号 realm 取内置默认（对齐官方分发包：
-		// 当前两域同为 5.9.3）；显式配置（如升级后的桌面包版本）则对两域统一随配置走。
+		// 当前 CN 5.9.3 / global 5.9.4，两域不同步）；显式配置（如升级后的桌面包版本）
+		// 则对两域统一随配置走。
 		ClientVersion string `json:"client_version"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（对齐官方内置 CLI
 		// 2.165.0，两域同版）；显式配置则随配置走。
