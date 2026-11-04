@@ -282,6 +282,16 @@ type Config struct {
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到查余额时，到期时间在此窗口内
 		// 的积分被标记为"快过期"，选号优先消耗（issue:积分过期）。空/0 = 禁用分桶。
 		ExpiringSoon string `json:"expiring_soon"`
+		// UrgentExpiry 到期硬优先的**外层**窗口（默认 "72h"）：积分到期时刻落在
+		// (now, now+本值] 内的账号进入紧急层，按真实到期时刻硬优先消耗
+		// （issue:积分过期）。窗口外一律走常规成本分层/权重逻辑，否则"全池最早
+		// 到期"的号会被永久垄断。改小 = 更少号参与硬优先，改大 = 更多号参与。
+		UrgentExpiry string `json:"urgent_expiry"`
+		// CriticalExpiry 到期硬优先的**顶层**窗口（默认 "24h"）：一天内到期的积分
+		// 整体压过 72h 层。理由：24h 内到期的积分几乎必然作废（剩下不到一天，来不及
+		// 烧完），而 72h 内到期的还有一整轮签到/活动可能覆盖，紧迫度差一个数量级。
+		// 必须 <= urgent_expiry（否则在 normalize 里钳到 urgent 并 WARN）。
+		CriticalExpiry string `json:"critical_expiry"`
 		// UnifiedRouting 统一调度开关（缺省 true）：裸模型名（无 cn:/global: 前缀）
 		// 是否进入**全池**调度（CN 与 global 账号共用同一套粘性/加权/分层/紧急逻辑）。
 		//
@@ -350,6 +360,12 @@ type Config struct {
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
+	// UrgentExpiryDur / CriticalExpiryDur 解析后的两层到期硬优先窗口
+	// （pool.urgent_expiry / pool.critical_expiry）。恒为正值：
+	// 空值 → 默认；非法/非正 → 默认 + WARN（不 fail-fast，与 expiring_soon 同口径）；
+	// critical > urgent → 钳到 urgent + WARN（见 normalize）。
+	UrgentExpiryDur   time.Duration `json:"-"`
+	CriticalExpiryDur time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// StateFlushDur 解析后的池状态落盘周期（pool.state_flush）；0 = 关闭后台落盘。
@@ -384,6 +400,17 @@ const (
 	// 本键承担，degrade_cooldown_max 的默认值仍在 Default()/normalize 里写 "2h"
 	// （pool 侧 degradeDurationLocked 有自己的 defaultDegradeCooldownMax 兜底）。
 	defaultPoolTimeoutCooldownMax = "10m"
+)
+
+// 到期硬优先两层窗口的默认值（pool.urgent_expiry / pool.critical_expiry）。
+// Default()（写入默认配置）与 normalize（本键非法/非正时回落）共用本常量——两处各写
+// 字面量是最容易漂移的地方（改了 Default 忘了 normalize 的回落，配置写空串时行为就
+// 变了）。取值理由见 Pool.UrgentExpiry / Pool.CriticalExpiry 字段注释，pool 侧的
+// 同名常量（internal/pool/credits.go 的 urgentExpiryWindow / criticalExpiryWindow）
+// 是"未注入时"的兜底，与本组同值——漂移的表现是"配置文件缺键时行为与文档不一致"。
+const (
+	defaultPoolUrgentExpiry   = "72h"
+	defaultPoolCriticalExpiry = "24h"
 )
 
 // 「网关侧网络错误（DNS/Dial/TLS）」同号重试的默认值（upstream.connect_retry /
@@ -459,6 +486,11 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// 到期硬优先两层窗口：24h 层压过 72h 层（取值理由见 Pool.UrgentExpiry /
+	// Pool.CriticalExpiry 字段注释）。显式写出而不是留给零值：零值是 "" 会走
+	// normalize 的空值回落，行为虽然一致，但面板读到的默认配置会缺这两个旋钮。
+	c.Pool.UrgentExpiry = defaultPoolUrgentExpiry
+	c.Pool.CriticalExpiry = defaultPoolCriticalExpiry
 	// UnifiedRouting 缺省 true：裸名全池调度（本改造目标形态）。显式 false 退回
 	// 「裸名只打 CN」旧语义（路由层逃生门，见字段注释）。
 	c.Pool.UnifiedRouting = true
@@ -764,6 +796,33 @@ func applyEnv(c *Config) {
 	// 注：WB2A_ADMIN_ENABLED 随 admin 段一并删除，设置了也不再被读取（管理面已下线）。
 }
 
+// normalizePoolExpiryWindow 解析 pool 段的到期硬优先窗口键（urgent_expiry /
+// critical_expiry），返回生效时长与归一后的原文字符串（供面板/默认配置回写）。
+//
+// 宽容口径的理由（与 expiring_soon 同一取舍）：窗口写错最坏是"临期号没被硬优先"
+// （退化成改动前的行为），不值得让整个网关起不来。分三种情况：
+//   - 空值 → 默认，不告警（缺键是常态：Default() 已预置，此分支只兜显式 ""）；
+//   - 非法 / 非正 → 默认 + WARN。非正值没有合理语义：0 窗口是一条永远不命中的静默
+//     分支，读日志的人无从判断"故意关掉"还是"手滑写错"；真要关闭请写极大值。
+//   - 合法正值 → 原样采用。
+func normalizePoolExpiryWindow(key, raw, def string) (time.Duration, string) {
+	if strings.TrimSpace(raw) == "" {
+		d, _ := time.ParseDuration(def) // def 是本包常量，解析失败即代码 bug
+		return d, def
+	}
+	d, perr := time.ParseDuration(raw)
+	if perr != nil || d <= 0 {
+		why := "非正时长"
+		if perr != nil {
+			why = perr.Error()
+		}
+		log.Printf("WARN: [config] %s=%q 非法或非正值（%s），回落默认 %s", key, raw, why, def)
+		d, _ = time.ParseDuration(def)
+		return d, def
+	}
+	return d, raw
+}
+
 func (c *Config) normalize() error {
 	var err error
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
@@ -920,6 +979,26 @@ func (c *Config) normalize() error {
 	}
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0 // 负值视为禁用，避免 upstream 判定窗口反转
+	}
+	// 到期硬优先两层窗口（pool.urgent_expiry / pool.critical_expiry）。
+	// 口径与 expiring_soon 一致地**宽容**：不 fail-fast —— 窗口写错最坏是"临期号没被
+	// 硬优先"（退化成改动前的行为），与"整个网关起不来"相比微不足道。
+	//   - 空值 → 默认（不告警，与 expiring_soon 的空值分支同款）；
+	//   - 非法/非正 → 默认 + WARN：非正值没有语义（0 窗口 = 该层永不命中，是一条
+	//     静默分支，读日志的人无从判断"关掉了"还是"配错了"；真要关闭请写极大值）。
+	//   - critical > urgent → 钳 critical = urgent + WARN：分层的前提是 critical ⊆
+	//     urgent，反过来的配置（"1 天层"比"3 天层"还宽）会让顶层吞掉整个外层，
+	//     表现为"3 天窗口配了等于没配"，且没有任何运行期报错——必须在入口钳平。
+	c.UrgentExpiryDur, c.Pool.UrgentExpiry = normalizePoolExpiryWindow(
+		"pool.urgent_expiry", c.Pool.UrgentExpiry, defaultPoolUrgentExpiry)
+	c.CriticalExpiryDur, c.Pool.CriticalExpiry = normalizePoolExpiryWindow(
+		"pool.critical_expiry", c.Pool.CriticalExpiry, defaultPoolCriticalExpiry)
+	if c.CriticalExpiryDur > c.UrgentExpiryDur {
+		log.Printf("WARN: [config] pool.critical_expiry=%s 大于 pool.urgent_expiry=%s，钳制为 %s"+
+			"（顶层窗口必须落在外层窗口内，否则 24h 层会吞掉整个 72h 层）",
+			c.Pool.CriticalExpiry, c.Pool.UrgentExpiry, c.Pool.UrgentExpiry)
+		c.Pool.CriticalExpiry = c.Pool.UrgentExpiry
+		c.CriticalExpiryDur = c.UrgentExpiryDur
 	}
 	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
 	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停

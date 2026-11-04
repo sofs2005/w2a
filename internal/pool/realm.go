@@ -106,8 +106,8 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 // 会话钉住，后续轮次走 ResolveForModel 快路径（只查 healthy）再也回不去免费号。
 //
 // 与同文件 UrgentUIDsForModelRealms 的关系：那个走 preferredCandidatesLocked 的
-// **紧急层**优先（免费临期 > 全部临期 > 常规分配）；本函数管的是紧急层之外、常规
-// 分配用的候选池，两者都读 costTierOf，口径一致（此前只有紧急那条读了成本层，
+// **紧急层**优先（免费临期 > 24h 层 > 72h 层 > 常规分配）；本函数管的是紧急层之外、
+// 常规分配用的候选池，两者都读 costTierOf，口径一致（此前只有紧急那条读了成本层，
 // 常规这条漏了——同一份文件里的不对称正是本 bug 的形态）。
 func (p *Pool) AvailableUIDsForModelRealms(model string, realms RealmSet) []string {
 	return p.availableUIDsLocked(realms,
@@ -157,11 +157,13 @@ func (p *Pool) bestTierLocked(model string, realms RealmSet) func(e *entry, now 
 }
 
 // UrgentUIDsForModelRealm 返回「紧急到期优先」的可用 UID 子集（issue:积分过期 的
-// 粘性初次分配侧）：仅当池里存在 72 小时内到期的可用候选时非空，否则返回 nil。
+// 粘性初次分配侧）：仅当池里存在紧急窗口内到期的可用候选时非空，否则返回 nil。
 //
-// 语义与选号侧共用同一实现（credits.preferredCandidatesLocked）：免费层（实测免费
-// 或目录标免费）可整体优先于临期非免费号；无免费层时返回全部紧急候选（**不做"只留
-// 最早那一个"的截断**——粘性侧要在这批里哈希打散，只留一个会让所有新会话钉死在同一账号）。
+// 语义与选号侧共用同一实现（credits.preferredCandidatesLocked），三层同源：
+// 免费 ∩ 临期（跨层最高）> 24h 层 > 72h 层。无免费层时返回**该层全部**候选
+// （**不做"只留最早那一个"的截断**——粘性侧要在这批里哈希打散，只留一个会让所有
+// 新会话钉死在同一账号）；24h 层非空时 72h 号不参与（与选号侧的层间优先级一致，
+// 否则新会话会被哈希到 72h 号上，绕过 24h 层的硬优先）。
 //
 // 调用方（session 路由）只在**新建或失效重绑**时用它缩小哈希候选集；已有有效绑定
 // 走原 fast path，不因积分到期被切号（用户要求保留粘性）。

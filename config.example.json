@@ -99,6 +99,8 @@
     "idle_weight_per_hour": 0.5,
     "idle_weight_max": 5.0,
     "expiring_soon": "168h",
+    "urgent_expiry": "72h",
+    "critical_expiry": "24h",
     "cost_explore_interval": "30m",
     "credit_floor_cn": 100,
     "credit_floor_global": 30,

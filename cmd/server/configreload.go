@@ -257,6 +257,10 @@ func applyConfig(cfg *Config, t configTargets) {
 	p.SetTimeout(cfg.Pool.TimeoutStreak, cfg.TimeoutCooldownDur) // 上游超时（慢号）出池
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal)
+	// 到期硬优先两层窗口（urgent_expiry / critical_expiry）：热重载必须生效——
+	// 调窗口是运维的主要动作（签到节奏变了就调），要求重启等于让这个旋钮形同虚设。
+	// 与启动装配（main.go）共用 applyPoolExpiryWindows，见该函数注释。
+	applyPoolExpiryWindows(p, cfg)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)
 	p.SetCreditExhausted(cfg.CreditExhaustedDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
@@ -286,6 +290,22 @@ func applyConfig(cfg *Config, t configTargets) {
 			t.sess.StopGC()
 		}
 	}
+}
+
+// applyPoolExpiryWindows 把配置里的两层到期窗口推到池子（启动与热重载共用，
+// 避免两条链路各写一遍——启动侧漏接的表现是"配置写了非默认值也不生效"，
+// 而默认值等于配置默认值时完全静默，只能靠共用实现来保证不漏）。
+//
+// 为什么单独抽一个函数而不是内联一行 SetExpiryWindows：main() 不可测，写在启动
+// 装配里的一行赋值既没有测试覆盖、删掉也不会让任何用例变红（默认 72h/24h 与
+// 配置默认值恰好相同，行为完全不变）；只有运维把窗口配成非默认值时才会静默失效。
+// 抽出来后启动侧与热重载侧调用同一个函数，且该函数本身可被直接断言
+// （见 expiry_windows_config_test.go 的 TestExpiryWindowsStartupInjection）。
+//
+// 传的是**解析后的生效值**（cfg.UrgentExpiryDur / cfg.CriticalExpiryDur，由
+// normalize 从原文解析并钳制 critical <= urgent），不是原文，故这里不做二次校验。
+func applyPoolExpiryWindows(p *pool.Pool, cfg *Config) {
+	p.SetExpiryWindows(cfg.UrgentExpiryDur, cfg.CriticalExpiryDur)
 }
 
 // buildUpstream 按配置构造出站客户端（启动装配与热重载共用同一份接线）。

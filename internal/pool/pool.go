@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,14 @@ type Pool struct {
 	idleWeightMax     float64
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
+	// urgentExpiry / criticalExpiry 到期硬优先的两层窗口（SetExpiryWindows 注入；
+	// 默认 72h / 24h，见 credits.go 的 urgentExpiryWindow / criticalExpiryWindow）。
+	// 语义：到期时刻落在 (now, now+窗口] 内的号进入对应紧急层，24h 层整体压过 72h 层
+	// （见 preferredCandidatesLocked）。做成字段而不是常量是为了让运维能按自己的签到
+	// 节奏调整，且**热重载必须生效**——改窗口是调优动作，不该要求重启。
+	// 不变量：0 < criticalExpiry <= urgentExpiry（SetExpiryWindows 保证）。
+	urgentExpiry   time.Duration
+	criticalExpiry time.Duration
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
@@ -128,6 +137,10 @@ func New(stateFp string) *Pool {
 		// 测试直接改包级 flushInterval（须在 New 之前，见 startFlusher 注释）。
 		flushInterval: flushInterval,
 		exploreLast:   map[string]time.Time{},
+		// 到期硬优先两层窗口取默认（3 天 / 1 天）；main 经 SetExpiryWindows 注入
+		// config 值。两处默认值同源（credits.go 的常量），漂移不可能发生。
+		urgentExpiry:   urgentExpiryWindow,
+		criticalExpiry: criticalExpiryWindow,
 	}
 	if stateFp != "" {
 		p.load()
@@ -330,6 +343,44 @@ func (p *Pool) SetMaxInFlightGlobal(n int) {
 	if n >= 0 {
 		p.maxInFlightGlobal = n
 	}
+}
+
+// SetExpiryWindows 注入到期硬优先的两层窗口（main 从 config 解析后调用；热重载同样
+// 走这里——调窗口是运维动作，不该要求重启）。
+//
+// 语义：
+//   - urgent <= 0 保留原值（用默认 72h），与 SetBreaker 同款"非正值即未设置"口径；
+//   - critical <= 0 保留原值（默认 24h）；
+//   - 若 critical > urgent 则**钳 critical = urgent**：分层的前提是 critical ⊆ urgent，
+//     反过来的配置（"1 天层"比"3 天层"还宽）会让 critical 层吞掉整个 urgent 层，
+//     表现为"3 天窗口配了等于没配"，且没有任何运行期报错——必须在入口处钳平。
+//     钳制放在**赋值之后**而不是参数校验处：只改小 urgent（如 72h → 12h）同样可能
+//     让既有的 critical 越界，事后比较才能覆盖两种改动方向。
+func (p *Pool) SetExpiryWindows(urgent, critical time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if urgent > 0 {
+		p.urgentExpiry = urgent
+	}
+	if critical > 0 {
+		p.criticalExpiry = critical
+	}
+	if p.criticalExpiry > p.urgentExpiry {
+		// config 层已按同口径钳过并打过 WARN；这里是纵深防御（面板/测试/程序化调用
+		// 不经过 normalize），正常生产路径不会触发。
+		log.Printf("WARN: [pool] critical_expiry=%s > urgent_expiry=%s，钳制为 urgent_expiry",
+			p.criticalExpiry, p.urgentExpiry)
+		p.criticalExpiry = p.urgentExpiry
+	}
+}
+
+// ExpiryWindows 透出**生效**的两层到期窗口（已按 critical <= urgent 钳制后的值，
+// 与配置原文可能不同）。供测试与运维排查读真实生效值——配置里写的是"想要什么"，
+// 这里读到的是"池子实际按什么判临期"，两者不一致时以本值为准。
+func (p *Pool) ExpiryWindows() (urgent, critical time.Duration) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.urgentExpiry, p.criticalExpiry
 }
 
 // inFlightLimit 报告账号的生效在途上限（global 分档优先，回落 maxInFlight）；

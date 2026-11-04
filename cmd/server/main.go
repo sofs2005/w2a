@@ -154,8 +154,12 @@ func main() {
 	p.SetTimeout(cfg.Pool.TimeoutStreak, cfg.TimeoutCooldownDur)
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域在途分档（WAF 403 修复 P1-1，默认 2）
-	p.SetSoftRateMax(cfg.SoftRateMaxDur)               // 软冷却指数退避封顶（soft_rate_max，默认 2h）
-	p.SetCreditExhausted(cfg.CreditExhaustedDur)       // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为：硬冷却到次日 04:00）
+	// 到期硬优先两层窗口（urgent_expiry 默认 72h / critical_expiry 默认 24h）：
+	// 24h 层整体压过 72h 层，窗口外的号一律走常规逻辑（issue:积分过期）。
+	// 与热重载共用 applyPoolExpiryWindows（见其注释：启动侧单独写一行会静默失效）。
+	applyPoolExpiryWindows(p, cfg)
+	p.SetSoftRateMax(cfg.SoftRateMaxDur)         // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetCreditExhausted(cfg.CreditExhaustedDur) // 积分耗尽后的冷却时长（credit_exhausted，0 = 旧行为：硬冷却到次日 04:00）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur)                 // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloorCN, cfg.Pool.CreditFloorGlobal) // 积分保底按域分档（默认 100/30；0 = 该域关闭）

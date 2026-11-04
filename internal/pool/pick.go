@@ -87,12 +87,19 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 			log.Printf("WARN: [pool] pick: all %d healthy candidates floor-blocked (model=%q floor_cn=%d floor_global=%d), trying fallback",
 				floorBlockedN, reqModel, p.creditFloorCN, p.creditFloorGlobal)
 		}
+		// 紧急层在途放宽重扫（详见 pickRelaxedEmergencyLocked 注释）：24h 层的号全部
+		// 在途占满时，先把流量降级给 72h 层；两层都占满才允许突破在途上限，
+		// 而不是把流量扔给正在冷却的号。
+		if a := p.pickRelaxedEmergencyLocked(tried, now, reqModel, healthyOf, floorBlocked); a != nil {
+			return a
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realms, reqModel)
 	}
-	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「72 小时内到期」的
-	// 账号时，按真实到期时刻硬优先（最早优先），免费（实测或目录判免费）的临期号排在最前。
+	// 紧急到期分支（issue:积分过期，见 credits.go）：候选里出现「24h / 72h 内到期」的
+	// 账号时，按真实到期时刻硬优先（最早优先），且 24h 层整体压过 72h 层；免费（实测
+	// 或目录判免费）的临期号排在最前（跨层，见 preferredCandidatesLocked）。
 	// **只在有紧急候选时启用**——窗口外（含"全池最早到期但还很久"）一律走下方原有
 	// 逻辑，否则最早到期的那个号会被永久垄断（用户明确要求：3 天内才提优先级）。
 	// 分支独立于成本分层/探索/Top5/加权随机：这些机制都可能把选号拉回非临期号，
@@ -100,11 +107,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	// minPickGap 不参与本分支：紧急集通常只有一两个号，跳过会直接退回非临期号、
 	// 违背硬优先语义；并发扩散由"批次耗尽即前移"（debitBatchesLocked）承担。
 	if pref := p.preferredCandidatesLocked(cands, reqModel, now); len(pref) > 0 {
-		e := p.pickEarliestExpiryAmongLocked(pref, reqModel, now)
-		e.lastUsed = now
-		p.pickSeq++
-		e.usedSeq = p.pickSeq
-		return e.a
+		return p.commitExpiryPickLocked(pref, reqModel, now)
 	}
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿
 	// 根本进不了短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -258,10 +261,86 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 	return e.a
 }
 
+// commitExpiryPickLocked 在紧急层候选里选出最早到期者，记账并打一条层级日志。
+//
+// 抽成一处是因为紧急层有两个入口（正常候选集 / 在途放宽重扫），两处的记账与日志
+// 必须逐字一致——漏掉 usedSeq 会让该号在 LRU 兜底眼里永远"最旧"（刚用过就被再选，
+// 防集中失效；与 pickEarliestExpiryLocked 里那段教训同款）。
+//
+// 日志回答"为什么是这个号"：layer 说明命中的是 24h 还是 72h 层（运维调窗口的唯一
+// 反馈——把 expires_at 与 now 的差值和 window 对照，就能判断窗口是否配得过宽/过窄），
+// candidates 说明当时有几号竞争（=1 表示该层只有一个号，选号没有自由度）。
+// 调用方必须已持有 p.mu 写锁。
+func (p *Pool) commitExpiryPickLocked(pref []*entry, reqModel string, now time.Time) *auth.Auth {
+	e := p.pickEarliestExpiryAmongLocked(pref, reqModel, now)
+	at, _ := e.earliestExpiryAt(now) // 紧急层必有未过期批次，ok 恒 true
+	layer, window := "urgent", p.urgentExpiry
+	if _, ok := e.criticalExpiryAt(now, p.criticalExpiry); ok {
+		layer, window = "critical", p.criticalExpiry
+	}
+	log.Printf("[pool] expiry_layer=%s model=%s acct=%s expires_at=%s window=%s candidates=%d",
+		layer, reqModel, logfmt.Label(e.a.UID, e.a.Nickname), at.Format(time.RFC3339), window, len(pref))
+	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
+	p.pickSeq++
+	e.usedSeq = p.pickSeq
+	return e.a
+}
+
+// pickRelaxedEmergencyLocked 在「正常候选集为空」时**放宽在途上限**重扫一次，只接
+// 紧急层（24h / 72h 内到期）的号；重扫结果里没有紧急候选则返回 nil（交回冷却兜底）。
+//
+// 要解决的边界 bug：候选集在上游构建阶段就滤掉了 inFlightFull 的号，于是"24h 层唯一
+// 的号在途占满"会让 cands 变空，旧实现直接落到 pickEarliestExpiryLocked 的冷却兜底
+// ——流量被扔给正在冷却的号，同时那个 24h 号的积分干等到作废。放宽重扫后，层内最早
+// 到期优先的排序照旧生效：24h 层占满时先回退到 72h 层，两层都占满才真正突破上限。
+//
+// 为什么允许突破在途上限（只在紧急层）：紧急批次的积分会**真的作废**（不可逆的
+// 价值损失），而多一个并发最坏只是"变慢"（上游排队/限流，请求本身仍会成功）。
+// 权衡是「作废」>「变慢」，故宁可变慢也要把临期积分烧掉。这个权衡只在紧急层成立，
+// 所以本函数对非紧急候选一律返回 nil——常规号不得借这条路径绕过在途上限。
+//
+// tried / healthy / floorBlocked 三条约束**保持不动**：请求级轮换、健康度（冷却/熔断/
+// 6004 模型豁免）与积分保底都不是"并发限流"，放宽它们等于把流量导向刚失败或已触底
+// 的号，那是另一种性质的错误。唯一放宽的就是 inFlightFull 一条。
+// 调用方必须已持有 p.mu 写锁。
+func (p *Pool) pickRelaxedEmergencyLocked(
+	tried map[string]bool, now time.Time, reqModel string,
+	healthyOf func(*entry) bool, floorBlocked func(*entry) bool,
+) *auth.Auth {
+	relaxed := make([]*entry, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if tried != nil && tried[uid] {
+			continue
+		}
+		if !healthyOf(e) {
+			continue
+		}
+		if floorBlocked(e) {
+			continue // 积分保底：触底号不接收费模型（与正常候选集同判据）
+		}
+		relaxed = append(relaxed, e) // 唯一放宽的一条：不判 inFlightFull
+	}
+	if len(relaxed) == 0 {
+		return nil
+	}
+	pref := p.preferredCandidatesLocked(relaxed, reqModel, now)
+	if len(pref) == 0 {
+		return nil // 放宽在途也没有紧急候选：不值得突破上限，交回冷却兜底
+	}
+	log.Printf("WARN: [pool] expiry_layer relaxed_in_flight model=%s candidates=%d max_in_flight=%d max_in_flight_global=%d",
+		reqModel, len(pref), p.maxInFlight, p.maxInFlightGlobal)
+	return p.commitExpiryPickLocked(pref, reqModel, now)
+}
+
 // pickEarliestExpiryAmongLocked 在紧急到期候选里选最早到期者（issue:积分过期）。
 //
+// 传入的 cands 已经是**单一层**（24h 层或 72h 层，层间切分见 preferredCandidatesLocked）：
+// 本函数只负责层内排序。层间优先级不在这里做——"24h 整体压过 72h" 是集合层面的取舍，
+// 混成一张表按到期时刻排会让 24h 层失去"独占"语义：粘性侧（UrgentUIDsForModelRealms）
+// 直接把这张表当哈希候选集，混排时新会话会被哈希到 72h 号上，绕过 24h 层的硬优先。
+//
 // 排序口径（三级，全序且稳定）：
-//  1. 最早到期时刻升序——**核心判据**，让 72 小时内作废的积分先被烧掉。
+//  1. 最早到期时刻升序——**核心判据**，让窗口内作废的积分先被烧掉。
 //  2. 成本层升序（0 免费 / 1 未知 / 2 收费）——同一到期时刻（或都没有到期批次）时
 //     优先免费号；preferredCandidatesLocked 已保证不会出现"非免费压过免费"。
 //  3. 单价升序 + UID 字典序——兜底确定性（同一时刻到期的批次常见：批量赠送的积分
@@ -269,7 +348,7 @@ func (p *Pool) pickInRealms(tried map[string]bool, reqModel string, realms Realm
 //
 // 为什么不做加权随机：本分支的语义是"必须先把最早到期的积分烧掉"，随机化会重新
 // 引入"临期积分放过期"的可能。防集中由"批次耗尽即前移"（debitBatchesLocked）
-// 与 72 小时窗口自然约束——批次用完后该号退出紧急集，选号回到正常逻辑。
+// 与紧急窗口自然约束——批次用完后该号退出紧急集，选号回到正常逻辑。
 // 调用方必须已持有 p.mu 写锁（本函数只读，但选号路径统一在写锁内）。
 func (p *Pool) pickEarliestExpiryAmongLocked(cands []*entry, reqModel string, now time.Time) *entry {
 	best := cands[0]

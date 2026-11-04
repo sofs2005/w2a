@@ -35,9 +35,9 @@ func realmAwareAvailableForModel(p *pool.Pool, store *aliases.Store) func(model 
 // realmAwareUrgentForModel 构造会话粘性路由「紧急到期优先」候选集的 realm 感知闭包。
 //
 // 与 realmAwareAvailableForModel 同构（同样的路由裁决 + 分池过滤），差别只在数据来源：
-// 走 pool.UrgentUIDsForModelRealms——仅当该域集合/模型下存在 72 小时内到期的可用号时
-// 返回非空子集，否则 nil。session 路由只在**新建/失效重绑**时用它缩小哈希候选集
-// （已有有效绑定走 fast path，不受影响）。
+// 走 pool.UrgentUIDsForModelRealms——仅当该域集合/模型下存在紧急窗口（24h / 72h
+// 两层）内到期的可用号时返回非空子集，否则 nil。session 路由只在**新建/失效重绑**
+// 时用它缩小哈希候选集（已有有效绑定走 fast path，不受影响）。
 // 裸名（RealmUnified）→ 全池口径：跨域的临期号一起参与"紧急优先"竞争。
 func realmAwareUrgentForModel(p *pool.Pool, store *aliases.Store) func(model string) []string {
 	return func(model string) []string {

@@ -184,7 +184,7 @@ func TestDebitAdvancesEarliestBatch(t *testing.T) {
 		t.Fatalf("耗尽批次应被移除，剩余 %d 条", len(e.creditBatches))
 	}
 	after, ok := e.earliestExpiryAt(time.Now())
-	urgent, isUrgent := e.urgentExpiryAt(time.Now())
+	urgent, isUrgent := e.urgentExpiryAt(time.Now(), urgentExpiryWindow)
 	p.mu.Unlock()
 	if !ok {
 		t.Fatal("应仍有未到期批次")
