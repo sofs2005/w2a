@@ -240,7 +240,14 @@ func main() {
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
 	// （实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
 	// 闭包每次调用经 holder 取实时客户端，热重载换掉客户端后自动跟随。
-	p.SetModelRateOf(func(realm, model string) string { return upHolder.Load().ModelRate(realm, model) })
+	//
+	// 经 modelRateWithAliases 包装（键空间对齐，见 wiring.go）：倍率表的键是上游目录里的
+	// **物理模型 ID**，而本闭包的调用方（costTierOf / floorBlockedForModel）传的是**对外名**。
+	// 某域出站名与对外名不同的别名条目（实案 deepseek-v4.1-flash → global 的 -sg）会让
+	// global 号查到裸名的 "0" 而判「免费」，成本分层硬过滤后国内收费号被整体滤掉。
+	// aliasStore 热加载是同一个 *Store 实例原地 Set，闭包捕获指针即自动跟随。
+	p.SetModelRateOf(modelRateWithAliases(aliasStore,
+		func(realm, model string) string { return upHolder.Load().ModelRate(realm, model) }))
 
 	// 思考通道兜底（issue #135）：默认开启；显式关掉时打一行日志，免得"为什么
 	// 只看 content 的客户端又空了"变成悬案。

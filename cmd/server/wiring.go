@@ -49,6 +49,51 @@ func realmAwareUrgentForModel(p *pool.Pool, store *aliases.Store) func(model str
 	}
 }
 
+// modelRateWithAliases 给上游目录倍率查表加上「对外名 → 该域物理名」的别名解析。
+//
+// 为什么必须有这层：上游目录倍率表的存储键是**物理模型 ID**（internal/upstream/client.go：
+// rates[mi.ID] = rate），而 pool 的成本分层（credits.go 的 costTierOf）与积分保底
+// （pick.go 的 floorBlockedForModel）拿到的 model 是**对外名**。两套键空间在
+// 「某域出站名与对外名不同」的条目上对不上，真实配置里就有这样一条：
+//
+//	{"name": "deepseek-v4.1-flash", "cn": "deepseek-v4.1-flash", "global": "deepseek-v4.1-flash-sg"}
+//
+// global 号用裸名去查，命中目录里裸名的牌价 "0"（实际计费走 -sg）→ 判 tier 0「免费」；
+// 查不到则判 tier 1「未知」。两者都排在「已实测收费」（tier 2）之前，而成本分层是硬过滤
+// 取最优层 ⇒ 国内收费号被整体滤掉、流量压到国际号。同一查表还被积分保底用来判收费，
+// 误判「未知」等于放行 ⇒ 保底失效、可能打穿余额。
+//
+// 修复点在**注入侧**：pool 的语义（拿到什么 model 就查什么）是对的，键空间对齐属于
+// "上游目录 vs 网关对外名"这一层的职责，天然落在接线处。
+//
+// 语义（三条分支互斥，且与引入包装前逐字兼容）：
+//   - 命中别名且该域出站名非空 → 用**该域出站名**（物理名）查；
+//   - 命中别名但该域出站名为空（ok==false，"该域没有这个模型"）→ **原样**查。
+//     不吞成空串：空串在 catalogRateTier 里是 tier 1「未知」，比保守更松（保底会放行）；
+//     而该域账号本就不会被选中（RealmSet 在选号侧已排除），原样查即"保持既有 Resolve
+//     语义"的防御性兜底；
+//   - 未命中别名（或空表）→ 原样查，与引入前逐字一致（无别名部署零变化）。
+//
+// 热加载：store 是 *aliases.Store，startAliasWatcher 原地 Set 新表，闭包捕获指针即可
+// 自动跟随——不需要在 configreload.go 里再注入一次。
+//
+// nil 安全（接线处写错不该 panic 掉选号热路径）：store == nil 时无别名可依 → 原样转发；
+// rateOf == nil 时返回空串（=「未知」，与 pool 侧 modelRateOf==nil 的退化同向）。
+func modelRateWithAliases(store *aliases.Store, rateOf func(realm, model string) string) func(realm, model string) string {
+	return func(realm, model string) string {
+		if rateOf == nil {
+			return "" // 无从查倍率：判「未知」（catalogRateTier("")==1），与 pool 侧 nil 退化同向
+		}
+		if store == nil {
+			return rateOf(realm, model) // 无别名表：与引入包装前逐字一致
+		}
+		if physical, ok := store.Resolve(model, realm); ok && physical != "" {
+			return rateOf(realm, physical)
+		}
+		return rateOf(realm, model) // 未命中别名 / 该域无此模型：原样查（不得吞成空串）
+	}
+}
+
 // realmAwareWeightedPick 构造会话粘性**首绑**的加权选号闭包（issue #265）。
 //
 // 背景：粘性未命中时旧实现用 FNV-1a 取模在可用 UID 里选，与积分余额、快过期积分、
