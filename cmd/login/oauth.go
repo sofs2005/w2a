@@ -23,15 +23,28 @@ import (
 
 // upstreamBaseCN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。base 由 realmConfig 按 realm 选，origin 随之配套。
-// clientUA 的版本段对齐官方两域共用的内置 CLI 版本（2.165.0）。登录走 OAuth 设备流，
+// clientUA 的版本段对齐官方各 realm 内置 CLI 版本。登录走 OAuth 设备流，
 // 只影响 auth 端点，沿用既有 CLI 形状不动（改形状属独立 A/B 课题）。
+// 2026-11-16 起两域分叉：CN 5.11.3 内置 CLI 2.176.0，global 5.9.4 仍 2.165.0。
 const (
 	upstreamBaseCN      = "https://copilot.tencent.com"
 	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.165.0 CodeBuddy/2.165.0"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+
+	cliVersionCN     = "2.176.0"
+	cliVersionGlobal = "2.165.0"
 )
+
+// clientUAFor 返回 origin 所属 realm 的独立 CLI UA（`CLI/<ver> CodeBuddy/<ver>`）。
+// origin 与 realm 一一对应（codebuddy.cn / workbuddy.ai），故无需再传 realm。
+func clientUAFor(origin string) string {
+	v := cliVersionCN
+	if origin == originRefererGlobal {
+		v = cliVersionGlobal
+	}
+	return "CLI/" + v + " CodeBuddy/" + v
+}
 
 // newLoginClient 每个流程独立 cookie jar（多账号登录互不串会话）。
 //
@@ -94,7 +107,7 @@ func commonHeaders(origin string) func(*http.Request) {
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Referer", origin+"/")
-		req.Header.Set("User-Agent", clientUA)
+		req.Header.Set("User-Agent", clientUAFor(origin))
 	}
 }
 

@@ -9,7 +9,8 @@ import (
 
 // globalUAString global realm 默认出站 UA。第二段「应用名」取自官方 product.json 的
 // applicationName：CN=`WorkBuddy`、global=`workbuddy-ai`（两域不同值），platform 段由
-// sidecar-manager.js 硬编码 `WorkBuddy`，CLI 段两域同为 2.165.0。
+// sidecar-manager.js 硬编码 `WorkBuddy`；CLI 段按 realm 分叉（CN 2.176.0 / global 2.165.0，
+// 2026-11-16 CN 5.11.3 起）。
 const globalUAString = "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"
 
 // TestChatHeadersGlobalRealm global 账号的 chat 请求头对齐官方国际客户端形态：
@@ -116,7 +117,7 @@ func TestChatHeadersCNNoEnterpriseZeroRegression(t *testing.T) {
 
 // TestDefaultWorkBuddyUAForGlobal UA 单元级断言：第二段「应用名」随 realm 切
 // （官方 product.json applicationName：CN=`WorkBuddy` / global=`workbuddy-ai`），
-// 版本段同样随 realm（CN 5.9.3 / global 5.9.4）。
+// 版本段同样随 realm（CN 5.11.3 / global 5.9.4），CLI 段亦然（CN 2.176.0 / global 2.165.0）。
 func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 	c := &Client{}
 	if got := c.defaultWorkBuddyUAFor(&auth.Auth{}); got != defaultUAString {
@@ -131,8 +132,8 @@ func TestDefaultWorkBuddyUAForGlobal(t *testing.T) {
 		t.Errorf("defaultWorkBuddyUAFor(global, v6) = %q", got)
 	}
 	// CN 侧应用名恒 WorkBuddy。
-	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0" {
-		t.Errorf("defaultWorkBuddyUAFor(cn domain) = %q want 5.9.3", got)
+	if got := c.defaultWorkBuddyUAFor(&auth.Auth{Domain: "copilot.tencent.com"}); got != "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0" {
+		t.Errorf("defaultWorkBuddyUAFor(cn domain) = %q want 5.11.3", got)
 	}
 }
 
