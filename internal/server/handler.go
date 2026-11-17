@@ -925,6 +925,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 请求级抢救。只做一次有意义：搬过之后仍被拦，说明触发词在 user 侧或请求
 	// 其它部分，再搬一遍是确定性重撞。
 	systemMoved := false
+	// commaPaused 标记本次请求是否已用「逗号层」抢救过 11-128（见 internal/prompt/comma.go）。
+	// 与 systemMoved 分开：逗号是更小的一步（system 留在原槽位），失败后才退到搬迁。
+	commaPaused := false
+	// afterToolsApplied 标记本次请求是否已做过 11153 修复（工具结果后插空 assistant，
+	// 见 internal/upstream/aftertools.go）。只做一次有意义：形态不变时重复插入无益。
+	afterToolsApplied := false
 	if h.config().PromptMode == "custom" && h.config().PromptText != "" {
 		body = prompt.Rewrite(body, h.config().PromptText)
 	} else if h.config().PromptMode == "append" && h.config().PromptText != "" && !h.degrade.Active() {
@@ -943,6 +949,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// outbound body（见循环首行）。这样既保证换号时基于**干净**基准重写 model，
 	// 又保留 prompt.Rewrite/Append 与错误降级重试对 body 的改写（降级分支会改写
 	// origBody 本身，见 ErrContentBlocked 处理）。
+	// 工具名清洗（见 upstream/toolnames.go）：上游只收 [A-Za-z0-9_-] 组成的名字，
+	// MCP/插件常见的 `server.tool`、`ns:tool` 会被整单拒。出站换成 `_`，响应再换回
+	// 客户端原名。放在 prompt 改写之后、origBody 定型之前（与轮转无关，只做一次）。
+	var toolNames map[string]string
+	body, toolNames = upstream.SanitizeToolNames(body)
+
 	origBody := body
 
 	// 会话头族（issue #35 / #170）：后台按 X-Conversation-Request-ID 聚合请求，官方
@@ -994,6 +1006,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 别名映射按账号域取值，换号必须重新改写（在已改写 body 上再改会叠加；
 		// 非别名请求由 rewriteModel 的等值短路保持零开销）。
 		body = origBody
+		// 已被上游拒绝过、加逗号才通过的 system → 本次直接带逗号发出，不再每轮
+		// （以及每个工具步）付一次拒绝。只在记忆命中时改动，未命中零开销。
+		body = prompt.PauseIfRemembered(body)
+		// 已确认需要 11153 修复的模型：发送前直接补空 assistant（形态不符则不动）。
+		body = upstream.ReplyAfterToolsIfKnown(bareModel, body)
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1318,6 +1335,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if kind == upstream.ErrAccountFault && !systemMoved &&
 				(h.config().PromptMode == "passthrough" || h.config().PromptMode == "append") &&
 				upstream.IsChannelCheck(string(respBody)) {
+				// 第一层抢救：逗号。上游按整句精确匹配已知 agent 开场白，插一个
+				// 逗号即可放行且语义不变；system 仍留在 system 槽位，比搬迁更小。
+				// 记住该 system 指纹，后续请求（含本请求换号）发送前就带逗号。
+				if !commaPaused {
+					if paused, ok := prompt.CommaPause(body); ok {
+						prompt.RememberSystemKey(prompt.SystemKey(body))
+						body = paused
+						origBody = paused
+						commaPaused = true
+						delete(tried, acct.UID)
+						releaseHeld()
+						log.Printf("WARN: [server] channel-check (system content) -> comma-paused opener, retry")
+						continue
+					}
+				}
 				if moved, ok := prompt.MoveSystemToUser(body); ok {
 					body = moved
 					// origBody 必须同步：循环首行 `body = origBody` 会以它为基准重算
@@ -1424,6 +1456,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			// 11153「the conversation must end with a user message」：某类模型
+			// （WorkBuddy AI 的 gemini 系）拒绝「工具结果后直接跟用户消息」的历史。
+			// 在两者之间插一条空 assistant 即可正常服务，属请求形态问题、与账号无关，
+			// 所以按请求级抢救，不罚号不换号白跑。
+			if !afterToolsApplied && upstream.IsAfterToolsRefused(string(respBody)) {
+				if fixed, ok := upstream.ReplyAfterTools(body); ok {
+					body = fixed
+					origBody = fixed
+					afterToolsApplied = true
+					upstream.RememberAfterTools(bareModel)
+					delete(tried, acct.UID)
+					releaseHeld()
+					log.Printf("WARN: [server] 11153 -> inserted empty assistant after tool results, retry")
+					continue
+				}
+			}
 			// 11133「Invalid request parameters」：上游对**请求本身**的拒绝（如 Kimi 系
 			// 模型要求工具 schema 里 enum 必须带 type，缺了整单 400）。同一 body 换任何
 			// 账号都会得到同一个 400 —— 轮转只会把无效请求放大 MaxRotate 倍，而
@@ -1497,11 +1545,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 组装请求上下文做判定）。
 			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
-			}), upstream.WithErrorFrameObserver(func(payload string) {
+			}), upstream.WithToolNameMap(toolNames), upstream.WithFilterRefusalHold(), upstream.WithErrorFrameObserver(func(payload string) {
 				if errFrame == "" {
 					errFrame = payload // 只处置首个 error 帧，其余照常透传
 				}
 			}))
+			// 过滤拒答：上游 200 + content_filter + 固定拒答句，StreamHint 已把帧全部
+			// 扣住（一个字节都没写给客户端），可以安全换号。不罚号——这不是账号问题。
+			if upstream.IsFilteredRefusal(sErr) {
+				fail(acct.UID)
+				st.status = http.StatusServiceUnavailable
+				lastErr = &upstream.Error{Kind: upstream.ErrContentBlocked, Msg: "the upstream safety filter refused the reply"}
+				log.Printf("WARN: [server] acct=%s model=%s: upstream safety filter refused the reply (content_filter), rotating",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
+			}
 			// 流尾三态：error 帧 → 按帧内容处置账号；空流 → 502 观测；正常结束 → 记成功。
 			// 三态互斥且只命中一个（空流无有效帧、error 帧算有效帧，故不会同时成立）。
 			switch {
@@ -1574,6 +1635,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusBadGateway
 			return
 		}
+		// 工具名回写（见 upstream/toolnames.go）：聚合后的 tool_calls 换成客户端原名。
+		upstream.RestoreToolNamesInObject(resp, toolNames)
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		// 非流式成功收口：口径与流式 default 分支对齐（见 noteChatSuccess 注释）。

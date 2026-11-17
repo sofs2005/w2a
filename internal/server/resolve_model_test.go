@@ -33,7 +33,7 @@ func TestResolveModel(t *testing.T) {
 	}{
 		{"cn:glm-5.2", "cn", "glm-5.2"},
 		{"global:gpt-5.4", "global", "gpt-5.4"},
-		{"glm-5.2", RealmUnified, "glm-5.2"}, // 裸名 → 全池（本改造核心语义）
+		{"glm-5.2", RealmUnified, "glm-5.2"},         // 裸名 → 全池（本改造核心语义）
 		{"deepseek:v3", RealmUnified, "deepseek:v3"}, // 冒号前段不在枚举内，不剥离
 	}
 	for _, c := range cases {
@@ -56,7 +56,7 @@ func TestResolveModelEdge(t *testing.T) {
 	}{
 		{"", RealmUnified, ""},
 		{":", RealmUnified, ":"},
-		{":model", RealmUnified, ":model"}, // 空前缀不匹配 cn/global，不剥离
+		{":model", RealmUnified, ":model"},             // 空前缀不匹配 cn/global，不剥离
 		{"GLOBAL:gpt-5", RealmUnified, "GLOBAL:gpt-5"}, // 大小写敏感：不做归一
 		{"global:", "global", ""},                      // 前缀合法 + 空裸名仍剥离
 		{"global:gpt-5.4", "global", "gpt-5.4"},
@@ -81,10 +81,10 @@ func TestResolveModelUnifiedRoutingOff(t *testing.T) {
 		wantRealm string
 		wantBare  string
 	}{
-		{"glm-5.2", "cn", "glm-5.2"},                  // 裸名 → cn（旧语义）
-		{"deepseek:v3", "cn", "deepseek:v3"},          // 未知前缀同样回落 cn
-		{"cn:glm-5.2", "cn", "glm-5.2"},               // 钉域不受开关影响
-		{"global:gpt-5.4", "global", "gpt-5.4"},       // 钉域不受开关影响
+		{"glm-5.2", "cn", "glm-5.2"},            // 裸名 → cn（旧语义）
+		{"deepseek:v3", "cn", "deepseek:v3"},    // 未知前缀同样回落 cn
+		{"cn:glm-5.2", "cn", "glm-5.2"},         // 钉域不受开关影响
+		{"global:gpt-5.4", "global", "gpt-5.4"}, // 钉域不受开关影响
 	}
 	for _, c := range cases {
 		realm, bare := resolveModel(c.in)
@@ -127,7 +127,7 @@ func TestResolveRouteNoAlias(t *testing.T) {
 }
 
 // TestResolveRouteAliasDualRealm 双域别名：对外名改写生效，候选域不收窄
-//（两域都能承接），出站名按账号域各取一侧。
+// （两域都能承接），出站名按账号域各取一侧。
 func TestResolveRouteAliasDualRealm(t *testing.T) {
 	SetUnifiedRouting(true)
 	t.Cleanup(func() { SetUnifiedRouting(true) })
@@ -239,4 +239,3 @@ func TestRouteOutboundUsesSnapshot(t *testing.T) {
 		t.Errorf("双域别名候选域应保持全池（快照口径）: %v", r.CandidateRealms())
 	}
 }
-

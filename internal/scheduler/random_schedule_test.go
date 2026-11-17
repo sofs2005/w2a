@@ -77,6 +77,7 @@ func TestScheduledScriptsReceiveAccountRangeOnlyOnAutomaticEntry(t *testing.T) {
 		t.Fatalf("scheduled cat flags missing: %v", f.lastArgs)
 	}
 }
+
 // spacingBatchCommand 记录脚本并发度：配了账号间隔时同槽任务必须串行。
 type spacingBatchCommand struct{ active, maximum, calls *atomic.Int32 }
 

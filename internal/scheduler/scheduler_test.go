@@ -658,28 +658,28 @@ func TestCheckinAllReenablesCoolingAccount(t *testing.T) {
 // 老 CN 文件（空 domain，无 realm 键）→ cn；再次 refresh 不改变已补的标识（幂等）。
 func TestRunKeepaliveBackfillsRealm(t *testing.T) {
 	cases := []struct {
-		name       string
-		fixture    string
-		filename   string
-		wantRealm  string
+		name      string
+		fixture   string
+		filename  string
+		wantRealm string
 	}{
 		{
-			name: "老 global 落盘补 global",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`,
-			filename:   "workbuddy-g1.json",
-			wantRealm:  "global",
+			name:      "老 global 落盘补 global",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai"},"account":{"uid":"g1"}}`,
+			filename:  "workbuddy-g1.json",
+			wantRealm: "global",
 		},
 		{
-			name: "老 CN 空 domain 落盘补 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"c1"}}`,
-			filename:   "workbuddy-c1.json",
-			wantRealm:  "cn",
+			name:      "老 CN 空 domain 落盘补 cn",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":""},"account":{"uid":"c1"}}`,
+			filename:  "workbuddy-c1.json",
+			wantRealm: "cn",
 		},
 		{
-			name: "已有 realm 不被覆盖——global domain 显式 cn 保持 cn",
-			fixture: `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai","realm":"cn"},"account":{"uid":"c2"}}`,
-			filename:   "workbuddy-c2.json",
-			wantRealm:  "cn",
+			name:      "已有 realm 不被覆盖——global domain 显式 cn 保持 cn",
+			fixture:   `{"auth":{"accessToken":"old","refreshToken":"rt","expiresAt":1,"domain":"www.workbuddy.ai","realm":"cn"},"account":{"uid":"c2"}}`,
+			filename:  "workbuddy-c2.json",
+			wantRealm: "cn",
 		},
 	}
 	for _, c := range cases {

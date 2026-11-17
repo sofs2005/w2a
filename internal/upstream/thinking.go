@@ -23,6 +23,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"strings"
 )
 
@@ -30,6 +31,43 @@ import (
 // REASONING_SUPPLEMENTS.defaultEffort 亦为 "high"）。补入后走 normalizeReasoningEffort 降级管线，
 // 模型不支持 high 时自动落到 ≤high 的最高支持档。
 const defaultDeepSeekEffort = "high"
+
+// smallReasoningBudget 小预算闸：输出上限 ≤ 该值时**不补**默认思考档。
+//
+// 依据（社区实测 2026-11-03，www.workbuddy.ai，deepseek-v4.1-flash-sg 默认 high）：
+// max_tokens=64 的请求把 64 个 token 全烧在思考上、finish_reason=length、正文为空；
+// 不带 effort 时同一请求正常返回标题。Anthropic 的 Messages 也不接受 1024 以下预算里的
+// thinking，说明这么小的预算没有客户端是想思考的——典型来源是会话标题、分类这类
+// 短请求。只闸「默认档」：客户端显式给了 reasoning_effort/thinking 的仍然尊重。
+const smallReasoningBudget = 1024
+
+// outputBudget 取请求的输出上限（max_tokens 优先，OpenAI 别名 max_completion_tokens 兜底）。
+// 缺失/非正数/非数值 → 0（视为未声明预算，闸门放行）。
+func outputBudget(obj map[string]any) int64 {
+	for _, k := range []string{"max_tokens", "max_completion_tokens"} {
+		if v, ok := obj[k]; ok {
+			switch n := v.(type) {
+			case float64:
+				if n > 0 {
+					return int64(n)
+				}
+			case int:
+				if n > 0 {
+					return int64(n)
+				}
+			case int64:
+				if n > 0 {
+					return n
+				}
+			case json.Number:
+				if x, err := n.Int64(); err == nil && x > 0 {
+					return x
+				}
+			}
+		}
+	}
+	return 0
+}
 
 // lookupDefaultEffort 从 FetchModels 缓存的 defaultEfforts 表按模型名查默认档。
 // nil map 或模型未缓存 → 空串（thinking.go 回退硬编码 high）。
@@ -195,6 +233,10 @@ func ensureDeepSeekEffort(obj map[string]any, defaultEffort string) {
 	}
 	_, hasCamel := obj["reasoningEffort"]
 	if hasCamel {
+		return
+	}
+	// 小预算闸（见 smallReasoningBudget）：只拦默认档，不拦显式档位。
+	if b := outputBudget(obj); b > 0 && b <= smallReasoningBudget {
 		return
 	}
 	if defaultEffort == "" {

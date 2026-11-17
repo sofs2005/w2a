@@ -316,6 +316,18 @@ type ChatMeta struct {
 // clientIP 为本次请求的客户端 IP（按参数传递，不读共享字段——避免并发串扰）；
 // PassthroughIP=false 或 clientIP 为空时不注入 IP 头。
 // meta 为会话头族元数据（CN/global 同构，纯新增，不改既有头），见 injectConversationHeaders。
+// applyAPIKeyHeader 给 API Key 账号补上官方 CLI 的 key 形态：X-API-Key 与 Bearer
+// 都是同一个 key，且**不带 X-Domain**（key 会话没有登录域）。只在 key 账号上生效。
+func applyAPIKeyHeader(req *http.Request, a *auth.Auth) {
+	if a == nil || !a.IsAPIKey() {
+		return
+	}
+	if k := a.APIKeyValue(); k != "" {
+		req.Header.Set("X-API-Key", k)
+	}
+	req.Header.Del("X-Domain")
+}
+
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
 	c.CommonHeaders(req, a)
 	// Accept 不覆盖。官方 SDK 的 buildHeaders 固定 `Accept: application/json`
@@ -350,6 +362,9 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	} else {
 		c.injectGlobalChatHeaders(req, a)
 	}
+	// API Key 账号的 key 形态（X-API-Key、无 X-Domain）放在域/企业头之后，
+	// 保证它覆盖上面的 X-Domain。
+	applyAPIKeyHeader(req, a)
 	// 用量归属头：真实桌面端发 X-Agent-Purpose="conversation" + X-IDE-Name/Type/X-Product
 	// 识别 client，避免上游用量统计里 client/agentPurpose 为空。来源 xiaofan6ya/converter.py。
 	// 默认（ClientName 空）即伪造 WorkBuddy 桌面端头组（见 injectAttribution）；

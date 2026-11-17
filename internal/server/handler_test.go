@@ -2471,7 +2471,7 @@ func TestContentBlockedCustomIgnoresActiveDegrade(t *testing.T) {
 }
 
 // TestStaleSnapshotBoundedByPickGate 粘性快照陈旧被 Pick 闸兜底的契约锚
-//（pr134-watchlist-analysis.md #10）：
+// （pr134-watchlist-analysis.md #10）：
 // session.ResolveForModel 在取任何锁之前拿 pool 可用性快照——若快照后、Pick 前
 // 粘性号 A 被冷却（快照陈旧判 available），Session 层仍会返回 A 作为建议 uid；
 // 但真正的可用性权威闸是 handler 的 Pool.PickByUIDForModel（锁内新鲜判定

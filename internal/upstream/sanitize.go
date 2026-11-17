@@ -19,10 +19,10 @@ var sanitizeFeatures = []string{
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
 	"Main branch (",              // 注入指令句（截断前缀即可命中）
 	"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-	"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-	"11128",                      // 上游反探测：裸数字错误码
-	"workspace root",         // DSH file-reference 提示词（上游 2026-10-27 新增词）
-	"Tokens prefixed with @", // DSH file-reference 首句（上游 2026-10-28 新增词，issue #321）
+	"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+	"11128",                                           // 上游反探测：裸数字错误码
+	"workspace root",                                  // DSH file-reference 提示词（上游 2026-10-27 新增词）
+	"Tokens prefixed with @",                          // DSH file-reference 首句（上游 2026-10-28 新增词，issue #321）
 }
 
 // sanitizeExtraFeatures 运行期从 config 追加的特征串（features.sanitize_extra_features）。
@@ -188,8 +188,89 @@ const sanitizeDshRepl = "You are a helpful AI assistant.${1}"
 // 且该短语只出现在被拦段落内，不会误伤正常对话。实测改写后上游放行。
 var sanitizeDshGuiRe = regexp.MustCompile(`(?i)DeepSeek Harness Web GUI`)
 
-// sanitizeDshGuiRepl 替换串：保留品牌可读性，仅插入一个连字符。
-const sanitizeDshGuiRepl = "DeepSeek-Harness Web GUI"
+// sanitizeDshGuiRepl 替换串：把品牌名整个拿掉（而不是只插连字符）。
+// 依据：社区记录过账号因「DSH 内置提示词被识别」被封（回复里腾讯认出了 dsh 的
+// 内置 prompt）。只插连字符能让当前这条 11128 检查放行，但名字仍在正文里；整个
+// 去掉既破匹配、也断掉「靠名字识别 harness」的后续检查，语义仍是同一个界面。
+const sanitizeDshGuiRepl = "Web GUI"
+
+// DSH 自述句的另外两种形态（社区实测整理），与上面的开场白同级处理。
+var sanitizeDshLines = []struct{ from, to string }{
+	{"DeepSeek Harness implementation checkout", "agent implementation checkout"},
+	{"DSH itself", "the agent itself"},
+}
+
+// dshProseNames 是「散文中出现的 harness 名」。只在 system/developer 消息与工具
+// 描述里替换——那是 DSH 自己写的派生文本；用户/助手的话语里同名字样可能是用户
+// 自己的词（社区实案：用户要 "/root/DSH/Work/" 逐字路径，被改写成了
+// "/root/the agent harness/Work/"）。路径、文件名、标识符（DSH_HOME、~/.dsh、
+// dsh-session:）一律不动，大小写敏感（小写 dsh 专指命令/路径）。
+var dshProseNames = []string{"DeepSeek Harness", "DSH"}
+
+// isDshPathBefore 判断名字**前面**的字节是否让它成为路径/标识符的一部分。
+// 前面的 '.' 也算（./DSH、/root/DSH 这类）。
+func isDshPathBefore(b byte) bool {
+	return isDshWordByte(b) || b == '_' || b == '/' || b == '\\' || b == '.' ||
+		b == '~' || b == ':' || b == '@' || b == '-'
+}
+
+// isDshPathAfter 判断名字**后面**的字节是否让它成为路径/标识符的一部分。
+// 这里的 '.' 单独不算（句号很常见），只有「. + 词字符」才算文件名（DSH.md）。
+func isDshPathAfter(b byte) bool {
+	return isDshWordByte(b) || b == '/' || b == '\\' || b == '@' || b == '-'
+}
+
+func isDshWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_'
+}
+
+// hideDshProse 把散文中出现的 harness 名换成 "the agent harness"：
+//   - 前面紧邻路径字符（/ \ . ~ : @ - 或字母数字下划线）→ 是路径/标识符，不动；
+//   - 后面紧邻同类字符，或是「. + 词字符」（DSH.md 这类文件名）→ 不动；
+//   - 前面已有 "the " → 只替换名字本体，避免 "the the agent harness"。
+func hideDshProse(text string) string {
+	for _, name := range dshProseNames {
+		text = replaceDshProseName(text, name)
+	}
+	return text
+}
+
+func replaceDshProseName(s, name string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		j := strings.Index(s[i:], name)
+		if j < 0 {
+			b.WriteString(s[i:])
+			break
+		}
+		j += i
+		end := j + len(name)
+		beforeOK := j == 0 || !isDshPathBefore(s[j-1])
+		afterOK := end >= len(s) || (!isDshPathAfter(s[end]) &&
+			!(s[end] == '.' && end+1 < len(s) && isDshWordByte(s[end+1])))
+		if !beforeOK || !afterOK {
+			b.WriteString(s[i:end]) // 原样保留并越过，避免原地死循环
+			i = end
+			continue
+		}
+		// 前置冠词：已经有 "the " 就不再补一个。
+		keep := s[i:j]
+		if strings.HasSuffix(keep, "the ") {
+			b.WriteString(strings.TrimSuffix(keep, "the "))
+			b.WriteString("the agent harness")
+		} else if strings.HasSuffix(keep, "The ") {
+			b.WriteString(strings.TrimSuffix(keep, "The "))
+			b.WriteString("The agent harness")
+		} else {
+			b.WriteString(keep)
+			b.WriteString("the agent harness")
+		}
+		i = end
+	}
+	return b.String()
+}
 
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
@@ -211,6 +292,10 @@ func sanitizeText(text string) string {
 	text = sanitizeDshRe.ReplaceAllString(text, sanitizeDshRepl)
 	// DSH Web GUI 段落：上游按「跨两句的连续文本」拦截，必须动品牌短语才拆得开。
 	text = sanitizeDshGuiRe.ReplaceAllString(text, sanitizeDshGuiRepl)
+	// DSH 其余自述句（同属 DSH 自己写的行，任何角色里出现都可以安全改写）。
+	for _, ln := range sanitizeDshLines {
+		text = strings.ReplaceAll(text, ln.from, ln.to)
+	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
 	}
@@ -263,15 +348,33 @@ func hasFingerprint(text string) bool {
 	if sanitizeDshGuiRe.MatchString(text) {
 		return true
 	}
+	// DSH 其余自述句：同样必须在预检里认，否则改写层执行不到。
+	for _, ln := range sanitizeDshLines {
+		if strings.Contains(text, ln.from) {
+			return true
+		}
+	}
 	return sanitizeBareHdrRe.MatchString(text)
+}
+
+// sanitizeTextCtx 是 sanitizeText 的上下文感知版本：prose=true 表示这段文本是
+// harness 自己写的（system/developer 消息、工具描述），其中散文里出现的 harness
+// 名也一并拿掉；用户与助手的话语只走 sanitizeText 的既有规则，不替换裸名字
+// （见 hideDshProse 的路径/标识符保护与改名理由）。
+func sanitizeTextCtx(text string, prose bool) string {
+	text = sanitizeText(text)
+	if prose {
+		text = hideDshProse(text)
+	}
+	return text
 }
 
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
 // 返回净化后的值及是否发生变化。
-func sanitizeContent(v any) (any, bool) {
+func sanitizeContent(v any, prose bool) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeText(c)
+		s := sanitizeTextCtx(c, prose)
 		return s, s != c
 	case []any:
 		changed := false
@@ -284,7 +387,7 @@ func sanitizeContent(v any) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeText(text); s != text {
+			if s := sanitizeTextCtx(text, prose); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -338,8 +441,13 @@ func sanitizeMessages(messages []any) bool {
 		}
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
+		// prose：system/developer 是 harness 自己写的文本，裸 harness 名一并拿掉；
+		// 用户/助手/tool 只走既有规则（不替用户改词）。
+		role, _ := m["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+		prose := role == "system" || role == "developer"
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c); ch {
+			if nc, ch := sanitizeContent(c, prose); ch {
 				m["content"] = nc
 				changed = true
 			}
@@ -367,6 +475,40 @@ func sanitizeMessages(messages []any) bool {
 		}
 		if tc, ok := m["tool_calls"]; ok {
 			if sanitizeToolCalls(tc) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// sanitizeToolDescriptions 净化 tools[].function.description 与 tools[].description。
+//
+// 工具描述是 harness 自己写的文本，上游的「识别内置提示词」检查会连它一起看；
+// 用户/助手话语不动（同 sanitizeTextCtx 的分工）。工具名与参数结构不在这里改——
+// 那是 fitTools 的职责（见 payload.go）。
+func sanitizeToolDescriptions(obj map[string]any) bool {
+	tools, ok := obj["tools"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range tools {
+		t, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fn, ok := t["function"].(map[string]any); ok {
+			if d, ok := fn["description"].(string); ok {
+				if s := sanitizeTextCtx(d, true); s != d {
+					fn["description"] = s
+					changed = true
+				}
+			}
+		}
+		if d, ok := t["description"].(string); ok {
+			if s := sanitizeTextCtx(d, true); s != d {
+				t["description"] = s
 				changed = true
 			}
 		}

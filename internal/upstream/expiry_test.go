@@ -176,7 +176,7 @@ func TestExpiryDirtyCycleEndTimeFallsBack(t *testing.T) {
 	deduction := now.Add(3 * 24 * time.Hour)
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
-			`{"PackageName":"脏周期","CycleEndTime":"not-a-time","DeductionEndTime":`+itoa(deduction.UnixMilli())+`,"CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20}`), nil
+			`{"PackageName":"脏周期","CycleEndTime":"not-a-time","DeductionEndTime":` + itoa(deduction.UnixMilli()) + `,"CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20}`), nil
 	})
 	_, buckets, expiries, err := c.UserResourceExpiry(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
 	if err != nil {

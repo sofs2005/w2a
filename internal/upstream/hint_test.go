@@ -133,9 +133,9 @@ func TestGatewayHintImageForms(t *testing.T) {
 // 字符串形态 + extError 深层 marker + displayMsg 文案家族。
 func TestGatewayHintMarkerTolerance(t *testing.T) {
 	variants := []string{
-		body11133,                                                     // 实测原始 body
-		`{"code":"11133","msg":"..."}`,                                // code 字符串形态
-		`{"extError":{"code":"model_param_invalid"}}`,                 // extError 深层 marker
+		body11133,                      // 实测原始 body
+		`{"code":"11133","msg":"..."}`, // code 字符串形态
+		`{"extError":{"code":"model_param_invalid"}}`,                                 // extError 深层 marker
 		`{"msg":"The request parameters do not meet the current model requirements"}`, // displayMsg en 文案
 	}
 	for _, v := range variants {
@@ -144,7 +144,7 @@ func TestGatewayHintMarkerTolerance(t *testing.T) {
 		}
 	}
 	v11135 := []string{
-		body11135,                                     // 实测原始 body
+		body11135, // 实测原始 body
 		`{"extError":{"code":"invalid_image_data"}}`, // extError 深层 marker
 	}
 	for _, v := range v11135 {

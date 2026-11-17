@@ -35,6 +35,54 @@ var errTruncatedStream = errors.New("upstream stream ended before completion")
 // 告知客户端的义务由 StreamHint 在 [DONE] 之前插入的 error 帧承担。
 func IsTruncatedStreamError(err error) bool { return errors.Is(err, errTruncatedStream) }
 
+// errFilteredRefusal 上游安全过滤把整段回复换成了固定拒答：
+// 200 + finish_reason=content_filter + 正文恰好是过滤器的固定句（且无输出 token）。
+// 关键区别：这是**拒答**，不是「模型没说话」。StreamHint 在 WithFilterRefusalHold
+// 下会把这类回复的帧全部扣住、一个字节都不写出，调用方可以安全地换号重试。
+var errFilteredRefusal = errors.New("upstream reply was the safety filter's refusal")
+
+// IsFilteredRefusal 报告错误是否为「过滤拒答」。见 contentFilterSays。
+func IsFilteredRefusal(err error) bool { return errors.Is(err, errFilteredRefusal) }
+
+// contentFilterSays 是上游安全过滤拒答的固定文本（社区 2026-10 实测，CN 域）。
+// 上游会在前后各加一个换行，比较时忽略空白与弯引号。
+var contentFilterSays = []string{"Sorry, I can't respond to this question."}
+
+// filterPrefix 报告 text 到目前为止是否仍可能是过滤拒答句的前缀（含空白）。
+func filterPrefix(text string) bool {
+	t := strings.TrimSpace(strings.ReplaceAll(text, "’", "'"))
+	for _, s := range contentFilterSays {
+		if strings.HasPrefix(s, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterFrameInfo 提取一帧里与过滤判定有关的三件事。
+func filterFrameInfo(obj map[string]any) (text string, calls bool, finish string) {
+	chs, _ := obj["choices"].([]any)
+	if len(chs) == 0 {
+		return "", false, ""
+	}
+	c, _ := chs[0].(map[string]any)
+	if c == nil {
+		return "", false, ""
+	}
+	if d, ok := c["delta"].(map[string]any); ok {
+		if s, ok := d["content"].(string); ok {
+			text = s
+		}
+		if tcs, ok := d["tool_calls"].([]any); ok && len(tcs) > 0 {
+			calls = true
+		}
+	}
+	if f, ok := c["finish_reason"].(string); ok {
+		finish = f
+	}
+	return text, calls, finish
+}
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -495,6 +543,22 @@ type StreamOption func(*streamOptions)
 
 type streamOptions struct {
 	onErrorFrame func(payload string)
+	toolNames    map[string]string
+	filterHold   bool
+}
+
+// WithFilterRefusalHold 打开「过滤拒答扣留」：回复的正文在仍是过滤拒答句前缀期间
+// 不向客户端写出；若整段回复就是那句拒答（finish_reason=content_filter），
+// StreamHint 返回 IsFilteredRefusal 错误且**没有写出任何字节**，调用方可以安全换号。
+// 第一个不属于该句的字符到达时立即释放，正常回复不受延迟影响。
+func WithFilterRefusalHold() StreamOption {
+	return func(o *streamOptions) { o.filterHold = true }
+}
+
+// WithToolNameMap 注册「安全名 → 客户端原名」的映射：上游响应里被改名的工具调用
+// （见 toolnames.go）在透传前换回客户端的名字。nil/空映射 → 零开销。
+func WithToolNameMap(names map[string]string) StreamOption {
+	return func(o *streamOptions) { o.toolNames = names }
 }
 
 // WithErrorFrameObserver 注册「上游以 error 帧报错」的观察者：该帧透传之前先以
@@ -532,6 +596,22 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
 	toolCallSeen := map[int]bool{}
+
+	// 过滤拒答扣留（WithFilterRefusalHold）：filterOpen 期间所有帧只进 held，
+	// 一个字节都不写；正文一旦不再是拒答句前缀，立即把 held 与当前帧一起写出。
+	filterOpen := o.filterHold
+	filterRefused := false
+	var filterSaid strings.Builder
+	var held []string
+	writeHeld := func() error {
+		for _, s := range held {
+			if _, err := io.WriteString(w, s); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return nil
+	}
 
 	// reasoningBackfill 的整轮状态（issue #135）：是否出现过正文 / 工具调用，
 	// 以及思考通道累积的原文。收尾时若两者都没有而思考有内容，补发一帧正文。
@@ -600,6 +680,14 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			if _, hasErr := obj["error"]; hasErr {
+				// 拒答扣留期间出现 error 帧：先把扣住的正常帧按序放出，否则错误帧
+				// 会插到它们前面（顺序反转）。
+				if filterOpen {
+					filterOpen = false
+					if werr := writeHeld(); werr != nil {
+						return 0, werr
+					}
+				}
 				// 已进入收尾段：先把缓冲的收尾帧发出去，再发错误帧，避免顺序反转。
 				if werr := flushTail(); werr != nil {
 					return 0, werr
@@ -638,6 +726,11 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 					}
 				}
 			}
+			// 工具名回写：出站前被改成合法名的调用，在客户端看到之前换回原名
+			// （见 toolnames.go；空映射零开销）。
+			if len(o.toolNames) > 0 {
+				RestoreToolNamesInObject(obj, o.toolNames)
+			}
 			// 先按 index 收敛 tool_calls name（每 index 仅首片保留，后续分片删 name 键），再规范化透传。
 			stripToolCallNames(obj, toolCallSeen)
 			// id 续传：首帧非空真实 id 缓存；后续帧缺 id / 空 id 一律用缓存值，
@@ -655,6 +748,35 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 				payload = string(raw)
 			}
 			valid = 1
+			// 过滤拒答判定（见 contentFilterSays）：只认正文仍是拒答句前缀的形态。
+			if filterOpen {
+				text, calls, finish := filterFrameInfo(obj)
+				switch {
+				case calls || (text != "" && !filterPrefix(filterSaid.String()+text)):
+					// 出现了真正的正文/工具调用 → 不是拒答，释放。
+					filterOpen = false
+					filterRefused = false
+					if werr := writeHeld(); werr != nil {
+						return 0, werr
+					}
+				case finish == "content_filter":
+					// 整段回复就是拒答：扣住不放，收尾时返回哨兵错误供换号。
+					filterSaid.WriteString(text)
+					filterRefused = true
+					return 1, nil
+				case finish != "":
+					// 正常收尾（stop/length/tool_calls）→ 释放。
+					filterOpen = false
+					filterRefused = false
+					if werr := writeHeld(); werr != nil {
+						return 0, werr
+					}
+				default:
+					filterSaid.WriteString(text)
+					held = append(held, "data: "+payload+"\n\n")
+					return 1, nil
+				}
+			}
 			// 收尾观测：出现过 finish_reason 即算上游正常收了尾（与开关无关）。
 			if frameHasFinish(obj) {
 				sawFinish = true
@@ -695,7 +817,11 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
+			// 注释/其他行：原样透传；拒答扣留期间一并扣住（否则会提前写出响应头）。
+			if filterOpen {
+				held = append(held, line)
+				break
+			}
 			if _, werr := io.WriteString(w, line); werr != nil {
 				return werr
 			}
@@ -709,6 +835,16 @@ readLoop:
 				break
 			}
 			return err
+		}
+	}
+	// 收尾处理拒答扣留：仍是拒答 → 一个字节都没写，返回哨兵错误供调用方换号；
+	// 否则（例如流没有 finish_reason 就结束）把扣住的帧按原顺序补发。
+	if filterOpen {
+		if filterRefused {
+			return errFilteredRefusal
+		}
+		if werr := writeHeld(); werr != nil {
+			return werr
 		}
 	}
 	// 空流（0 有效帧）：先写一帧 error（绕过 normalizeFrame 原样保留 error 字段），

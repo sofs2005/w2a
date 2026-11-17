@@ -738,9 +738,9 @@ func TestModelsDevNegativesReStampBlocksEviction(t *testing.T) {
 // model.json 不可复现覆盖）。
 func TestParseModelsDevDocTieBreakDeterministic(t *testing.T) {
 	raw := fakeModelsDevDoc(map[string]map[string][2]int64{
-		"agg-a": {"kimi-k3": {1000000, 131072}},
-		"agg-b": {"kimi-k3": {1000000, 131072}},
-		"agg-c": {"kimi-k3": {1000000, 131072}},
+		"agg-a":    {"kimi-k3": {1000000, 131072}},
+		"agg-b":    {"kimi-k3": {1000000, 131072}},
+		"agg-c":    {"kimi-k3": {1000000, 131072}},
 		"z-vendor": {"kimi-k3": {200000, 131072}},
 		"y-vendor": {"kimi-k3": {200000, 131072}},
 		"a-vendor": {"kimi-k3": {200000, 131072}},

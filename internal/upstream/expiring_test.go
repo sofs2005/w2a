@@ -102,8 +102,8 @@ func TestUserResourceDetailedExpiringBucketFromCycleEndTime(t *testing.T) {
 	in30d := now.Add(30 * 24 * time.Hour).Format(packageEndLayout)
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
-			`{"PackageName":"奖励包","CycleEndTime":"`+in3d+`","CycleCapacitySize":1500,"CycleCapacityRemain":1200,"CycleCapacityUsed":300},`+
-				`{"PackageName":"周期包","CycleEndTime":"`+in30d+`","CycleCapacitySize":500,"CycleCapacityRemain":300,"CycleCapacityUsed":200}`), nil
+			`{"PackageName":"奖励包","CycleEndTime":"` + in3d + `","CycleCapacitySize":1500,"CycleCapacityRemain":1200,"CycleCapacityUsed":300},` +
+				`{"PackageName":"周期包","CycleEndTime":"` + in30d + `","CycleCapacitySize":500,"CycleCapacityRemain":300,"CycleCapacityUsed":200}`), nil
 	})
 	remain, buckets, err := c.UserResourceDetailed(&auth.Auth{AccessToken: "at"}, 7*24*time.Hour)
 	if err != nil {
@@ -147,9 +147,9 @@ func TestUserResourceDetailedTotalMatchesLegacy(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return mkDetailedResp(
 			// 形态 1：纯 Cycle 活跃（当天有消耗，R-C 实测只扣 Cycle 字段）。
-			`{"PackageName":"体验版","CycleCapacitySize":500,"CycleCapacityRemain":17,"CycleCapacityUsed":482,"CapacitySize":500,"CapacityRemain":500,"CapacityUsed":0},`+
+			`{"PackageName":"体验版","CycleCapacitySize":500,"CycleCapacityRemain":17,"CycleCapacityUsed":482,"CapacitySize":500,"CapacityRemain":500,"CapacityUsed":0},` +
 				// 形态 2：Cycle 三零（从未使用）→ 回退 Capacity。
-				`{"PackageName":"未使用","CapacitySize":300,"CapacityRemain":300,"CapacityUsed":0},`+
+				`{"PackageName":"未使用","CapacitySize":300,"CapacityRemain":300,"CapacityUsed":0},` +
 				// 形态 3：status=3 已结束裂变包（Cycle/Capacity 全套 0/100/100）。
 				`{"PackageName":"已结束","CycleCapacitySize":100,"CycleCapacityRemain":0,"CycleCapacityUsed":100,"CapacitySize":100,"CapacityRemain":0,"CapacityUsed":100}`), nil
 	})

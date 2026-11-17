@@ -97,10 +97,10 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		auth    string
-		cfg     string
-		want    string
+		name string
+		auth string
+		cfg  string
+		want string
 	}{
 		{"auth_over_config", "tok-auth", "tok-config", "tok-auth"},
 		{"config_when_auth_empty", "", "tok-config", "tok-config"},
@@ -120,11 +120,11 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := &Client{
-				HTTP:           srv.Client(),
-				ChatHTTP:       srv.Client(),
-				ChatBaseCN:     srv.URL,
-				BillingBaseCN:  srv.URL,
-				DeviceToken:    tc.cfg,
+				HTTP:            srv.Client(),
+				ChatHTTP:        srv.Client(),
+				ChatBaseCN:      srv.URL,
+				BillingBaseCN:   srv.URL,
+				DeviceToken:     tc.cfg,
 				DeviceTokenFile: fp,
 			}
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/report", nil)

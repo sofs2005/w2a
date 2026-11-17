@@ -868,7 +868,7 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		// 「企业账号不支持该操作」（见 auth.IsEnterprise 实测注释）。与 IsGlobal 正交
 		// （企业版 realm 可能 cn 也可能 global），必须单独判；不跳过则每天空发一次
 		// 注定失败的调用并刷 WARN。
-		if a.IsEnterprise() {
+		if a.IsEnterprise() || a.IsAPIKey() {
 			oc.Status, oc.Detail = CheckinSkipped, "enterprise"
 			skipN++
 			log.Printf("checkin %s: skip (enterprise account)", logfmt.Label(st.UID, st.Nickname))
@@ -1021,6 +1021,11 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		if a == nil || a.AccessTokenValue() == "" {
 			continue
 		}
+		// API Key 账号没有个人成长体系（key 会话不计成长任务），活跃上报对它只会
+		// 换来 401/403；直接跳过（与签到/旅行同一门控口径）。
+		if a.IsAPIKey() {
+			continue
+		}
 		// global 账号同样上报（PR #45 实测国际版 /v2/report 在 workbuddy.ai 上 code=0 OK，
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
@@ -1124,7 +1129,7 @@ func (s *Scheduler) claimGrowthRewards(a *auth.Auth) {
 	// 企业版一律 403「growth system is only available for personal users」或
 	// 400 code 10001「企业账号不支持该操作」（见 auth.IsEnterprise 实测注释）。
 	// 与 realm 正交，须单独判——否则每趟都白跑一轮注定失败的领取链。
-	if a.IsEnterprise() {
+	if a.IsEnterprise() || a.IsAPIKey() {
 		return
 	}
 	if s.growthUnavailableToday(a.UID) {
@@ -1365,7 +1370,7 @@ func (s *Scheduler) openBuddyBoxes(a *auth.Auth) {
 		return
 	}
 	// 企业版门控：成长体系端点对个人版之外一律拒绝（见 auth.IsEnterprise 实测注释）。
-	if a.IsEnterprise() {
+	if a.IsEnterprise() || a.IsAPIKey() {
 		return
 	}
 	label := logfmt.Label(a.UID, a.Nickname)

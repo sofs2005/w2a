@@ -31,7 +31,7 @@ func TestFilterProOnlyModels_Global(t *testing.T) {
 	defaults := map[string]string{"glm-5.2": "high", "gpt-6-sol": "low", "grok-4.7": "high"}
 
 	gotNames, gotInfos, gotEfforts, gotDefaults := filterProOnlyModels(
-		parseV3ModelTiers([]byte(`{"data":{"modelTiers":` + proOnlyTiersGlobal + `}}`)),
+		parseV3ModelTiers([]byte(`{"data":{"modelTiers":`+proOnlyTiersGlobal+`}}`)),
 		names, infos, efforts, defaults)
 
 	if len(gotNames) != 2 || gotNames[0] != "glm-5.2" || gotNames[1] != "kimi-k3" {
@@ -67,7 +67,7 @@ func TestFilterProOnlyModels_CNTierNotFiltered(t *testing.T) {
 	infos := []ModelInfo{{ID: "glm-5.3"}, {ID: "glm-5.3-flash"}, {ID: "kimi-k2.8-preview"}, {ID: "hy3"}}
 
 	gotNames, gotInfos, _, _ := filterProOnlyModels(
-		parseV3ModelTiers([]byte(`{"data":{"modelTiers":` + priorityTiersCN + `}}`)),
+		parseV3ModelTiers([]byte(`{"data":{"modelTiers":`+priorityTiersCN+`}}`)),
 		names, infos, nil, nil)
 
 	if len(gotNames) != 4 {

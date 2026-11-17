@@ -101,6 +101,43 @@ func TestInjectThinkingDefaultEffort(t *testing.T) {
 	}
 }
 
+// TestInjectThinkingSmallBudgetNoDefaultEffort 小预算（≤1024 输出）不补默认格局：
+// 64 token 的标题/分类请求若补 high，会把预算全烧在思考上、正文为空（社区实测）。
+// 显式档位不受闸门影响；1025 起照常补默认档。
+func TestInjectThinkingSmallBudgetNoDefaultEffort(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantEff string // 空串 = 不应出现 reasoning_effort
+	}{
+		{"max_tokens=64", `{"model":"deepseek-v4-flash","max_tokens":64,"messages":[]}`, ""},
+		{"max_tokens=1024", `{"model":"deepseek-v4-flash","max_tokens":1024,"messages":[]}`, ""},
+		{"max_tokens=1025", `{"model":"deepseek-v4-flash","max_tokens":1025,"messages":[]}`, "high"},
+		{"alias max_completion_tokens=64", `{"model":"deepseek-v4-flash","max_completion_tokens":64,"messages":[]}`, ""},
+		{"显式档位 + 小预算", `{"model":"deepseek-v4-flash","max_tokens":64,"reasoning_effort":"low","messages":[]}`, "low"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := PrepareBodyOptWithEfforts([]byte(c.body), false, nil)
+			eff, ok := objFieldString(t, out, "reasoning_effort")
+			switch c.wantEff {
+			case "":
+				if ok {
+					t.Errorf("小预算不该补默认档, got %q (out=%s)", eff, out)
+				}
+			default:
+				if !ok || eff != c.wantEff {
+					t.Errorf("reasoning_effort=%q ok=%v want %q (out=%s)", eff, ok, c.wantEff, out)
+				}
+			}
+			// thinking 开关本身不受小预算影响（上游把它当解析位，不产生思考就没有副作用）。
+			if typ, present := getThinkingType(t, out); !present || typ != "enabled" {
+				t.Errorf("thinking.type=%q present=%v want enabled (out=%s)", typ, present, out)
+			}
+		})
+	}
+}
+
 // TestInjectThinkingEffortNotOverridden 已有显式 reasoning_effort（snake/camel）
 // 一律不覆盖、不降级、不删除；降级由 normalizeReasoningEffort 单独负责。
 func TestInjectThinkingEffortNotOverridden(t *testing.T) {

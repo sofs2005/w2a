@@ -36,7 +36,11 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// APIKey 是 WorkBuddy 的 API Key 账号（auth 文件顶层 apiKey / api_key）。
+	// 这类账号没有 OAuth token：key 同时作为 Bearer 与 X-API-Key 发送，UID 为
+	// anonymous_<末 8 位>，无 domain、无续期、无个人成长体系（见 IsAPIKey）。
+	APIKey   string
+	FilePath string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
@@ -277,6 +281,16 @@ func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 // Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写，EnterpriseID 不会。
 func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
 
+// IsAPIKey 报告账号是否是 API Key 账号（无 OAuth token、不续期、无成长体系）。
+func (a *Auth) IsAPIKey() bool { return a != nil && strings.TrimSpace(a.APIKey) != "" }
+
+// APIKeyValue 加锁读取 APIKey（与 AccessTokenValue 同款：出站头经此取值）。
+func (a *Auth) APIKeyValue() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.APIKey
+}
+
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
 func isGlobalDomain(d string) bool {
@@ -286,12 +300,25 @@ func isGlobalDomain(d string) bool {
 
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期/无 expiry）。
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
+	// API Key 账号没有可续期的会话：永远不刷新（否则保活任务会每天尝试刷新并把
+	// 空 refresh token 送去上游）。
+	if a.IsAPIKey() {
+		return false
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.ExpiresAt <= 0 {
 		return true
 	}
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
+}
+
+// tail8 取字符串末 8 个字符（不足则原样），用于 API Key 会话的 anonymous_ UID。
+func tail8(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[len(s)-8:]
 }
 
 // Parse 兼容两种磁盘形态：
@@ -305,6 +332,17 @@ func Parse(raw []byte) (*Auth, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		return nil, fmt.Errorf("storage_parse_error: %w", err)
+	}
+	// API Key 账号（WorkBuddy 个人页生成的 ck_/pt_… key）：与 OAuth 形态互斥，
+	// 两种磁盘形态都接受顶层 apiKey / api_key。
+	var kp struct {
+		Camel string `json:"apiKey"`
+		Snake string `json:"api_key"`
+	}
+	_ = json.Unmarshal(raw, &kp)
+	apiKey := strings.TrimSpace(kp.Camel)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(kp.Snake)
 	}
 	var a Auth
 	if _, nested := probe["auth"]; nested {
@@ -380,6 +418,20 @@ func Parse(raw []byte) (*Auth, error) {
 			Weight:       sanitizeWeight(f.Weight),
 		}
 	}
+	if apiKey != "" {
+		a.APIKey = apiKey
+		// key 同时作为 Bearer 与 X-API-Key 发送（见 headers.go），这里填进
+		// AccessToken 是为了复用既有出站链路；它不会被续期（NeedRefresh 恒 false）。
+		if strings.TrimSpace(a.AccessToken) == "" {
+			a.AccessToken = apiKey
+		}
+		// 官方 CLI 的 key 会话 UID：ACC_USER_ID 未设时取 anonymous_<key 末 8 位>。
+		if strings.TrimSpace(a.UID) == "" {
+			a.UID = "anonymous_" + tail8(apiKey)
+		}
+		a.RefreshToken = ""
+		a.ExpiresAt = 0
+	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
@@ -411,6 +463,11 @@ func (a *Auth) SaveAtomic() error {
 			"enterpriseId": a.EnterpriseID,
 			"nickname":     a.Nickname,
 		},
+	}
+	// API Key 账号：SaveAtomic 是整份重建，不写回 api_key 会在第一次落盘时
+	// 把账号变成「无 key 的空壳」。只在确实是 key 账号时写。
+	if a.APIKey != "" {
+		doc["api_key"] = a.APIKey
 	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。

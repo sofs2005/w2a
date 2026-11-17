@@ -190,7 +190,7 @@ func TestMultimodalTextPartOnly(t *testing.T) {
 		map[string]any{"type": "text", "text": ccIdentity},
 		imgPart,
 	}
-	out, changed := sanitizeContent(content)
+	out, changed := sanitizeContent(content, false)
 	if !changed {
 		t.Fatal("expected change")
 	}
@@ -431,10 +431,10 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		"You are Claude Code",        // 身份句（截断前缀即可命中）
 		"Main branch (",              // 注入指令句（截断前缀即可命中）
 		"You are a coding agent running in the Codex CLI", // Codex instructions 首段（截断前缀即可命中）
-		"github.com/anthropics/",     // 反馈句里的 Anthropic 仓库链接
-		"11128",                      // 上游反探测：裸数字错误码
-		"workspace root",         // DSH file-reference 提示词（2026-10-27 新增词）
-		"Tokens prefixed with @", // DSH file-reference 首句（2026-10-28 新增词，issue #321）
+		"github.com/anthropics/",                          // 反馈句里的 Anthropic 仓库链接
+		"11128",                                           // 上游反探测：裸数字错误码
+		"workspace root",                                  // DSH file-reference 提示词（2026-10-27 新增词）
+		"Tokens prefixed with @",                          // DSH file-reference 首句（2026-10-28 新增词，issue #321）
 	}
 	if len(sanitizeFeatures) != len(features) {
 		t.Fatalf("sanitizeFeatures 项数=%d want %d（快照与实现不同步，见测试头注释的验证步骤）", len(sanitizeFeatures), len(features))
@@ -505,7 +505,6 @@ func TestSanitizeLiteralByteExact(t *testing.T) {
 		}
 	}
 }
-
 
 // TestReasoningFieldSanitized reasoning 是思维链的另一形态字段，必须与
 // reasoning_content 同等净化。关键在于**净化顺序**：backfillReasoningContent
@@ -659,11 +658,11 @@ func TestDshWebGuiBlockRewritten(t *testing.T) {
 	if strings.Contains(out, "DeepSeek Harness Web GUI") {
 		t.Errorf("指纹残留: %q", out)
 	}
-	if !strings.Contains(out, "DeepSeek-Harness Web GUI") {
+	if !strings.Contains(out, "Web GUI") {
 		t.Errorf("改写文本缺失: %q", out)
 	}
 	// 除品牌短语外内容不得改动（这段是工具/行为契约）。
-	if restored := strings.ReplaceAll(out, "DeepSeek-Harness Web GUI", "DeepSeek Harness Web GUI"); restored != dshWebGuiBlock {
+	if restored := strings.ReplaceAll(out, "Web GUI", "DeepSeek Harness Web GUI"); restored != dshWebGuiBlock {
 		t.Errorf("段落其他内容被改动:\n 得到 %q\n 期望 %q", restored, dshWebGuiBlock)
 	}
 }
@@ -716,7 +715,7 @@ func TestPrepareBodySanitizesDshWebGui(t *testing.T) {
 	if strings.Contains(string(out), "DeepSeek Harness Web GUI") {
 		t.Errorf("PrepareBody 未净化 Web GUI 指纹: %s", out)
 	}
-	if !strings.Contains(string(out), "DeepSeek-Harness Web GUI") {
+	if !strings.Contains(string(out), "Web GUI") {
 		t.Errorf("替换文本缺失: %s", out)
 	}
 }

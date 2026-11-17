@@ -25,12 +25,12 @@ var chatLogEnabled = true
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
 type chatStat struct {
-	seq    int64 // 进程级请求序号，进入 handler 时分配；同时作为响应头 X-Request-Id
-	start  time.Time
-	model  string
-	mode   string // "stream" | "sync"
-	uid    string // 完整 uid，展示时只取前 8 位
-	nick   string // 账号昵称（auth.Auth.Nickname，登录时落盘）；空则只显示 uid8
+	seq   int64 // 进程级请求序号，进入 handler 时分配；同时作为响应头 X-Request-Id
+	start time.Time
+	model string
+	mode  string // "stream" | "sync"
+	uid   string // 完整 uid，展示时只取前 8 位
+	nick  string // 账号昵称（auth.Auth.Nickname，登录时落盘）；空则只显示 uid8
 	// realm 本次请求实际落在哪个域的账号上（acct.Realm()，"cn"/"global"）。
 	// 空 = 未被路由（选号失败 503、模型名解析不出）——stats 的「按域分账」靠它，
 	// 留空而不是猜一个域，见 metricsStore 注释。

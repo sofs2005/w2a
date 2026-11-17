@@ -68,6 +68,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// Kimi 系模型对「只有 enum、没有 type」的工具属性做严格校验（上游 11133）：
 	// 在出站前补 type，属于「让请求通过」的安全网，与 normalizeToolPatterns 同口径。
 	normalizeToolEnumTypes(obj)
+	// 其余严格要求（根 union/tuple items/布尔 schema/多类型 enum 等，见 toolschema.go）
+	// 统一在发送前修好：这些拒绝与账号无关，换号只会把同一个 400 放大 N 倍。
+	fitToolShapes(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
@@ -97,10 +100,14 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
 	backfillReasoningContent(obj)
+	// 把客户端回传的思考痕迹统一提升到 `reasoning`（见 liftReasoning）。
+	liftReasoning(obj)
 	if sanitize {
 		if msgs, ok := obj["messages"].([]any); ok {
 			sanitizeMessages(msgs)
 		}
+		// 工具描述同样是 harness 自己写的文本（见 sanitizeToolDescriptions）。
+		sanitizeToolDescriptions(obj)
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -330,6 +337,72 @@ func normalizeRoles(obj map[string]any) {
 			log.Printf("[upstream] role normalized developer->system idx=%d", i)
 		}
 	}
+}
+
+// liftReasoning 把上一轮 assistant 消息里的思考痕迹搬到上游真正读取的 `reasoning`
+// 字段，且不覆盖已有的非空 reasoning。
+//
+// 依据：官方客户端从响应读取思考优先取 `reasoning`、再回落 `reasoning_content`
+// （客户端 bundle 里的 `"string"==typeof I.reasoning?I.reasoning:...reasoning_content`）；
+// 社区实测（2026-10-27，www.workbuddy.ai）也表明上游只把 `reasoning` 当作历史思考，
+// `reasoning_content` 被丢弃——kimi-k2.6 / minimax-m3 都收不到 reasoning_content 里的暗号，
+// 换成 reasoning 就能收到。
+//
+// 所以客户端（Grok Build、DeepSeek 系、本站自己的回复）回传的 reasoning_content /
+// reasoning_details 都要抬成 reasoning；原字段保留不动（上游忽略，删了反而破坏
+// DeepSeek 的 requiresReasoningContentOnAssistantMessages 形态）。只动 assistant，
+// 不动用户与 tool 结果。
+func liftReasoning(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
+		if r, ok := msg["reasoning"].(string); ok && r != "" {
+			continue // 已有非空 reasoning：不覆盖（显式内容优先）
+		}
+		text := ""
+		if rc, ok := msg["reasoning_content"].(string); ok && rc != "" {
+			text = rc
+		}
+		if text == "" {
+			text = reasoningDetailsText(msg["reasoning_details"])
+		}
+		if text != "" {
+			msg["reasoning"] = text
+		}
+	}
+}
+
+// reasoningDetailsText 把 OpenRouter 形态的 reasoning_details 数组拼成纯文本：
+// 每项取 text，缺失时取 summary；非数组/无非空项 → 空串。
+func reasoningDetailsText(v any) string {
+	list, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, raw := range list {
+		d, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if s, ok := d["text"].(string); ok && s != "" {
+			b.WriteString(s)
+			continue
+		}
+		if s, ok := d["summary"].(string); ok && s != "" {
+			b.WriteString(s)
+		}
+	}
+	return b.String()
 }
 
 // normalizeImageURL 兼容 OpenAI chat 多模态内容的两种 image_url 写法。

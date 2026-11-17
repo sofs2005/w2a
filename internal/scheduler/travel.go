@@ -94,7 +94,7 @@ func (s *Scheduler) runTravel(ctx context.Context) {
 			log.Printf("travel %s: skip (global realm)", logfmt.Label(st.UID, st.Nickname))
 			continue
 		}
-		if a.IsEnterprise() {
+		if a.IsEnterprise() || a.IsAPIKey() {
 			// 企业版门控：猫猫旅行属个人成长体系（/activity/growth/buddy/*），
 			// 企业版上游 403「growth system is only available for personal users」
 			// （见 auth.IsEnterprise 实测注释）。与 IsGlobal 正交，须单独判；
@@ -208,7 +208,7 @@ func (s *Scheduler) travelAdoptForce(a *auth.Auth) {
 	if a.IsGlobal() {
 		return // D4 门控：国际版任务中心没有 first_buddy / chat_5，不发起领养调用
 	}
-	if a.IsEnterprise() {
+	if a.IsEnterprise() || a.IsAPIKey() {
 		return // 企业版无个人成长体系（growth system is only available for personal users）
 	}
 	buddy, err := s.snapshot().Upstream.BuddyInfo(a)

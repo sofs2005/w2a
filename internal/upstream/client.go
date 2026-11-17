@@ -351,7 +351,7 @@ var accountFaultRule = errorRule{kind: ErrAccountFault, mode: matchFold, pattern
 //
 // 只在 400/404/413 请求级状态码上判（429+11115 概率极低且属限流语义优先，
 // 5xx 属服务端故障优先）——与 IsModelBlocked 的 400/404 口径同理。误判代价
-//（好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
+// （好 body 被归 prompt_too_long）：不罚号 + 不轮转 + 透传原文，客户端看到
 // 上游原文可自行排查，代价可控。
 var promptTooLongRule = errorRule{kind: ErrPromptTooLong, mode: matchFold, patterns: []string{
 	`"code":11115`,
@@ -386,7 +386,7 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 错误风暴（429 轰炸）时尤甚。模式串均为纯常量，与 sanitize.go 的包级
 // 预编译先例保持一致。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -1153,6 +1153,10 @@ func (c *Client) chatBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalChatBase()
 	}
+	// 云托管企业的账号必须发到自己的域（见 endpoint.go）。
+	if ep := cloudHostedEndpoint(a); ep != "" {
+		return ep
+	}
 	return c.ChatBaseCN
 }
 
@@ -1364,6 +1368,9 @@ func (c *Client) billingBase(a *auth.Auth) string {
 	if c.globalOn(a) {
 		return c.globalBillingBase()
 	}
+	if ep := cloudHostedEndpoint(a); ep != "" {
+		return ep
+	}
 	return c.BillingBaseCN
 }
 
@@ -1574,6 +1581,25 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// 官方从没发过」的自造形态，是 11-128 渠道校验最直接的特征。开头 system 的兜底
 	// 在 prepareBody 收口处（见其注释），补的是官方模板原文。
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	// Claude 模型在 CN 域改走 Anthropic Messages：chat 端点的档位几乎不生效，而
+	// Messages 的 output_config.effort 实测差 5 倍输出（见 messages.go 文件头）。
+	if messagesNative(a, modelOfBody(prepared)) {
+		rc, status, raw, merr := c.chatMessagesStream(ctx, a, prepared, clientIP, meta)
+		switch {
+		case errors.Is(merr, errMessagesNotApplicable):
+			// 这条请求转换不过去（body 异常 / 没有可用的 user 消息）：走 chat，
+			// 不把它当成上游失败。
+			log.Printf("WARN: [upstream] messages acct=%s model=%s: not convertible, falling back to chat",
+				logfmt.Label(a.UID, a.Nickname), modelOfBody(prepared))
+		case status != http.StatusNotFound && status != http.StatusMethodNotAllowed:
+			// 路由不存在（404/405）时回落到 chat：宁可少拿档位收益，也不能整类请求失败。
+			// 其余失败（400/401/5xx）按 Messages 的结论返回，避免把请求重放成两份。
+			return rc, status, raw, merr
+		default:
+			log.Printf("WARN: [upstream] messages acct=%s model=%s: route unavailable (%d), falling back to chat",
+				logfmt.Label(a.UID, a.Nickname), modelOfBody(prepared), status)
+		}
+	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
@@ -2088,6 +2114,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	}
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	applyAPIKeyHeader(req, a)
 	client, cerr := c.clientFor(a, false)
 	if cerr != nil {
 		return nil, cerr
@@ -2306,6 +2333,7 @@ func (c *Client) fetchV3Models(a *auth.Auth) ([]ModelInfo, error) {
 	// （Bearer + web UA → 400 code 12403，见 global-models-missing.md）。
 	c.CommonHeaders(req, a)
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	applyAPIKeyHeader(req, a)
 	client, cerr := c.clientFor(a, false)
 	if cerr != nil {
 		return nil, cerr
