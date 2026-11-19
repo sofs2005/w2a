@@ -18,16 +18,18 @@ const (
 	// （空 = 按 realm 取内置）。
 	defaultClientVersionCN = "5.11.3"
 	// defaultClientVersionGlobal 国际版出站 WorkBuddy 客户端版本段。对齐官方国际版
-	// 分发包实测版本（~/.workbuddy-ai/last-launch.json version = 5.9.4，2026-11-01）。
-	// 注：5.9.4 与 5.9.3 的 CLI 包仅构建期临时路径不同，请求头逻辑零变化。
-	defaultClientVersionGlobal = "5.9.4"
+	// 分发包实测版本（D:\PG\workbuddyAI install-manifest appVersion = 5.11.4，
+	// ~/.workbuddy-ai/last-launch.json version = 5.11.4，2026-11-19）。
+	// 注：5.11.4 与 CN 5.11.3 的 CLI dist 字节差异只有构建期 UUID/临时路径（16 字节），
+	// 请求头逻辑零变化。
+	defaultClientVersionGlobal = "5.11.4"
 	// defaultCliVersionCN / defaultCliVersionGlobal 出站 UA 中 `CLI/<ver>` 段版本。
 	// 取自各自 cli/package.json 顶层 version 字段（5.9.3 起 publishConfig.customPackage
-	// 已被移除，版本只读顶层）。2026-11-16 起两域分叉：CN 5.11.3 内置 CLI 2.176.0，
-	// global 5.9.4 仍 2.165.0——此前两域同为 2.165.0，故曾是单常量。
+	// 已被移除，版本只读顶层）。2026-11-19 起国际版 5.11.4 内置 CLI 也升到 2.176.0，
+	// 两域重新同版；保留按 realm 的两个常量，避免下次分叉时再拆。
 	// config upstream.cli_version 可覆盖（空 = 按 realm 取内置）。
 	defaultCliVersionCN     = "2.176.0"
-	defaultCliVersionGlobal = "2.165.0"
+	defaultCliVersionGlobal = "2.176.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -40,7 +42,7 @@ const (
 	// 拼出最终 UA（dist/codebuddy-lite-wb.mjs: buildUserAgent）。
 	// 关键：applicationName 直接取自各自 product.json，**两域不同值**——
 	//   CN     product.json: "applicationName": "WorkBuddy"     → WorkBuddy/5.11.3
-	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.9.4
+	//   global product.json: "applicationName": "workbuddy-ai"  → workbuddy-ai/5.11.4
 	// 而 platform 段两域都硬编码 "WorkBuddy"（sidecar-manager.js: var mt=`WorkBuddy`），
 	// 所以只有第二段随 realm 变。此前按「两域 server.js 逐字节相同」推断第二段恒为
 	// WorkBuddy 是搞错了链路：server.js 的 buildVlmGatewayHeaders 只服务本地 VLM 技能
@@ -120,7 +122,7 @@ func originRefererFor(a *auth.Auth) string {
 }
 
 // defaultClientVersionFor 按账号 realm 返回内置客户端版本段：
-// global → 5.9.4，cn（含 a 为 nil / 全局开关未开）→ 5.11.3。
+// global → 5.11.4，cn（含 a 为 nil / 全局开关未开）→ 5.11.3。
 func defaultClientVersionFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		return defaultClientVersionGlobal
@@ -138,7 +140,7 @@ func (c *Client) clientVersion(a *auth.Auth) string {
 }
 
 // defaultCliVersionFor 按账号 realm 返回内置 CLI 版本段：
-// global → 2.165.0，cn（含 a 为 nil / 全局开关未开）→ 2.176.0。
+// global → 2.176.0，cn（含 a 为 nil / 全局开关未开）→ 2.176.0。
 func defaultCliVersionFor(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
 		return defaultCliVersionGlobal
@@ -207,7 +209,7 @@ func (c *Client) userAgent(a *auth.Auth) string {
 // 为 `WorkBuddy/<pkgVer>`，RestOperations 层的 CLI 扩展段被业务层固化覆盖掉）。
 // 默认（client_name 空）即生效（伪造官方桌面端指纹）；
 // 显式 client_name="SaaS" 则不设 UA（还原旧行为，Go 默认 UA）。
-// 版本段按账号 realm 取（CN 5.11.3 / global 5.9.4），与 chat 的 UA 保持同域一致。
+// 版本段按账号 realm 取（CN 5.11.3 / global 5.11.4），与 chat 的 UA 保持同域一致。
 func (c *Client) billingUA(a *auth.Auth) string {
 	if c == nil || c.attributionClientName() == "SaaS" {
 		return ""

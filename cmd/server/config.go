@@ -163,11 +163,11 @@ type Config struct {
 		UserAgent string `json:"user_agent"`
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与白名单
 		// 头组 X-IDE-Version 的取值）。空 = 按账号 realm 取内置默认（对齐官方分发包：
-		// 当前 CN 5.11.3 / global 5.9.4，两域不同步）；显式配置（如升级后的桌面包版本）
+		// 当前 CN 5.11.3 / global 5.11.4，两域不同步）；显式配置（如升级后的桌面包版本）
 		// 则对两域统一随配置走。
 		ClientVersion string `json:"client_version"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 按账号 realm 取内置默认（对齐官方内置 CLI
-		// CN 2.176.0 / global 2.165.0，两域已分叉）；显式配置则随配置走。
+		// CN 2.176.0 / global 2.176.0，2026-11-19 重新同版）；显式配置则随配置走。
 		CliVersion string `json:"cli_version"`
 		// StainlessRuntimeVersion 出站 `X-Stainless-Runtime-Version`（官方 chat 走 OpenAI
 		// Node SDK，SDK buildHeaders 会带 process.version）。空 = 内置默认

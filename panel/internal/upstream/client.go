@@ -51,9 +51,9 @@ const (
 	BillingBaseGlobal = "https://www.workbuddy.ai"
 
 	// cliVersionCN / cliVersionGlobal 官方内置 CLI 版本（cli/package.json 顶层 version）。
-	// 2026-11-16 起两域分叉：CN 5.11.3 内置 2.176.0，global 5.9.4 仍 2.165.0。
+	// 2026-11-19 起国际版 5.11.4 内置 CLI 也升到 2.176.0，两域重新同版。
 	cliVersionCN     = "2.176.0"
-	cliVersionGlobal = "2.165.0"
+	cliVersionGlobal = "2.176.0"
 	originCN         = "https://www.codebuddy.cn"
 	originGlobal     = "https://www.workbuddy.ai"
 
@@ -306,10 +306,10 @@ func regionBases(region Region) (chatBase, billingBase, origin string) {
 
 // 官方桌面端 UA 的版本段（与 workbuddy2api 网关的 defaultClientVersionCN /
 // defaultClientVersionGlobal / defaultCliVersionCN / defaultCliVersionGlobal 同值）。
-// 两域不同步发布（2026-11-16 实测 CN 5.11.3 / global 5.9.4），故按 region 取值。
+// 两域不同步发布（2026-11-19 实测 CN 5.11.3 / global 5.11.4），故按 region 取值。
 const (
 	desktopClientVersionCN     = "5.11.3"
-	desktopClientVersionGlobal = "5.9.4"
+	desktopClientVersionGlobal = "5.11.4"
 )
 
 // cliUAFor 独立 CLI 的出站 UA（非桌面端三段式）：`CLI/<ver> CodeBuddy/<ver>`。
@@ -333,7 +333,7 @@ const promoFetchTimeout = 15 * time.Second
 // 两段品牌都恒为 `WorkBuddy`：官方分发包 buildVlmGatewayHeaders 硬编码
 // `[WorkBuddy/${r}, WorkBuddy/${r}]`，与 productName（global 为 `WorkBuddy AI`）
 // 无关，且两域 main/server.js 逐字节相同（md5 8f8525cb…，2026-10-19 复验）。
-// 版本段仍按 realm 切（CN 5.11.3 / global 5.9.4；陈旧版本段会被上游风控挡）。
+// 版本段仍按 realm 切（CN 5.11.3 / global 5.11.4；陈旧版本段会被上游风控挡）。
 func desktopUA(region Region) string {
 	version := desktopClientVersionCN
 	cli := cliVersionCN

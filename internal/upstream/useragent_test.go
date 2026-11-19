@@ -154,7 +154,7 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 // --- A 段：UA 对齐官方 WorkBuddy 三段式 ---
 
 const (
-	// CN 账号默认（5.11.3 / CLI 2.176.0）；global 见 headers_global_test.go 的 globalUAString（5.9.4 / CLI 2.165.0）。
+	// CN 账号默认（5.11.3 / CLI 2.176.0）；global 见 headers_global_test.go 的 globalUAString（5.11.4 / CLI 2.176.0）。
 	defaultUAString      = "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"
 	explicitString       = "MyCustomAgent/3.1"
 	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.176.0"

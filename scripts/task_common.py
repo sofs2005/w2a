@@ -46,7 +46,7 @@ PATH_REPORT         = "/v2/report"
 PATH_CHAT           = "/v2/chat/completions"
 
 # CN 内置 CLI 版本（cli/package.json version；2026-11-16 起 5.11.3 对应 2.176.0，
-# 与 global 5.9.4 的 2.165.0 分叉）。本套任务脚本是 CN-only（见 auth_is_global）。
+# global 5.11.4 自 2026-11-19 起同为 2.176.0）。本套任务脚本是 CN-only（见 auth_is_global）。
 CLIENT_UA = "CLI/2.176.0 CodeBuddy/2.176.0"
 
 
